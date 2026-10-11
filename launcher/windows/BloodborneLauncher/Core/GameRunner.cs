@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Text;
 
@@ -12,6 +12,10 @@ namespace BloodborneLauncher.Core
     public sealed class GameRunner
     {
         private Process? _process;
+        private StreamWriter? _log;
+
+        /// <summary>Everything the last session printed: logs\last_session.log in the engine folder.</summary>
+        public static string SessionLog => Path.Combine(Paths.IsPortDir(Paths.PortDir) ? Paths.PortDir : Paths.ConfigDir, "logs", "last_session.log");
 
         public bool Running => _process != null;
         public DateTime StartedAt { get; private set; }
@@ -62,13 +66,15 @@ namespace BloodborneLauncher.Core
             try
             {
                 var process = new Process { StartInfo = info, EnableRaisingEvents = true };
-                process.OutputDataReceived += (_, e) => { if (e.Data != null) Output?.Invoke(e.Data); };
-                process.ErrorDataReceived += (_, e) => { if (e.Data != null) Output?.Invoke(e.Data); };
+                OpenLog();
+                process.OutputDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
+                process.ErrorDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
                 process.Exited += (_, _) =>
                 {
                     var code = -1;
                     try { process.WaitForExit(); code = process.ExitCode; } catch { /* gone */ }
                     _process = null;
+                    CloseLog();
                     Exited?.Invoke(code);
                 };
                 process.Start();
@@ -81,7 +87,38 @@ namespace BloodborneLauncher.Core
             catch (Exception e)
             {
                 _process = null;
+                CloseLog();
                 return "Could not start: " + e.Message;
+            }
+        }
+
+        private void OpenLog()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(SessionLog)!);
+                var stream = new FileStream(SessionLog, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                _log = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+                _log.WriteLine($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  Bloodborne Launcher {Updater.Current}");
+            }
+            catch { _log = null; /* read-only folder: the Log tab still has it */ }
+        }
+
+        private void Emit(string line)
+        {
+            lock (this)
+            {
+                try { _log?.WriteLine(line); } catch { /* disk full */ }
+            }
+            Output?.Invoke(line);
+        }
+
+        private void CloseLog()
+        {
+            lock (this)
+            {
+                _log?.Dispose();
+                _log = null;
             }
         }
 

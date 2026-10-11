@@ -189,7 +189,9 @@ namespace BloodborneLauncher.Views
                 right.MinWidth = 130;
 
                 var row = Card(SymbolRegular.Trophy24, trophy.Name, hint, right, out _);
-                var symbol = (SymbolIcon)row.Icon!;
+                var symbol = row.Icon;
+                row.ShowIcon = true;
+                SetHint(row.Hint, hint);
                 symbol.Filled = earned;
                 symbol.Foreground = earned
                     ? new SolidColorBrush(TrophyToast.GradeColor(trophy.Grade))

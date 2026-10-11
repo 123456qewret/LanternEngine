@@ -1,6 +1,11 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
 using Wpf.Ui.Controls;
 using Button = Wpf.Ui.Controls.Button;
 using TextBlock = System.Windows.Controls.TextBlock;
@@ -17,22 +22,23 @@ namespace BloodborneLauncher.Views
 
         private Prompt(string title, string? message, IReadOnlyList<Field> fields, string ok, bool showCancel)
         {
-            Owner = Application.Current.MainWindow;
-            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            var owner = Application.Current.MainWindow is { IsLoaded: true } main && main.WindowState != WindowState.Minimized ? main : null;
+            Owner = owner;
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
             AllowsTransparency = true;
-            Background = System.Windows.Media.Brushes.Transparent;
+            Background = Brushes.Transparent;
             ShowInTaskbar = false;
-            SizeToContent = SizeToContent.Height;
-            Width = 480;
 
             var stack = new StackPanel();
-            stack.Children.Add(LauncherPage.Text(title, "PageTitle"));
+            var heading = LauncherPage.Text(title, "PageTitle");
+            stack.Children.Add(heading);
             if (!string.IsNullOrEmpty(message))
             {
                 var text = LauncherPage.Text(message, "Muted");
-                text.Margin = new Thickness(0, 6, 0, 4);
+                text.FontSize = 13;
+                text.Margin = new Thickness(0, 8, 0, 4);
+                text.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
                 stack.Children.Add(text);
             }
             foreach (var field in fields)
@@ -53,33 +59,66 @@ namespace BloodborneLauncher.Views
                 stack.Children.Add(box);
             }
 
-            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 18, 0, 0) };
+            // Two equal-width buttons along the bottom, the action on the right.
+            var buttons = new UniformGrid { Rows = 1, Margin = new Thickness(0, 22, 0, 0), HorizontalAlignment = HorizontalAlignment.Right };
             if (showCancel)
             {
-                var cancel = new Button { Content = "Cancel", Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
+                var cancel = new Button { Content = "Cancel", Margin = new Thickness(0, 0, 8, 0), IsCancel = true, MinWidth = 110, HorizontalAlignment = HorizontalAlignment.Stretch };
                 cancel.Click += (_, _) => DialogResult = false;
                 buttons.Children.Add(cancel);
             }
-            var accept = new Button { Content = ok, Appearance = ControlAppearance.Primary, IsDefault = true };
+            var accept = new Button { Content = ok, Appearance = ControlAppearance.Primary, IsDefault = true, MinWidth = 110, HorizontalAlignment = HorizontalAlignment.Stretch };
             accept.Click += (_, _) => DialogResult = true;
             buttons.Children.Add(accept);
             stack.Children.Add(buttons);
 
             var card = new Border
             {
-                Padding = new Thickness(22, 18, 22, 18),
-                CornerRadius = new CornerRadius(8),
+                Width = 440,
+                Padding = new Thickness(24, 20, 24, 20),
+                CornerRadius = new CornerRadius(16),
                 BorderThickness = new Thickness(1),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
                 Child = stack,
+                Effect = new DropShadowEffect { BlurRadius = 40, ShadowDepth = 8, Direction = 270, Opacity = 0.55, Color = Colors.Black },
+                RenderTransformOrigin = new Point(0.5, 0.5),
+                RenderTransform = new ScaleTransform(0.96, 0.96),
             };
-            card.SetResourceReference(Border.BackgroundProperty, "CardBackgroundFillColorDefaultBrush");
-            card.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
-            card.MouseLeftButtonDown += (_, e) => { if (e.OriginalSource is Border or StackPanel) DragMove(); };
-            Content = card;
+            card.SetResourceReference(Border.BackgroundProperty, "DialogBackgroundBrush");
+            card.SetResourceReference(Border.BorderBrushProperty, "DialogStrokeBrush");
             SetResourceReference(ForegroundProperty, "TextFillColorPrimaryBrush");
 
+            if (owner != null)
+            {
+                // Cover the launcher with a dimmed layer and float the card in the middle of it.
+                WindowStartupLocation = WindowStartupLocation.Manual;
+                var scrim = new Border { CornerRadius = new CornerRadius(8), Child = card };
+                scrim.SetResourceReference(Border.BackgroundProperty, "DialogScrimBrush");
+                Content = scrim;
+                CoverOwner(owner);
+            }
+            else
+            {
+                WindowStartupLocation = WindowStartupLocation.CenterScreen;
+                SizeToContent = SizeToContent.WidthAndHeight;
+                card.Margin = new Thickness(24);
+                card.MouseLeftButtonDown += (_, e) => { if (e.OriginalSource is Border or StackPanel) DragMove(); };
+                Content = card;
+            }
+
+            Opacity = 0;
+            if (SnapshotPath != null) ShowActivated = false;
             Loaded += (_, _) =>
             {
+                if (SnapshotPath != null && owner != null) Snapshot(owner, card);
+                var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+                var time = TimeSpan.FromMilliseconds(140);
+                BeginAnimation(OpacityProperty, new DoubleAnimation(1, time) { EasingFunction = ease });
+                var scale = (ScaleTransform)card.RenderTransform;
+                scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, time) { EasingFunction = ease });
+                scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, time) { EasingFunction = ease });
+
                 if (_boxes.Count > 0)
                 {
                     _boxes[0].Focus();
@@ -87,6 +126,45 @@ namespace BloodborneLauncher.Views
                 }
             };
             PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) DialogResult = false; };
+        }
+
+        /// <summary>--test-prompt &lt;png&gt;: where to save a picture of the first dialog over the launcher, then close.</summary>
+        internal static string? SnapshotPath;
+
+        private void Snapshot(Window owner, Border card)
+        {
+            var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                var width = (int)owner.ActualWidth;
+                var height = (int)owner.ActualHeight;
+                var shot = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+                shot.Render((Visual)owner.Content);
+                var layer = new DrawingVisual();
+                using (var dc = layer.RenderOpen())
+                    dc.DrawRectangle(new VisualBrush((Visual)Content), null, new Rect(0, 0, width, height));
+                shot.Render(layer);
+                var png = new PngBitmapEncoder();
+                png.Frames.Add(BitmapFrame.Create(shot));
+                using (var file = System.IO.File.Create(SnapshotPath!))
+                    png.Save(file);
+                DialogResult = false;
+                Application.Current.Shutdown();
+            };
+            timer.Start();
+        }
+
+        /// <summary>Places this window exactly over the owner's client area (in device-independent units).</summary>
+        private void CoverOwner(Window owner)
+        {
+            var source = PresentationSource.FromVisual(owner);
+            var toDip = source?.CompositionTarget?.TransformFromDevice ?? Matrix.Identity;
+            var topLeft = toDip.Transform(owner.PointToScreen(new Point(0, 0)));
+            Left = topLeft.X;
+            Top = topLeft.Y;
+            Width = owner.ActualWidth;
+            Height = owner.ActualHeight;
         }
 
         /// <summary>The fields' values, or null if cancelled.</summary>

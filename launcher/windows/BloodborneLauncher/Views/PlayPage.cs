@@ -14,7 +14,7 @@ namespace BloodborneLauncher.Views
     public sealed class PlayPage : LauncherPage
     {
         private readonly InfoBar _problem;
-        private readonly CardControl _engineCard;
+        private readonly SettingRow _engineCard;
         private readonly TextBlock _gameHint, _userHint, _statGame, _statUpscaler, _statResolution, _statFps, _statVia;
         private readonly SymbolIcon _gameIcon;
         private readonly Button _play, _resetUser;
@@ -24,7 +24,16 @@ namespace BloodborneLauncher.Views
         public PlayPage() : base("Play", "Check the game folder, choose where saves go, and start Bloodborne.")
         {
             // ==================== Summary + Play ====================
-            var summary = new Card { Margin = new Thickness(0, 22, 0, 0) };
+            // A glass pane in the Modern layout, a card in Classic.
+            var summary = new Border
+            {
+                Margin = new Thickness(0, 14, 0, 0),
+                Padding = new Thickness(18, 16, 18, 16),
+                CornerRadius = new CornerRadius(SettingRow.Classic ? 8 : 16),
+                BorderThickness = new Thickness(1),
+            };
+            summary.SetResourceReference(Border.BackgroundProperty, "GlassPaneBrush");
+            summary.SetResourceReference(Border.BorderBrushProperty, "GlassPaneStrokeBrush");
             var stack = new StackPanel();
             var stats = new UniformGrid { Rows = 1 };
             stats.Children.Add(Stat("Game", out _statGame));
@@ -53,7 +62,7 @@ namespace BloodborneLauncher.Views
             Grid.SetColumn(_playStatus, 1);
             actions.Children.Add(_playStatus);
             stack.Children.Add(actions);
-            summary.Content = stack;
+            summary.Child = stack;
             Body.Children.Add(summary);
 
             _problem = new InfoBar { IsClosable = false, IsOpen = false, Margin = new Thickness(0, 12, 0, 0) };
@@ -73,7 +82,8 @@ namespace BloodborneLauncher.Views
             var gameCard = Card(SymbolRegular.Folder24, "Game folder", "", Row(
                 SmallButton("Browse", SymbolRegular.FolderOpen24, (_, _) => ChooseGame()),
                 IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(GameEnvironment.GameDir(S)))), out _gameHint);
-            _gameIcon = (SymbolIcon)gameCard.Icon!;
+            _gameIcon = gameCard.Icon;
+            gameCard.ShowIcon = true;
             Add(gameCard);
 
             _resetUser = IconButton(SymbolRegular.ArrowUndo24, "Back to the default folder", (_, _) =>

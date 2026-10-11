@@ -72,7 +72,14 @@ namespace BloodborneLauncher.Core
         public static readonly Choice[] MenuLanguages =
         {
             new("English", "en"),
-            new("Russian", "ru"),
+            new("Español", "es"),
+            new("Português (Brasil)", "pt_BR"),
+            new("Français", "fr"),
+            new("Deutsch", "de"),
+            new("Italiano", "it"),
+            new("Polski", "pl"),
+            new("Türkçe", "tr"),
+            new("Русский", "ru"),
         };
 
         public static readonly Choice[] PresentModes =

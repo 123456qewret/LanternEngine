@@ -31,6 +31,24 @@ namespace BloodborneLauncher
             ws.GameStateChanged += UpdatePlayButton;
             ws.Initialise();
 
+            // Layout, read once at start (Settings › Layout restarts the launcher to switch).
+            var args = Environment.GetCommandLineArgs();
+            var forced = Array.IndexOf(args, "--layout") is var at and >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+            SettingRow.Classic = (forced ?? ws.Settings.Str("ui_layout")) == "classic";
+            if (Array.IndexOf(args, "--test-prompt") is var shot and >= 0 && shot + 1 < args.Length)
+            {
+                Prompt.SnapshotPath = args[shot + 1];
+                ShowActivated = false;
+                ShowInTaskbar = false;
+                WindowStartupLocation = WindowStartupLocation.Manual;
+                Left = -32000;
+                Top = -32000;
+            }
+            Sidebar.Visibility = SettingRow.Classic ? Visibility.Visible : Visibility.Collapsed;
+            TabStrip.Visibility = SettingRow.Classic ? Visibility.Collapsed : Visibility.Visible;
+            if (!SettingRow.Classic)
+                ApplyGlass();
+
             var version = typeof(MainWindow).Assembly.GetName().Version;
             VersionText.Text = version == null ? "" : $"v{version.Major}.{version.Minor}.{version.Build}";
 
@@ -46,11 +64,15 @@ namespace BloodborneLauncher
                 if (ws.Settings.Bool("check_updates"))
                     _ = ws.CheckForUpdatesAsync(quiet: true);
                 await Task.Yield();
-                PlayItem.IsChecked = true;
+                (SettingRow.Classic ? ClassicPlay : PlayItem).IsChecked = true;
                 UpdatePlayButton();
                 // --test-trophy: a sample notification, to check how it looks over the game.
                 if (Environment.GetCommandLineArgs().Contains("--test-trophy"))
                     TrophyToast.Announce(TrophyTracker.ById[14]);
+                // --test-prompt <png>: a picture of a sample dialog over the launcher, drawn off-screen.
+                if (Prompt.SnapshotPath != null)
+                    Dispatcher.BeginInvoke(() => Prompt.Confirm("Switch layout", "The launcher restarts to change its layout.", "Restart now"),
+                        System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 ws.Log(Paths.IsPortDir(Paths.PortDir)
                         ? $"Bloodborne Launcher ready. Engine: {Paths.PortDir}"
                         : "Bloodborne Launcher ready. Choose the engine folder in Settings.",
@@ -59,6 +81,39 @@ namespace BloodborneLauncher
             Closing += OnClosing;
         }
 
+        /// <summary>
+        /// Modern layout: glass panes over the game's own artwork. Glass.xaml recolours the shared
+        /// brushes; the backdrop is the dump's sce_sys\pic1.png (or pic0), else the bundled art.
+        /// </summary>
+        private void ApplyGlass()
+        {
+            Application.Current.Resources.MergedDictionaries.Add(new ResourceDictionary
+            {
+                Source = new Uri("pack://application:,,,/Themes/Glass.xaml", UriKind.Absolute),
+            });
+            try
+            {
+                var image = new System.Windows.Media.Imaging.BitmapImage();
+                image.BeginInit();
+                image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                image.DecodePixelWidth = 960; // blurred anyway
+                var game = GameEnvironment.GameDir(Workspace.Current.Settings);
+                var art = new[] { "pic1.png", "pic0.png" }
+                    .Select(n => System.IO.Path.Combine(game, "sce_sys", n))
+                    .FirstOrDefault(System.IO.File.Exists);
+                image.UriSource = art != null
+                    ? new Uri(art, UriKind.Absolute)
+                    : new Uri("pack://application:,,,/Assets/backdrop.jpg", UriKind.Absolute);
+                image.EndInit();
+                BackdropImage.Source = image;
+                BackdropImage.Visibility = Visibility.Visible;
+                BackdropShade.Visibility = Visibility.Visible;
+            }
+            catch
+            {
+                // No artwork: the glass sits on the plain dark background.
+            }
+        }
         /// <summary>A wider resize border than FluentWindow's 4px, and the top strip handed back
         /// to Windows as a real caption.</summary>
         protected override void SetWindowChrome()
@@ -114,22 +169,34 @@ namespace BloodborneLauncher
             PageFrame.Navigate(page);
             page.OnShown();
 
-            var name = (item.Content as Panel)?.Children.OfType<System.Windows.Controls.TextBlock>().FirstOrDefault()?.Text;
+            var name = item.Content as string ??
+                       (item.Content as Panel)?.Children.OfType<System.Windows.Controls.TextBlock>().FirstOrDefault()?.Text;
             TitlePage.Text = string.IsNullOrEmpty(name) ? "" : $" — {name}";
         }
 
+        /// <summary>Shows a page: a tab, or one of More's ("online", "output", "mods", "advanced").</summary>
         public void Show(string page)
         {
-            var item = page switch
-            {
-                "output" => OutputItem,
-                "online" => OnlineItem,
-                "controls" => ControlsItem,
-                _ => PlayItem,
-            };
+            var item = SettingRow.Classic
+                ? page switch
+                {
+                    "output" => ClassicOutput,
+                    "online" => ClassicOnline,
+                    "mods" => ClassicMods,
+                    "controls" => ClassicControls,
+                    _ => ClassicPlay,
+                }
+                : page switch
+                {
+                    "output" or "online" or "mods" or "advanced" => MoreItem,
+                    "controls" => ControlsItem,
+                    _ => PlayItem,
+                };
             if (item.IsChecked == true)
                 SidebarItem_Checked(item, new RoutedEventArgs());
             item.IsChecked = true;
+            if (item == MoreItem && _pages.TryGetValue(typeof(MorePage), out var more))
+                ((MorePage)more).ShowSection(page);
         }
 
         private void PageFrame_Navigated(object sender, System.Windows.Navigation.NavigationEventArgs e)

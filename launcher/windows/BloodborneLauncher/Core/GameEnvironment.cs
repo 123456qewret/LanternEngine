@@ -49,6 +49,10 @@ namespace BloodborneLauncher.Core
             if (s.Bool("frame_stats")) env["BB_FRAME_STATS"] = "1";
             if (s.Bool("fsr_profile")) env["BB_FSR4_PROFILE"] = "1";
             if (s.Bool("audio_stats")) env["BB_AUDIO_STATS"] = "1";
+            if (s.Bool("fsr4_balanced")) env["BB_FSR4_BALANCED"] = "1";
+            // Experimental engine features: on by default, each can be turned off.
+            env["BB_PRECISE_PACING"] = s.Bool("exp_precise_pacing") ? "1" : "0";
+            env["BB_IMAGE_WRITEBACK_GC"] = s.Bool("exp_vram_cleanup") ? "1" : "0";
             // The account password never goes to bbport.ini; the engine takes it from here.
             if (s.Str("online_password").Length > 0) env["BB_SHADNET_PASSWORD"] = s.Str("online_password");
 

@@ -10,27 +10,28 @@ namespace BloodborneLauncher.Views
     public sealed class GraphicsPage : LauncherPage
     {
         private readonly TextBlock _upscalerHint, _dlssHint;
-        private readonly CardControl _presetCard, _sharpenCard, _sharpnessCard;
+        private readonly SettingRow _presetCard, _sharpenCard, _sharpnessCard;
 
         public GraphicsPage() : base("Graphics",
             "Stored in bbport.ini; the upscaler can also be changed in game (Insert or L3 + R3).")
         {
             Group("Upscaler");
             IniCombo(SymbolRegular.Sparkle24, "Upscaler", null, Choices.Upscalers, "upscaler", changed: UpdateUpscaler);
-            _upscalerHint = (TextBlock)((CardControl)Body.Children[^1]).Tag;
+            _upscalerHint = (TextBlock)((SettingRow)Body.Children[^1]).Tag;
 
             IniCombo(SymbolRegular.ZoomIn24, "Quality preset", "How far below the output resolution the game renders",
                 Choices.Presets, "preset", changed: UpdateUpscaler);
-            _presetCard = (CardControl)Body.Children[^1];
+            _presetCard = (SettingRow)Body.Children[^1];
 
             IniToggle(SymbolRegular.Eyedropper24, "Sharpening (RCAS)", null, "sharpen");
-            _sharpenCard = (CardControl)Body.Children[^1];
+            _sharpenCard = (SettingRow)Body.Children[^1];
             SliderRow(SymbolRegular.SlideSize24, "Sharpening strength", null, 0, 2, 0.05,
                 () => ParseDouble(Ini.Get("sharpness"), 0.5), v => Ini.Set("sharpness", Fmt(v)));
-            _sharpnessCard = (CardControl)Body.Children[^1];
+            _sharpnessCard = (SettingRow)Body.Children[^1];
 
             IniToggle(SymbolRegular.ArrowMove24, "Object motion vectors", "Less ghosting on characters; costs about 10% FPS", "object_motion");
             IniToggle(SymbolRegular.DataUsage24, "Show FPS", null, "show_fps");
+
             Add(Card(SymbolRegular.DeveloperBoard24, "DLSS", "", null, out _dlssHint));
 
             // The engine's picture and camera controls (bbport_settings.cpp clamps the same ranges).
@@ -49,6 +50,18 @@ namespace BloodborneLauncher.Views
             IniSlider(SymbolRegular.ZoomOut24, "Field of view", 1, 1.5, "camera_fov_scale");
             IniSlider(SymbolRegular.ArrowMaximize24, "Distance", 0.5, 1.5, "camera_distance_scale");
             IniSlider(SymbolRegular.ArrowBidirectionalUpDown24, "Height", 0.5, 1.5, "camera_height_scale");
+
+            // Engine features from 0.9.4, each with a switch, as IFreemz's "Bloodborne - Experimental".
+            Group("Experimental");
+            SettingToggle(SymbolRegular.Broom24, "VRAM cleanup",
+                "Frees video memory held by textures the GPU drew, so long sessions don't fill up VRAM and slow down. On by default",
+                "exp_vram_cleanup");
+            SettingToggle(SymbolRegular.Timer24, "Precise frame pacing",
+                "A high-resolution timer and even spacing between frames: steadier frame times and less VRR flicker. Uses a little CPU",
+                "exp_precise_pacing");
+            SettingToggle(SymbolRegular.Run24, "Sharper motion (FSR 4)",
+                "Uses FSR 4's balanced model at Performance and Ultra Performance: fewer trails behind moving characters, a little more GPU time",
+                "fsr4_balanced");
 
             Group("Game effects");
             Body.Children.Add(Text("Patches to the game, applied when it starts.", "Faint"));
@@ -73,7 +86,7 @@ namespace BloodborneLauncher.Views
         public override void OnShown() => UpdateUpscaler();
 
         private static bool DlssFound() =>
-            File.Exists(Path.Combine(Paths.BinariesDir, "bbport_dlss.dll")) && File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll"));
+            File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll")); // the engine has DLSS built in; NVIDIA's runtime sits beside it
 
         private void UpdateUpscaler()
         {

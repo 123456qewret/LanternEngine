@@ -39,6 +39,11 @@
     <!-- Dense text surfaces (the game output, the activity log): darker than a card. -->
     <SolidColorBrush x:Key="PanelDeepBrush" Color="#FF1E1E20" />
 
+    <!-- Dialogs: an opaque card over a dimmed window, so nothing behind shows through. -->
+    <SolidColorBrush x:Key="DialogScrimBrush" Color="#99000000" />
+    <SolidColorBrush x:Key="DialogBackgroundBrush" Color="#FF2C2C2F" />
+    <SolidColorBrush x:Key="DialogStrokeBrush" Color="#FF3E3E43" />
+
     <!-- Sidebar rows -->
     <SolidColorBrush x:Key="SidebarItemSelectedBrush" Color="#FF37373B" />
     <SolidColorBrush x:Key="SidebarItemHoverBrush" Color="#FF2E2E31" />
@@ -53,6 +58,14 @@
     <SolidColorBrush x:Key="WarningTextBrush" Color="#FFF2B84B" />
     <SolidColorBrush x:Key="DangerTextBrush" Color="#FFFF6B6B" />
     <SolidColorBrush x:Key="GoodTextBrush" Color="#FF5FD38A" />
+    <!-- The chosen option of a segmented control and the active tab. -->
+    <SolidColorBrush x:Key="SegmentSelectedBrush" Color="#FF2D7FF0" />
+
+    <!-- Pane, divider and pill colours; Glass.xaml turns them into glass for the Modern layout. -->
+    <SolidColorBrush x:Key="GlassPaneBrush" Color="#FF2E2E31" />
+    <SolidColorBrush x:Key="GlassPaneStrokeBrush" Color="#FF3A3A3E" />
+    <SolidColorBrush x:Key="GlassDividerBrush" Color="#FF3A3A3E" />
+    <SolidColorBrush x:Key="PillTrackBrush" Color="#FF1E1E21" />
 
     <!-- ==================== Shape ==================== -->
     <CornerRadius x:Key="ControlCornerRadius">6</CornerRadius>

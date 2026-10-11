@@ -21,6 +21,25 @@ namespace BloodborneLauncher.Views
 
         public SettingsPage() : base("Settings", "The Bloodborne PC engine, how the game is started, and keeping this launcher up to date.")
         {
+            Group("Appearance");
+            FrameworkElement layout = null!;
+            var reverting = false;
+            layout = ComboRow(SymbolRegular.PanelLeft24, "Layout", "Modern: tabs and compact rows. Classic: the sidebar and one card per setting",
+                new[] { new Choice("Modern", "modern"), new Choice("Classic", "classic") },
+                () => S.Str("ui_layout") == "classic" ? "classic" : "modern", v => S.Set("ui_layout", v), changed: () =>
+                {
+                    if (reverting || RestartForLayout()) return;
+                    // Cancelled: put back the layout that is showing, so the next start doesn't switch either.
+                    reverting = true;
+                    var shown = SettingRow.Classic ? "classic" : "modern";
+                    S.Set("ui_layout", shown);
+                    Ws.SaveNow();
+                    var index = shown == "classic" ? 1 : 0;
+                    if (layout is Segmented segmented) segmented.Select(index, notify: false);
+                    else if (layout is ComboBox box) box.SelectedIndex = index;
+                    reverting = false;
+                });
+
             Group("Bloodborne PC");
             Add(Card(SymbolRegular.FolderLink24, "Engine folder", "", Row(
                 SmallButton("Browse", SymbolRegular.FolderOpen24, (_, _) => ChoosePort()),
@@ -41,6 +60,18 @@ namespace BloodborneLauncher.Views
             TextRow(SymbolRegular.TextDescription24, "Arguments", null, "Optional",
                 () => S.Str("custom_args"), v => S.Set("custom_args", v), _customRows, 380);
             Body.Children.Add(_customRows);
+
+            Group("Performance");
+            SettingCombo(SymbolRegular.Flow20, "Two-stage GPU pipeline", "20–30% faster; turn off if the game is unstable",
+                Choices.DrawPipe, "draw_pipe");
+            SettingCombo(SymbolRegular.ArrowSwap24, "CPU reads of GPU data", "Relaxed is the default", Choices.Readbacks, "readbacks");
+
+            Group("Diagnostics");
+            SettingToggle(SymbolRegular.TextBulletListSquare24, "Frame statistics in the log", "BB_FRAME_STATS", "frame_stats");
+            SettingToggle(SymbolRegular.DeveloperBoard24, "FSR 4 profile in the log", "BB_FSR4_PROFILE", "fsr_profile");
+            SettingToggle(SymbolRegular.Speaker224, "Audio statistics in the log", "BB_AUDIO_STATS", "audio_stats");
+            TextRow(SymbolRegular.Code24, "Extra variables", "NAME=value pairs separated by spaces, passed to the game", "BB_EXAMPLE=1",
+                () => S.Str("extra_env"), v => S.Set("extra_env", v.Trim()), width: 300);
 
             Group("Files");
             Add(Card(SymbolRegular.DocumentSettings20, "Launcher settings", Paths.ConfigFile,
@@ -82,7 +113,7 @@ namespace BloodborneLauncher.Views
         private void Refresh()
         {
             SetHint(_portHint, Paths.IsPortDir(Paths.PortDir)
-                ? Paths.PortDir + (Paths.DetectPortDir() == Paths.PortDir ? "  ·  the package this launcher is in" : "") + "\nThe engine that runs your game: bin\\bb-probe.exe, its scripts and Python. Your game files stay where they are"
+                ? Paths.PortDir + (Paths.DetectPortDir() == Paths.PortDir ? "  ·  the package this launcher is in" : "") + "\nThe engine that runs your game: out\\bb-probe.exe, its scripts and Python. Your game files stay where they are"
                 : "Not found. It is normally the folder this launcher is in (with bin\\bb-probe.exe and run.py)");
             SetHint(_buildHint, BuildStatus());
         }
@@ -97,6 +128,17 @@ namespace BloodborneLauncher.Views
                 : Ws.CheckedAt == null ? $"You have v{Updater.Current}"
                 : latest == null ? $"You have v{Updater.Current}; no release is published yet"
                 : $"You have v{Updater.Current}, the latest ({latest.Tag})");
+        }
+
+        /// <summary>Restarts into the chosen layout; false if the player cancelled.</summary>
+        private static bool RestartForLayout()
+        {
+            if (!Prompt.Confirm("Switch layout", "The launcher restarts to change its layout.", "Restart now")) return false;
+            Ws.SaveNow();
+            if (Environment.ProcessPath is { } self)
+                Process.Start(new ProcessStartInfo(self) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(self)! });
+            Application.Current.Shutdown();
+            return true;
         }
 
         private void ShowMethod() =>

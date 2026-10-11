@@ -17,14 +17,17 @@ The launcher updates itself from the Releases page.
 ## Features
 
 - **Play** – game folder check (eboot.bin, version 1.09), saves folder, one-click start.
-- **Display** – in-game menu language (English / Russian), game language, resolution,
+- **Display** – in-game menu language (English, Spanish, Portuguese, French, German, Italian,
+  Polish, Turkish, Russian), game language, resolution,
   fullscreen, widescreen (21:9, 32:9), 30 / 60 / 90 / 120 / 144 FPS or uncapped.
 - **Graphics** – FSR 4, FSR 3, DLSS, TAA, sharpening, picture and camera tuning, game effects.
+  Experimental: VRAM cleanup for long sessions and precise frame pacing (both on, each can be turned off).
 - **Controls** – keyboard and mouse for all 29 actions (one key and one mouse input each),
   mouse camera, mouse pointer in the game's menus, sensitivity and invert.
   - **Profiles**: EldenRingStyle (the default), PC default and Mouse focus built in; save your own, copy them as JSON to any paste site, import from a link or file.
 - **Trophies** – all 40, completion rate, in-game unlock notification with sound.
-- **Mods & patches**, **Online** (shadNet), **Game output** log.
+- **Mods & patches**, **Online** (shadNet), **Game output** log (also saved to `logs\last_session.log`).
+- **Layout** – Modern (tabs, glass) or Classic (sidebar).
 
 ### Control profile format
 
@@ -60,7 +63,7 @@ install into a package folder instead of `LauncherApp/`.
 ## Engine
 
 The engine (`out/`, `scripts/`) is [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
-at tag `v0.4.0-darkizuku-preview.1` with the small changes in [engine/](engine/) (120 / 144 / uncapped FPS on Windows), which builds on
+at tag `v0.4.0-darkizuku-preview.1` with the changes in [engine/](engine/) (uncapped FPS on Windows, VRAM cleanup, frame pacing, menu languages), which builds on
 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (bbport) and
 [shadPS4](https://github.com/shadps4-emu/shadPS4). Its source and licenses are there and in the
 package's `licenses/` folder.

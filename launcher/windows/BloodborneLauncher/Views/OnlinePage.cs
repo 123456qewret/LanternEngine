@@ -86,7 +86,9 @@ namespace BloodborneLauncher.Views
                 {
                     var card = Card(r.Ok ? SymbolRegular.CheckmarkCircle24 : SymbolRegular.ErrorCircle24,
                         $"{r.Name}: {r.Address}", r.Ok ? "Reachable" : $"Not reachable ({r.Detail})", null, out _);
-                    ((SymbolIcon)card.Icon!).SetResourceReference(ForegroundProperty, r.Ok ? "GoodTextBrush" : "DangerTextBrush");
+                    card.ShowIcon = true;
+                    card.Icon.SetResourceReference(ForegroundProperty, r.Ok ? "GoodTextBrush" : "DangerTextBrush");
+                    SetHint(card.Hint, r.Ok ? "Reachable" : $"Not reachable ({r.Detail})");
                     card.Margin = new Thickness(24, 0, 0, 4);
                     _results.Children.Add(card);
                     Ws.Log($"{r.Name} {r.Address}: {(r.Ok ? "reachable" : "not reachable " + r.Detail)}", r.Ok ? LogLevel.Good : LogLevel.Warn);

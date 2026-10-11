@@ -9,7 +9,7 @@
     <AssemblyName>Bloodborne Launcher</AssemblyName>
     <RootNamespace>BloodborneLauncher</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.9.3</Version>
+    <Version>0.9.4</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <Resource Include="app.ico" />
+    <Resource Include="Assets\backdrop.jpg" />
   </ItemGroup>
 
   <ItemGroup>
