@@ -50,7 +50,9 @@ namespace BloodborneLauncher.Core
             {
                 var name = asset.GetProperty("name").GetString() ?? "";
                 var url = asset.GetProperty("browser_download_url").GetString();
-                if (string.Equals(name, ExeName, StringComparison.OrdinalIgnoreCase) || name.Equals("BloodborneLauncher.exe", StringComparison.OrdinalIgnoreCase))
+                // GitHub stores "Bloodborne Launcher.exe" as "Bloodborne.Launcher.exe".
+                if (name.Replace(".", " ").Replace(" exe", ".exe").Equals(ExeName, StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("BloodborneLauncher.exe", StringComparison.OrdinalIgnoreCase))
                 {
                     exe = url;
                     size = asset.GetProperty("size").GetInt64();

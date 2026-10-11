@@ -21,7 +21,7 @@ namespace BloodborneLauncher.Core
 
         /// <summary>30, 60 and 90 are the engine's fixed presets; 120 and uncapped use the uncapped
         /// patch (scripts\run_windows.py turns them into BB_FPS=uncap with a limit).</summary>
-        public static string Fps(LauncherSettings s) => s.Str("fps_mode") is "30" or "90" or "120" or "uncap" ? s.Str("fps_mode") : "60";
+        public static string Fps(LauncherSettings s) => s.Str("fps_mode") is "30" or "90" or "120" or "144" or "uncap" ? s.Str("fps_mode") : "60";
 
         public static Dictionary<string, string> Build(LauncherSettings s)
         {

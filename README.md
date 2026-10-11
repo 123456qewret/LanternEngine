@@ -18,7 +18,7 @@ The launcher updates itself from the Releases page.
 
 - **Play** – game folder check (eboot.bin, version 1.09), saves folder, one-click start.
 - **Display** – in-game menu language (English / Russian), game language, resolution,
-  fullscreen, widescreen (21:9, 32:9), 30 / 60 / 90 / 120 FPS or uncapped.
+  fullscreen, widescreen (21:9, 32:9), 30 / 60 / 90 / 120 / 144 FPS or uncapped.
 - **Graphics** – FSR 4, FSR 3, DLSS, TAA, sharpening, picture and camera tuning, game effects.
 - **Controls** – keyboard and mouse for all 29 actions (one key and one mouse input each),
   mouse camera, mouse pointer in the game's menus, sensitivity and invert.

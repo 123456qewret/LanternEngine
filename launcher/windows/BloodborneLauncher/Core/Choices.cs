@@ -63,6 +63,7 @@ namespace BloodborneLauncher.Core
             new("60 FPS", "60"),
             new("90 FPS", "90", "Includes the sprint fix for high frame rates"),
             new("120 FPS", "120", "The uncapped patch with a 120 FPS limit"),
+            new("144 FPS", "144", "The uncapped patch with a 144 FPS limit"),
             new("Uncapped", "uncap", "No limit: as fast as your PC runs it. Use VSync (FIFO) to keep it to your monitor"),
             new("30 FPS (as on PS4)", "30"),
         };
