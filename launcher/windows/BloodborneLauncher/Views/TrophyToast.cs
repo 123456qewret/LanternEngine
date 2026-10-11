@@ -69,64 +69,80 @@ namespace BloodborneLauncher.Views
             Focusable = false;
             IsHitTestVisible = false;
 
+            // As the PS4 shows it: a slim dark bar with a soft sheen and a hairline border, a grey
+            // tile with a white trophy, the trophy's name after a small cup in its grade's colour,
+            // and "You have earned a trophy!" under it.
             var color = GradeColor(trophy.Grade);
-            var badge = new Border
+            var face = new FontFamily("Segoe UI");
+
+            var tile = new Border
             {
-                Width = 52,
-                Height = 52,
-                CornerRadius = new CornerRadius(26),
-                Background = new RadialGradientBrush(Color.FromArgb(0x55, color.R, color.G, color.B), Color.FromArgb(0x10, color.R, color.G, color.B)),
-                BorderBrush = new SolidColorBrush(color),
-                BorderThickness = new Thickness(1.5),
-                Child = new SymbolIcon { Symbol = SymbolRegular.Trophy24, Filled = true, FontSize = 26, Foreground = new SolidColorBrush(color) },
+                Width = 46,
+                Height = 46,
+                CornerRadius = new CornerRadius(2),
+                Background = new LinearGradientBrush(Color.FromRgb(0x5A, 0x5D, 0x62), Color.FromRgb(0x33, 0x35, 0x39), 90),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF)),
+                BorderThickness = new Thickness(1),
+                Child = new SymbolIcon { Symbol = SymbolRegular.Trophy24, Filled = true, FontSize = 24, Foreground = new SolidColorBrush(Color.FromRgb(0xF2, 0xF2, 0xF2)) },
                 VerticalAlignment = VerticalAlignment.Center,
             };
 
-            var label = new TextBlock
+            var cup = new SymbolIcon
             {
-                Text = $"{trophy.Grade.ToString().ToUpperInvariant()} TROPHY UNLOCKED",
-                FontSize = 10.5,
-                FontWeight = FontWeights.SemiBold,
+                Symbol = SymbolRegular.Trophy24,
+                Filled = true,
+                FontSize = 15,
                 Foreground = new SolidColorBrush(color),
+                Margin = new Thickness(0, 1, 7, 0),
+                VerticalAlignment = VerticalAlignment.Center,
             };
             var name = new TextBlock
             {
                 Text = trophy.Name,
-                FontSize = 15.5,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(Color.FromRgb(0xF0, 0xF0, 0xF2)),
-                Margin = new Thickness(0, 2, 0, 0),
+                FontFamily = face,
+                FontSize = 17,
+                Foreground = new SolidColorBrush(Color.FromRgb(0xF4, 0xF4, 0xF4)),
                 TextTrimming = TextTrimming.CharacterEllipsis,
+                MaxWidth = 330,
+                VerticalAlignment = VerticalAlignment.Center,
             };
-            var description = new TextBlock
+            var title = new StackPanel { Orientation = Orientation.Horizontal };
+            title.Children.Add(cup);
+            title.Children.Add(name);
+
+            var earned = new TextBlock
             {
-                Text = trophy.Description,
-                FontSize = 11.5,
-                Foreground = new SolidColorBrush(Color.FromRgb(0xA8, 0xA8, 0xAD)),
-                TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 300,
-                Margin = new Thickness(0, 3, 0, 0),
+                Text = "You have earned a trophy!",
+                FontFamily = face,
+                FontSize = 13.5,
+                Foreground = new SolidColorBrush(Color.FromRgb(0xC9, 0xCB, 0xCF)),
+                Margin = new Thickness(0, 2, 0, 0),
             };
             var text = new StackPanel { Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-            text.Children.Add(label);
-            text.Children.Add(name);
-            text.Children.Add(description);
+            text.Children.Add(title);
+            text.Children.Add(earned);
 
             var row = new StackPanel { Orientation = Orientation.Horizontal };
-            row.Children.Add(badge);
+            row.Children.Add(tile);
             row.Children.Add(text);
+
+            // The sheen: lighter at the top, darker at the bottom, a little see-through.
+            var background = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0, 1) };
+            background.GradientStops.Add(new GradientStop(Color.FromArgb(0xEE, 0x4A, 0x4D, 0x52), 0));
+            background.GradientStops.Add(new GradientStop(Color.FromArgb(0xEE, 0x2C, 0x2E, 0x32), 0.45));
+            background.GradientStops.Add(new GradientStop(Color.FromArgb(0xF2, 0x1C, 0x1D, 0x20), 1));
 
             Content = new Border
             {
                 Margin = new Thickness(18),
-                Padding = new Thickness(16, 14, 22, 14),
-                CornerRadius = new CornerRadius(10),
-                Background = new SolidColorBrush(Color.FromArgb(0xF0, 0x1C, 0x1C, 0x1F)),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(0x90, color.R, color.G, color.B)),
+                Padding = new Thickness(9, 9, 26, 9),
+                CornerRadius = new CornerRadius(3),
+                Background = background,
+                BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, 0xC8, 0xCC, 0xD2)),
                 BorderThickness = new Thickness(1),
-                Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 3, Opacity = 0.55 },
+                Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 14, ShadowDepth = 2, Opacity = 0.6 },
                 Child = row,
-                MinWidth = 340,
+                MinWidth = 380,
                 RenderTransform = _slide,
             };
             Opacity = 0;
