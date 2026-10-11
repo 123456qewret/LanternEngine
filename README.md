@@ -62,15 +62,18 @@ install into a package folder instead of `LauncherApp/`.
 
 ## Engine
 
-The engine (`out/`, `scripts/`) is [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
-at tag `v0.4.0-darkizuku-preview.1` with the changes in [engine/](engine/) (uncapped FPS on Windows, VRAM cleanup, frame pacing, menu languages), which builds on
-[deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (bbport) and
-[shadPS4](https://github.com/shadps4-emu/shadPS4). Its source and licenses are there and in the
-package's `licenses/` folder.
+Our Windows build of the engine, with our own changes: uncapped FPS, VRAM cleanup, frame pacing
+and more menu languages. Patches and build steps are in [engine/](engine/).
 
-Trophy list from [pyL1nx/bloodborne_pc](https://github.com/pyL1nx/bloodborne_pc).
-UI: [WPF-UI](https://github.com/lepoco/wpfui).
+## Credits
+
+| | |
+|---|---|
+| Engine base | [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc) (built on [bbport](https://github.com/deadinside28/bloodborne_pc) and [shadPS4](https://github.com/shadps4-emu/shadPS4)) |
+| VRAM cleanup | adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR) |
+| Trophy list | [pyL1nx/bloodborne_pc](https://github.com/pyL1nx/bloodborne_pc) |
+| UI library | [WPF-UI](https://github.com/lepoco/wpfui) |
 
 ## License
 
-The launcher is GPL-2.0-or-later (see [LICENSE](LICENSE)). The engine is GPL-3.0-or-later.
+The launcher is GPL-2.0-or-later (see [LICENSE](LICENSE)). The engine is GPL-3.0-or-later; its licenses are in the package's `licenses/` folder.
