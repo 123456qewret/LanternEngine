@@ -1,0 +1,173 @@
+using System.Diagnostics;
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using BloodborneLauncher.Build;
+using BloodborneLauncher.Core;
+using Wpf.Ui.Controls;
+using MessageBoxButton = System.Windows.MessageBoxButton;
+using MessageBoxResult = System.Windows.MessageBoxResult;
+using TextBlock = System.Windows.Controls.TextBlock;
+
+namespace BloodborneLauncher.Views
+{
+    /// <summary>The launcher itself: where the port is, how the game is started, and rebuilding.</summary>
+    public sealed class SettingsPage : LauncherPage
+    {
+        private readonly TextBlock _portHint, _buildHint;
+        private readonly StackPanel _customRows = new();
+        private readonly TextBlock _updateHint;
+        private readonly Wpf.Ui.Controls.Button _updateNow;
+
+        public SettingsPage() : base("Settings", "The Bloodborne PC engine, how the game is started, and keeping this launcher up to date.")
+        {
+            Group("Bloodborne PC");
+            Add(Card(SymbolRegular.FolderLink24, "Engine folder", "", Row(
+                SmallButton("Browse", SymbolRegular.FolderOpen24, (_, _) => ChoosePort()),
+                IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(Paths.PortDir)),
+                IconButton(SymbolRegular.ArrowUndo24, "Detect automatically", (_, _) =>
+                {
+                    S.Set("port_dir", "");
+                    Ws.ResolvePort();
+                    Ws.SaveSoon();
+                    Refresh();
+                })), out _portHint));
+
+            Group("Launch");
+            SettingCombo(SymbolRegular.Rocket24, "Start the game with", null, Choices.LaunchMethods, "launch_method", changed: () => { ShowMethod(); Ws.SaveSoon(); });
+
+            TextRow(SymbolRegular.Code24, "Command", "A program to run instead of Bloodborne.exe --run, with the settings as environment variables",
+                @"C:\path\to\game.exe", () => S.Str("custom_command"), v => S.Set("custom_command", v), _customRows, 380);
+            TextRow(SymbolRegular.TextDescription24, "Arguments", null, "Optional",
+                () => S.Str("custom_args"), v => S.Set("custom_args", v), _customRows, 380);
+            Body.Children.Add(_customRows);
+
+            Group("Files");
+            Add(Card(SymbolRegular.DocumentSettings20, "Launcher settings", Paths.ConfigFile,
+                IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(Paths.ConfigDir)), out _));
+            Add(Card(SymbolRegular.DocumentSettings20, "Port settings (bbport.ini)", Paths.IniPath,
+                IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(Path.GetDirectoryName(Paths.IniPath)!)), out _));
+
+            Group("Updates");
+            _updateNow = SmallButton("Update now", SymbolRegular.ArrowDownload24, async (_, _) => await MainWindow.Instance!.InstallUpdateAsync(),
+                ControlAppearance.Primary);
+            Add(Card(SymbolRegular.ArrowDownload24, "Launcher updates", "", Row(
+                SmallButton("Check now", SymbolRegular.ArrowClockwise24, async (_, _) => await Ws.CheckForUpdatesAsync(quiet: false)),
+                _updateNow,
+                IconButton(SymbolRegular.Open24, "Open the releases page", (_, _) =>
+                    Process.Start(new ProcessStartInfo(Updater.ReleasesPage) { UseShellExecute = true }))), out _updateHint));
+            SettingToggle(SymbolRegular.Alert24, "Check for updates at start", $"Looks at github.com/{Updater.Repository}/releases", "check_updates");
+            Ws.UpdateStateChanged += UpdateUpdates;
+            UpdateUpdates();
+
+            // Only a copy built from the source checkout can rebuild itself.
+            var build = Card(SymbolRegular.ArrowSync24, "Build", "", Row(
+                SmallButton("Rebuild", SymbolRegular.ArrowClockwise24, (_, _) => Rebuild(force: false)),
+                SmallButton("Force rebuild", SymbolRegular.Wrench24, (_, _) => Rebuild(force: true))), out _buildHint);
+            if (Paths.SourceRoot != null)
+            {
+                Group("Build from source");
+                Add(build);
+            }
+
+            Ws.PortChanged += Refresh;
+        }
+
+        public override void OnShown()
+        {
+            Refresh();
+            ShowMethod();
+        }
+
+        private void Refresh()
+        {
+            SetHint(_portHint, Paths.IsPortDir(Paths.PortDir)
+                ? Paths.PortDir + (Paths.DetectPortDir() == Paths.PortDir ? "  ·  the package this launcher is in" : "") + "\nThe engine that runs your game: bin\\bb-probe.exe, its scripts and Python. Your game files stay where they are"
+                : "Not found. It is normally the folder this launcher is in (with bin\\bb-probe.exe and run.py)");
+            SetHint(_buildHint, BuildStatus());
+        }
+
+        private void UpdateUpdates()
+        {
+            var update = Ws.Update;
+            var latest = Ws.Latest;
+            _updateNow.Visibility = update != null ? Visibility.Visible : Visibility.Collapsed;
+            SetHint(_updateHint,
+                update != null ? $"{update.Name} is available (you have v{Updater.Current})"
+                : Ws.CheckedAt == null ? $"You have v{Updater.Current}"
+                : latest == null ? $"You have v{Updater.Current}; no release is published yet"
+                : $"You have v{Updater.Current}, the latest ({latest.Tag})");
+        }
+
+        private void ShowMethod() =>
+            _customRows.Visibility = GameRunner.Custom(S) ? Visibility.Visible : Visibility.Collapsed;
+
+        private void ChoosePort()
+        {
+            var path = PickFolder("Engine folder (with run.py and bin\\bb-probe.exe)", Paths.PortDir);
+            if (path == null) return;
+            if (!Paths.IsPortDir(path))
+            {
+                System.Windows.MessageBox.Show(Application.Current.MainWindow!, "That folder has no run.py with Bloodborne.exe or bin\\bb-probe.exe.",
+                    "Engine folder", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            S.Set("port_dir", path);
+            Ws.ResolvePort();
+            Ws.SaveSoon();
+            Refresh();
+        }
+
+        // ---------------------------------------------------------------- rebuild
+
+        private static string? BuilderPath()
+        {
+            var beside = Path.Combine(AppContext.BaseDirectory, SourceStamp.BuilderExe);
+            if (File.Exists(beside)) return beside;
+            if (Paths.SourceRoot is { } root)
+            {
+                var installed = Path.Combine(SourceStamp.AppDirOf(root), SourceStamp.BuilderExe);
+                if (File.Exists(installed)) return installed;
+            }
+            return null;
+        }
+
+        private static string BuildStatus()
+        {
+            var version = typeof(SettingsPage).Assembly.GetName().Version;
+            var root = Paths.SourceRoot;
+            if (root == null)
+                return $"Version {version?.ToString(3)}. The sources (launcher/windows) are not next to this copy, so it cannot rebuild itself.";
+
+            var stamp = SourceStamp.Read(SourceStamp.AppDirOf(root));
+            var current = SourceStamp.Compute(root, SourceStamp.LauncherProject);
+            var state = stamp.Launcher == current
+                ? "Up to date with the sources"
+                : "The sources changed since this build: rebuild to pick the changes up";
+            var built = stamp.Built == default ? "" : $" · built {stamp.Built.ToLocalTime():yyyy-MM-dd HH:mm}";
+            return $"Version {version?.ToString(3)}{built}. {state}.";
+        }
+
+        private void Rebuild(bool force)
+        {
+            var builder = BuilderPath();
+            if (builder == null)
+            {
+                System.Windows.MessageBox.Show(Application.Current.MainWindow!,
+                    $"{SourceStamp.BuilderExe} was not found next to the launcher.", "Rebuild", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (Ws.Game.Running)
+            {
+                System.Windows.MessageBox.Show(Application.Current.MainWindow!, "Stop the game before rebuilding the launcher.",
+                    "Rebuild", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            Ws.SaveNow();
+            var args = $"--wait-pid {Environment.ProcessId}" + (force ? " --force" : "");
+            Process.Start(new ProcessStartInfo(builder, args) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(builder)! });
+            Application.Current.Shutdown();
+        }
+    }
+}

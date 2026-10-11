@@ -1,0 +1,141 @@
+using System.IO;
+using System.Windows.Controls;
+using BloodborneLauncher.Core;
+using Wpf.Ui.Controls;
+using TextBlock = System.Windows.Controls.TextBlock;
+
+namespace BloodborneLauncher.Views
+{
+    /// <summary>Upscaling and the game's own effects (patches applied at start).</summary>
+    public sealed class GraphicsPage : LauncherPage
+    {
+        private readonly TextBlock _upscalerHint, _dlssHint;
+        private readonly CardControl _presetCard, _sharpenCard, _sharpnessCard;
+
+        public GraphicsPage() : base("Graphics",
+            "Stored in bbport.ini; the upscaler can also be changed in game (Insert or L3 + R3).")
+        {
+            Group("Upscaler");
+            IniCombo(SymbolRegular.Sparkle24, "Upscaler", null, Choices.Upscalers, "upscaler", changed: UpdateUpscaler);
+            _upscalerHint = (TextBlock)((CardControl)Body.Children[^1]).Tag;
+
+            IniCombo(SymbolRegular.ZoomIn24, "Quality preset", "How far below the output resolution the game renders",
+                Choices.Presets, "preset", changed: UpdateUpscaler);
+            _presetCard = (CardControl)Body.Children[^1];
+
+            IniToggle(SymbolRegular.Eyedropper24, "Sharpening (RCAS)", null, "sharpen");
+            _sharpenCard = (CardControl)Body.Children[^1];
+            SliderRow(SymbolRegular.SlideSize24, "Sharpening strength", null, 0, 2, 0.05,
+                () => ParseDouble(Ini.Get("sharpness"), 0.5), v => Ini.Set("sharpness", Fmt(v)));
+            _sharpnessCard = (CardControl)Body.Children[^1];
+
+            IniToggle(SymbolRegular.ArrowMove24, "Object motion vectors", "Less ghosting on characters; costs about 10% FPS", "object_motion");
+            IniToggle(SymbolRegular.DataUsage24, "Show FPS", null, "show_fps");
+            Add(Card(SymbolRegular.DeveloperBoard24, "DLSS", "", null, out _dlssHint));
+
+            // The engine's picture and camera controls (bbport_settings.cpp clamps the same ranges).
+            Group("Picture");
+            var picture = new StackPanel();
+            IniToggle(SymbolRegular.Color24, "Picture tuning", "Turns the four settings below on", "graphics_controls");
+            IniToggle(SymbolRegular.CircleHalfFill24, "Vignette", null, "graphics_vignette", picture);
+            IniSlider(SymbolRegular.DarkTheme24, "Ambient occlusion strength", 0, 2, "graphics_ao_strength", picture);
+            IniSlider(SymbolRegular.WeatherSunny24, "Shadow resolution", 1, 3, "graphics_shadow_scale", picture);
+            IniSlider(SymbolRegular.Lightbulb24, "Bloom", 0, 1, "graphics_bloom", picture);
+            IniSlider(SymbolRegular.Color24, "Saturation", 0, 2, "graphics_saturation", picture);
+            Body.Children.Add(picture);
+
+            Group("Camera");
+            IniToggle(SymbolRegular.Camera24, "Camera tuning", "Turns the three settings below on", "camera_controls");
+            IniSlider(SymbolRegular.ZoomOut24, "Field of view", 1, 1.5, "camera_fov_scale");
+            IniSlider(SymbolRegular.ArrowMaximize24, "Distance", 0.5, 1.5, "camera_distance_scale");
+            IniSlider(SymbolRegular.ArrowBidirectionalUpDown24, "Height", 0.5, 1.5, "camera_height_scale");
+
+            Group("Game effects");
+            Body.Children.Add(Text("Patches to the game, applied when it starts.", "Faint"));
+            IniCombo(SymbolRegular.Cube24, "Model detail", null, Choices.ModelLod, "model_lod");
+            foreach (var effect in Choices.Effects)
+                IniToggle(EffectIcon(effect.Key), effect.Title, effect.Hint, effect.Key);
+
+            Ws.PortChanged += UpdateUpscaler;
+        }
+
+        private void IniSlider(SymbolRegular icon, string title, double min, double max, string key, Panel? into = null) =>
+            SliderRow(icon, title, null, min, max, 0.05, () => ParseDouble(Ini.Get(key, "1.00"), 1.0), v => Ini.Set(key, Fmt(v)), into: into);
+
+        private static SymbolRegular EffectIcon(string key) => key switch
+        {
+            "skip_intro" => SymbolRegular.FastForward24,
+            "debug_camera" => SymbolRegular.Camera24,
+            "debug_menu" => SymbolRegular.Bug24,
+            _ => SymbolRegular.Color24,
+        };
+
+        public override void OnShown() => UpdateUpscaler();
+
+        private static bool DlssFound() =>
+            File.Exists(Path.Combine(Paths.BinariesDir, "bbport_dlss.dll")) && File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll"));
+
+        private void UpdateUpscaler()
+        {
+            var value = Ini.Get("upscaler");
+            string? hint = value switch
+            {
+                "fsr4" => Directory.Exists(Path.Combine(Paths.PortDir, "fsr4_shaders"))
+                    ? "Assets found. GPUs without the needed shader features fall back to FSR 3.1"
+                    : "fsr4_shaders is missing from the port folder: the game falls back to FSR 3.1",
+                "fsr411" => Fsr411Problem() is { } problem
+                    ? $"{problem}: the game falls back to FSR 3.1"
+                    : "Assets for the chosen resolution and preset found",
+                "dlss" => DlssFound()
+                    ? "Needs an NVIDIA GeForce RTX GPU; others fall back to FSR 3.1"
+                    : "DLSS files are missing: the game falls back to FSR 3.1",
+                "taa" => "Anti-aliasing at the output resolution, without an FSR model",
+                _ => null,
+            };
+            SetHint(_upscalerHint, hint);
+            _presetCard.IsEnabled = value is not ("taa" or "off");
+            _sharpenCard.IsEnabled = value != "off";
+            _sharpnessCard.IsEnabled = value != "off";
+
+            var ngx = Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll");
+            SetHint(_dlssHint, DlssFound()
+                ? $"NVIDIA DLSS {System.Diagnostics.FileVersionInfo.GetVersionInfo(ngx).FileVersion} is included (out\\nvngx_dlss.dll). Choose it as the upscaler above"
+                : "out\\nvngx_dlss.dll is missing from the engine folder");
+        }
+
+        private static string Fsr411Dir()
+        {
+            var env = Environment.GetEnvironmentVariable("BB_FSR411_DIR");
+            if (!string.IsNullOrEmpty(env)) return env;
+            var local = Path.Combine(Paths.PortDir, "fsr4_411");
+            return Directory.Exists(local) ? local : Path.Combine(Paths.DataDir, "fsr4_411");
+        }
+
+        /// <summary>The FSR 4.1.1 model files the chosen output and preset need (fsr4_411\).</summary>
+        private static string? Fsr411Problem()
+        {
+            var output = Ini.Get("output_res", "1920x1080").Split('x');
+            var w = int.TryParse(output[0], out var a) ? a : 1920;
+            var h = output.Length > 1 && int.TryParse(output[1], out var b) ? b : 1080;
+            var model = (w > 1920 || h > 1080 ? "t2160" : "t1080") + (Ini.Get("preset", "4") == "4" ? "_m1" : "_m0");
+            var passes = new List<string> { "spd", "prepass", "pass0_post" };
+            for (var i = 1; i <= 12; i++)
+            {
+                passes.Add($"pass{i}");
+                passes.Add($"pass{i}_post");
+            }
+            passes.Add("postpass");
+            passes.Add("rcas");
+
+            var dir = Path.Combine(Fsr411Dir(), model);
+            foreach (var name in passes)
+            {
+                var file = new FileInfo(Path.Combine(dir, name + ".spv"));
+                if (!file.Exists || file.Length < 20 || file.Length % 4 != 0)
+                    return $"Missing or damaged fsr4_411\\{model}\\{name}.spv";
+            }
+            var init = new FileInfo(Path.Combine(dir, "initializer.bin"));
+            return init.Exists && init.Length == 131072 ? null : $"Missing or damaged fsr4_411\\{model}\\initializer.bin";
+        }
+    }
+}

@@ -1,0 +1,231 @@
+using System.IO;
+using System.Windows.Threading;
+
+namespace BloodborneLauncher.Core
+{
+    public enum LogLevel { Info, Step, Good, Warn, Bad }
+
+    /// <summary>
+    /// The launcher's shared state: settings, bbport.ini, the game process and its output, and the
+    /// activity log. Every edit calls SaveSoon, so nothing waits for the window to close and an
+    /// in-game change to bbport.ini is only overwritten by a change made here.
+    /// </summary>
+    public sealed class Workspace
+    {
+        public static Workspace Current { get; } = new();
+
+        public const int MaxOutputLines = 5000;
+
+        public LauncherSettings Settings { get; } = new();
+        public IniFile Ini { get; } = new();
+        public GameRunner Game { get; } = new();
+        public TrophyTracker Trophies { get; } = new();
+
+        /// <summary>A trophy was unlocked (or the saves folder, and so the list, changed).</summary>
+        public event Action? TrophiesChanged;
+
+        private DispatcherTimer? _trophyTimer;
+
+        /// <summary>The game's output so far (this run), oldest first.</summary>
+        public List<string> OutputLines { get; } = new();
+
+        public event Action<string, LogLevel>? Logged;
+        public event Action? Saved;
+        public event Action? GameStateChanged;
+        public event Action<string>? GameOutput;
+        public event Action? OutputCleared;
+        /// <summary>The port folder changed: pages that show paths or files reload.</summary>
+        public event Action? PortChanged;
+
+        private DispatcherTimer? _saveTimer;
+        private bool _iniWarned;
+
+        public void Initialise()
+        {
+            Settings.Load();
+            ResolvePort();
+
+            // Trophies: what the saves folder already holds is read silently; new unlocks after
+            // this are announced. trophies.log and last_run.log are checked every two seconds, so
+            // games started without the launcher (Play Bloodborne.exe, Steam) are announced too.
+            Trophies.SetUserDir(GameEnvironment.UserDir(Settings));
+            _trophyTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _trophyTimer.Tick += (_, _) =>
+            {
+                var userDir = GameEnvironment.UserDir(Settings);
+                if (!string.Equals(Trophies.LogPath, System.IO.Path.Combine(userDir, TrophyTracker.LogName), StringComparison.OrdinalIgnoreCase))
+                {
+                    Trophies.SetUserDir(userDir);
+                    TrophiesChanged?.Invoke();
+                }
+                Announce(Trophies.Poll(readRunLog: !Game.Running));
+            };
+            _trophyTimer.Start();
+
+            Game.Output += line => Dispatch(() =>
+            {
+                Announce(Trophies.Observe(line));
+                OutputLines.Add(line);
+                if (OutputLines.Count > MaxOutputLines)
+                    OutputLines.RemoveRange(0, OutputLines.Count - MaxOutputLines);
+                GameOutput?.Invoke(line);
+            });
+            Game.Exited += code => Dispatch(() =>
+            {
+                Log(code == 0 ? "The game exited normally." : $"The game exited with code {code}.",
+                    code == 0 ? LogLevel.Good : LogLevel.Warn);
+                OutputLines.Add($"— the game exited (code {code}) —");
+                GameOutput?.Invoke($"— the game exited (code {code}) —");
+                GameStateChanged?.Invoke();
+            });
+        }
+
+        /// <summary>The engine folder: the package this launcher is in, else the setting, else one
+        /// beside the game folder.</summary>
+        public void ResolvePort()
+        {
+            var chosen = Settings.Str("port_dir");
+            var game = Paths.Expand(Settings.Str("game_dir"));
+            // The Bloodborne PC package this launcher ships in always wins: it has everything.
+            if (Paths.DetectPortDir() is { } own)
+                Paths.PortDir = own;
+            else if (Paths.IsPortDir(chosen))
+                Paths.PortDir = chosen;
+            else if ((Paths.PortBesideGame(game) ?? Paths.PortNearGame(game) ?? Paths.DetectPortDir()) is { } found)
+            {
+                // Remembered, so moving the game folder later does not lose it.
+                Paths.PortDir = found;
+                Settings.Set("port_dir", found);
+            }
+            else
+                Paths.PortDir = chosen;
+
+            if (Settings.Str("game_dir").Length == 0 && Paths.IsPortDir(Paths.PortDir))
+            {
+                var guess = Path.Combine(Directory.GetParent(Paths.PortDir)?.FullName ?? Paths.PortDir, "CUSA03173");
+                Settings.Set("game_dir", guess);
+            }
+
+            Ini.Load();
+            _iniWarned = false;
+            PortChanged?.Invoke();
+        }
+
+        // ---------------------------------------------------------------- updates
+
+        /// <summary>The latest release when it is newer than this build.</summary>
+        public Updater.Release? Update { get; private set; }
+        public Updater.Release? Latest { get; private set; }
+        public DateTime? CheckedAt { get; private set; }
+        public event Action? UpdateStateChanged;
+
+        public async Task CheckForUpdatesAsync(bool quiet)
+        {
+            try
+            {
+                Latest = await Updater.LatestAsync();
+                CheckedAt = DateTime.Now;
+                Update = Latest != null && Latest.Version > Updater.Current ? Latest : null;
+                if (Update != null)
+                    Log($"Launcher update available: {Update.Tag} (you have v{Updater.Current}).", LogLevel.Good);
+                else if (!quiet)
+                    Log(Latest == null ? "No launcher release is published yet." : $"The launcher is up to date (v{Updater.Current}).", LogLevel.Good);
+            }
+            catch (Exception e)
+            {
+                if (!quiet) Log("Could not check for updates: " + e.GetBaseException().Message, LogLevel.Warn);
+            }
+            UpdateStateChanged?.Invoke();
+        }
+
+        private void Announce(List<int> ids)
+        {
+            if (ids.Count == 0) return;
+            foreach (var id in ids)
+            {
+                if (!TrophyTracker.ById.TryGetValue(id, out var trophy)) continue;
+                Log($"Trophy unlocked: {trophy.Name} ({trophy.Grade})", LogLevel.Good);
+                if (Settings.Bool("trophy_notifications"))
+                    Views.TrophyToast.Announce(trophy);
+            }
+            TrophiesChanged?.Invoke();
+        }
+
+        public void SaveSoon()
+        {
+            if (_saveTimer == null)
+            {
+                _saveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+                _saveTimer.Tick += (_, _) =>
+                {
+                    _saveTimer.Stop();
+                    SaveNow();
+                };
+            }
+            _saveTimer.Stop();
+            _saveTimer.Start();
+        }
+
+        public void SaveNow()
+        {
+            _saveTimer?.Stop();
+            try
+            {
+                Settings.Save();
+                if (Paths.IsPortDir(Paths.PortDir) || Environment.GetEnvironmentVariable("BB_CONFIG") is { Length: > 0 })
+                    Ini.Save();
+                else if (!_iniWarned)
+                {
+                    _iniWarned = true;
+                    Log("bbport.ini not written: the engine folder is not set (Settings › Bloodborne PC).", LogLevel.Warn);
+                }
+                Saved?.Invoke();
+            }
+            catch (Exception e)
+            {
+                Log("Could not save settings: " + e.Message, LogLevel.Bad);
+            }
+        }
+
+        public string? StartGame()
+        {
+            SaveNow();
+            OutputLines.Clear();
+            OutputCleared?.Invoke();
+            var error = Game.Start(Settings);
+            if (error != null)
+            {
+                Log(error, LogLevel.Bad);
+                return error;
+            }
+            Log(GameRunner.Custom(Settings) ? "Started the game with the custom command." : "Started Bloodborne.", LogLevel.Step);
+            GameStateChanged?.Invoke();
+            return null;
+        }
+
+        public async Task StopGameAsync()
+        {
+            Log("Stopping the game…", LogLevel.Step);
+            await Game.StopAsync();
+            GameStateChanged?.Invoke();
+        }
+
+        public void ClearOutput()
+        {
+            OutputLines.Clear();
+            OutputCleared?.Invoke();
+        }
+
+        public void Log(string message, LogLevel level = LogLevel.Info) =>
+            Dispatch(() => Logged?.Invoke(message, level));
+
+        private static void Dispatch(Action action)
+        {
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+                action();
+            else
+                dispatcher.BeginInvoke(action);
+        }
+    }
+}

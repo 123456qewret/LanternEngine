@@ -1,0 +1,84 @@
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using BloodborneLauncher.Core;
+using Wpf.Ui.Controls;
+using TextBox = System.Windows.Controls.TextBox;
+
+namespace BloodborneLauncher.Views
+{
+    /// <summary>The game's own output (run.py and bb-probe), live while it runs.</summary>
+    public sealed class OutputPage : LauncherPage
+    {
+        private readonly TextBox _output;
+        private readonly ToggleSwitch _follow;
+
+        public OutputPage() : base("Game output", "What run.py and the game print. Copy or export it when reporting a problem.")
+        {
+            var bar = new Grid { Margin = new Thickness(0, 18, 0, 8) };
+            bar.ColumnDefinitions.Add(new ColumnDefinition());
+            bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            _follow = new ToggleSwitch { IsChecked = true, Content = "Follow new output", VerticalAlignment = VerticalAlignment.Center };
+            bar.Children.Add(_follow);
+
+            var buttons = Row(
+                SmallButton("Copy", SymbolRegular.Copy24, (_, _) => Copy()),
+                SmallButton("Export…", SymbolRegular.Save24, (_, _) => Export()),
+                SmallButton("Clear", SymbolRegular.Broom24, (_, _) => Ws.ClearOutput()));
+            Grid.SetColumn(buttons, 1);
+            bar.Children.Add(buttons);
+            Body.Children.Add(bar);
+
+            SettingToggle(SymbolRegular.WindowConsole20, "Show this page when the game starts", null, "switch_to_output");
+
+            _output = new TextBox { Height = 520, Margin = new Thickness(0, 4, 0, 0) };
+            _output.SetResourceReference(StyleProperty, "CodeBox");
+            Body.Children.Add(_output);
+
+            Ws.GameOutput += line =>
+            {
+                _output.AppendText(line + "\n");
+                if (_output.LineCount > Workspace.MaxOutputLines + 200)
+                    _output.Text = string.Join("\n", Ws.OutputLines) + "\n";
+                if (_follow.IsChecked == true)
+                    _output.ScrollToEnd();
+            };
+            Ws.OutputCleared += () => _output.Clear();
+            _output.Text = Ws.OutputLines.Count > 0 ? string.Join("\n", Ws.OutputLines) + "\n" : "";
+        }
+
+        public override void OnShown()
+        {
+            if (_follow.IsChecked == true)
+                _output.ScrollToEnd();
+        }
+
+        private void Copy()
+        {
+            if (_output.Text.Length == 0) return;
+            Clipboard.SetText(_output.Text);
+            Ws.Log("Game output copied.", LogLevel.Good);
+        }
+
+        private void Export()
+        {
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "Export the game output",
+                FileName = $"bbport-{DateTime.Now:yyyyMMdd_HHmmss}.log",
+                Filter = "Log files|*.log|Text files|*.txt|All files|*.*",
+            };
+            if (dialog.ShowDialog() != true) return;
+            try
+            {
+                File.WriteAllText(dialog.FileName, _output.Text);
+                Ws.Log("Game output saved: " + dialog.FileName, LogLevel.Good);
+            }
+            catch (Exception e)
+            {
+                Ws.Log("Could not save the output: " + e.Message, LogLevel.Bad);
+            }
+        }
+    }
+}

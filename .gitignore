@@ -1,0 +1,10 @@
+﻿# Build output
+bin/
+obj/
+out/
+LauncherApp/
+dist/
+*.user
+.vs/
+.idea/
+launcher/windows/install.txt
