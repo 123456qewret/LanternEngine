@@ -5,6 +5,7 @@
                  xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
                  xmlns:views="clr-namespace:BloodborneLauncher.Views"
                  Title="Bloodborne Launcher"
+                 Icon="app.ico"
                  Height="820" Width="1220"
                  MinHeight="600" MinWidth="940"
                  WindowStartupLocation="CenterScreen"
