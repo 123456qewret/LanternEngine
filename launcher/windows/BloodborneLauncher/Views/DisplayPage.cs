@@ -24,7 +24,7 @@ namespace BloodborneLauncher.Views
             SettingCombo(SymbolRegular.Image24, "Presentation mode", null, Choices.PresentModes, "present_mode");
 
             Group("Frame rate");
-            SettingCombo(SymbolRegular.Gauge24, "Frame rate", "The engine's tested fixed-timestep presets", Choices.FpsModes, "fps_mode");
+            SettingCombo(SymbolRegular.Gauge24, "Frame rate", "30, 60 and 90 are fixed presets; 120 and Uncapped use the uncapped patch with the sprint fix", Choices.FpsModes, "fps_mode");
         }
     }
 }
