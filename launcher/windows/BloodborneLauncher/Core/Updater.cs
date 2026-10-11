@@ -3,23 +3,36 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace BloodborneLauncher.Core
 {
     /// <summary>
-    /// Updates from the GitHub releases of the launcher's repository. The latest release's tag
-    /// (v1.2.3) is compared with this build's version; its asset "Bloodborne Launcher.exe" (or a
-    /// .zip holding it) replaces this exe. A running exe cannot be overwritten but can be renamed,
-    /// so the old one is moved aside, the new one put in its place and started, and the old one is
-    /// removed on the next start.
+    /// Updates from the GitHub releases of the repository. Each release carries the whole package
+    /// (BloodbornePC-*.zip), the launcher on its own ("Bloodborne Launcher.exe") and package.json,
+    /// which names the engine build inside the package.
+    ///
+    /// When only the launcher changed, the exe alone is downloaded. When the engine changed (or the
+    /// package has no package.json yet), the whole package is downloaded and copied over this one,
+    /// keeping the player's settings, saves, mods and profiles. A running exe cannot be overwritten
+    /// but can be renamed, so the launcher moves itself aside and is removed on the next start.
     /// </summary>
     public static class Updater
     {
         public const string Repository = "Awakenchan/BloodBorneButPc";
         public static string ReleasesPage => $"https://github.com/{Repository}/releases";
-        private const string ExeName = "Bloodborne Launcher.exe";
 
-        public sealed record Release(Version Version, string Tag, string Name, string Notes, string Page, string? ExeUrl, string? ZipUrl, long Size);
+        /// <summary>The engine build this launcher is made for (package.json "engine").</summary>
+        public const string EngineId = "bbhost-0.4.0-fps1";
+
+        private const string ExeName = "Bloodborne Launcher.exe";
+        private const string PackageFile = "package.json";
+
+        /// <summary>Files and folders of the player's that a package update never touches.</summary>
+        private static readonly string[] Kept = { "bbport.ini", "mods.json", "patches.json", "user", "mods", "logs", "network", "engine-assets" };
+
+        public sealed record Release(Version Version, string Tag, string Name, string Notes, string Page,
+            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize);
 
         public static Version Current
         {
@@ -29,6 +42,30 @@ namespace BloodborneLauncher.Core
                 return new Version(v.Major, v.Minor, Math.Max(0, v.Build));
             }
         }
+
+        /// <summary>The package this launcher runs in (it ships inside it), or null when it runs on its own.</summary>
+        public static string? OwnPackage =>
+            Paths.DetectPortDir() is { } dir && Environment.ProcessPath is { } self &&
+            string.Equals(Path.GetDirectoryName(self)?.TrimEnd('\\'), dir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
+                ? dir
+                : null;
+
+        /// <summary>The engine build in the package, from its package.json; null when it has none.</summary>
+        public static string? LocalEngine()
+        {
+            try
+            {
+                var file = Path.Combine(Paths.PortDir, PackageFile);
+                return File.Exists(file) && JsonNode.Parse(File.ReadAllText(file)) is JsonObject o ? (string?)o["engine"] : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>The package needs the engine this launcher is made for.</summary>
+        public static bool EngineOutdated => OwnPackage != null && LocalEngine() != EngineId;
 
         /// <summary>The latest published release, or null when there is none (or no network).</summary>
         public static async Task<Release?> LatestAsync()
@@ -44,29 +81,25 @@ namespace BloodborneLauncher.Core
             if (!TryVersion(tag, out var version))
                 return null;
 
-            string? exe = null, zip = null;
-            long size = 0;
+            string? exe = null, zip = null, package = null;
+            long exeSize = 0, zipSize = 0;
             foreach (var asset in root.GetProperty("assets").EnumerateArray())
             {
                 var name = asset.GetProperty("name").GetString() ?? "";
                 var url = asset.GetProperty("browser_download_url").GetString();
+                var size = asset.GetProperty("size").GetInt64();
                 // GitHub stores "Bloodborne Launcher.exe" as "Bloodborne.Launcher.exe".
-                if (name.Replace(".", " ").Replace(" exe", ".exe").Equals(ExeName, StringComparison.OrdinalIgnoreCase) ||
-                    name.Equals("BloodborneLauncher.exe", StringComparison.OrdinalIgnoreCase))
-                {
-                    exe = url;
-                    size = asset.GetProperty("size").GetInt64();
-                }
+                if (name.Replace(".", " ").Replace(" exe", ".exe").Equals(ExeName, StringComparison.OrdinalIgnoreCase))
+                    (exe, exeSize) = (url, size);
                 else if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) && zip == null)
-                {
-                    zip = url;
-                    if (exe == null) size = asset.GetProperty("size").GetInt64();
-                }
+                    (zip, zipSize) = (url, size);
+                else if (name.Equals(PackageFile, StringComparison.OrdinalIgnoreCase))
+                    package = url;
             }
             return new Release(version, tag,
                 root.TryGetProperty("name", out var n) && n.GetString() is { Length: > 0 } title ? title : tag,
                 root.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "",
-                root.GetProperty("html_url").GetString() ?? ReleasesPage, exe, zip, size);
+                root.GetProperty("html_url").GetString() ?? ReleasesPage, exe, zip, package, exeSize, zipSize);
         }
 
         public static bool TryVersion(string tag, out Version version)
@@ -83,8 +116,31 @@ namespace BloodborneLauncher.Core
             return false;
         }
 
-        /// <summary>Downloads the release, swaps the exe and starts the new one; the caller then exits.</summary>
-        public static async Task InstallAsync(Release release, IProgress<double>? progress = null)
+        /// <summary>The engine build the release's package has, or null when it does not say.</summary>
+        public static async Task<string?> RemoteEngineAsync(Release release)
+        {
+            if (release.PackageUrl == null) return null;
+            try
+            {
+                using var http = Client(TimeSpan.FromSeconds(10));
+                return JsonNode.Parse(await http.GetStringAsync(release.PackageUrl)) is JsonObject o ? (string?)o["engine"] : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Whether this update has to replace the whole package (a new engine).</summary>
+        public static async Task<bool> NeedsPackageAsync(Release release)
+        {
+            if (OwnPackage == null || release.ZipUrl == null) return false;
+            var remote = await RemoteEngineAsync(release);
+            return remote != null ? remote != LocalEngine() : LocalEngine() == null && release.ExeUrl == null;
+        }
+
+        /// <summary>Downloads the update, puts it in place and starts the new launcher; the caller then exits.</summary>
+        public static async Task InstallAsync(Release release, bool package, IProgress<double>? progress = null)
         {
             var self = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot tell where this launcher is.");
             var folder = Path.GetDirectoryName(self)!;
@@ -92,50 +148,83 @@ namespace BloodborneLauncher.Core
             if (Directory.Exists(work)) Directory.Delete(work, recursive: true);
             Directory.CreateDirectory(work);
 
-            var url = release.ExeUrl ?? release.ZipUrl ?? throw new InvalidOperationException("This release has no launcher download attached.");
-            var download = Path.Combine(work, release.ExeUrl != null ? ExeName : "update.zip");
-            using (var http = Client(TimeSpan.FromMinutes(10)))
-            using (var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+            if (package)
             {
-                response.EnsureSuccessStatusCode();
-                var total = response.Content.Headers.ContentLength ?? release.Size;
-                await using var input = await response.Content.ReadAsStreamAsync();
-                await using var output = File.Create(download);
-                var buffer = new byte[81920];
-                long done = 0;
-                int read;
-                while ((read = await input.ReadAsync(buffer)) > 0)
-                {
-                    await output.WriteAsync(buffer.AsMemory(0, read));
-                    done += read;
-                    if (total > 0) progress?.Report((double)done / total);
-                }
-            }
-
-            var newExe = download;
-            if (release.ExeUrl == null)
-            {
+                if (Process.GetProcessesByName("bb-probe").Length > 0)
+                    throw new InvalidOperationException("Close the game first: the update replaces the engine.");
+                var zip = Path.Combine(work, "package.zip");
+                await DownloadAsync(release.ZipUrl!, zip, release.ZipSize, progress);
                 var unpacked = Path.Combine(work, "unpacked");
-                ZipFile.ExtractToDirectory(download, unpacked);
-                newExe = Directory.GetFiles(unpacked, ExeName, SearchOption.AllDirectories).FirstOrDefault()
-                         ?? throw new InvalidOperationException($"The release's .zip has no {ExeName}.");
+                ZipFile.ExtractToDirectory(zip, unpacked);
+                var root = Directory.GetFiles(unpacked, ExeName, SearchOption.AllDirectories).Select(Path.GetDirectoryName).FirstOrDefault()
+                           ?? throw new InvalidOperationException($"The package has no {ExeName}.");
+                CopyPackage(root!, folder, self);
             }
-            if (new FileInfo(newExe).Length < 100_000)
-                throw new InvalidOperationException("The download is too small to be the launcher.");
+            else
+            {
+                var url = release.ExeUrl ?? throw new InvalidOperationException("This release has no launcher download attached.");
+                var exe = Path.Combine(work, ExeName);
+                await DownloadAsync(url, exe, release.ExeSize, progress);
+                if (new FileInfo(exe).Length < 100_000)
+                    throw new InvalidOperationException("The download is too small to be the launcher.");
+                ReplaceSelf(self, exe);
+            }
+            Process.Start(new ProcessStartInfo(self) { UseShellExecute = true, WorkingDirectory = folder });
+        }
 
+        /// <summary>Copies a new package over this one, leaving the player's own files alone.</summary>
+        private static void CopyPackage(string from, string to, string self)
+        {
+            foreach (var file in Directory.GetFiles(from, "*", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(from, file);
+                var top = relative.Split(Path.DirectorySeparatorChar)[0];
+                if (Kept.Contains(top, StringComparer.OrdinalIgnoreCase)) continue;
+
+                var target = Path.Combine(to, relative);
+                if (string.Equals(Path.GetFullPath(target), Path.GetFullPath(self), StringComparison.OrdinalIgnoreCase))
+                {
+                    ReplaceSelf(self, file);
+                    continue;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(file, target, overwrite: true);
+            }
+        }
+
+        private static void ReplaceSelf(string self, string replacement)
+        {
             var aside = self + ".old";
             if (File.Exists(aside)) File.Delete(aside);
             File.Move(self, aside);
             try
             {
-                File.Copy(newExe, self);
+                File.Copy(replacement, self);
             }
             catch
             {
                 File.Move(aside, self); // put the working one back
                 throw;
             }
-            Process.Start(new ProcessStartInfo(self) { UseShellExecute = true, WorkingDirectory = folder });
+        }
+
+        private static async Task DownloadAsync(string url, string path, long expected, IProgress<double>? progress)
+        {
+            using var http = Client(TimeSpan.FromMinutes(30));
+            using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            var total = response.Content.Headers.ContentLength ?? expected;
+            await using var input = await response.Content.ReadAsStreamAsync();
+            await using var output = File.Create(path);
+            var buffer = new byte[81920];
+            long done = 0;
+            int read;
+            while ((read = await input.ReadAsync(buffer)) > 0)
+            {
+                await output.WriteAsync(buffer.AsMemory(0, read));
+                done += read;
+                if (total > 0) progress?.Report((double)done / total);
+            }
         }
 
         /// <summary>Removes the exe an update moved aside (it was still running then).</summary>

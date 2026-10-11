@@ -43,6 +43,26 @@ namespace BloodborneLauncher.Core
         {
             new("PC default", "Bloodborne PC", "The engine's own layout: attack on left click, firearm and transform on the mouse too.",
                 DefaultBindings(), BuiltIn: true),
+            new("EldenRingStyle", "Bloodborne PC", "Elden Ring's PC layout (the package default): left click attacks, Shift + left click strong attack, " +
+                "right click left hand (firearm / parry), Q or middle click lock on, R Blood Vial, E interact, arrows switch.",
+                new Dictionary<string, string>(DefaultBindings())
+                {
+                    ["attack"] = "Mouse1",
+                    ["strong_modifier"] = "Left Shift",
+                    ["strong_attack"] = "Mouse4",
+                    ["firearm"] = "X, Mouse2",
+                    ["transform"] = "C, Mouse5",
+                    ["lock_on"] = "Q, Mouse3",
+                    ["roll"] = "Space",
+                    ["blood_vial"] = "R",
+                    ["use_item"] = "F",
+                    ["interact"] = "E",
+                    ["switch_item"] = "Down",
+                    ["switch_right"] = "Right",
+                    ["switch_left"] = "Left",
+                    ["dpad_up"] = "Up",
+                    ["walk"] = "Left Alt",
+                }, BuiltIn: true),
             new("Mouse focus", "Bloodborne PC", "Both attacks and lock on on the mouse: left click attack, right click strong attack, " +
                 "middle click lock on; firearm F, quick item V.",
                 new Dictionary<string, string>(DefaultBindings())

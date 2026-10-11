@@ -149,21 +149,49 @@ namespace BloodborneLauncher
         {
             var ws = Workspace.Current;
             if (ws.Update is not { } release) return;
+            await InstallAsync(release, await Updater.NeedsPackageAsync(release));
+        }
+
+        /// <summary>An older package's engine: download the latest package and update it in place.</summary>
+        public async Task UpdateEngineAsync()
+        {
+            var ws = Workspace.Current;
+            var release = ws.Latest ?? await Updater.LatestAsync();
+            if (release?.ZipUrl == null)
+            {
+                Prompt.Tell("Update engine", $"No package is published yet. See {Updater.ReleasesPage}");
+                return;
+            }
+            await InstallAsync(release, package: true);
+        }
+
+        private async Task InstallAsync(Updater.Release release, bool package)
+        {
+            var ws = Workspace.Current;
+            if (package && ws.Game.Running)
+            {
+                Prompt.Tell("Close the game first", "This update replaces the engine, so the game has to be closed.");
+                return;
+            }
             var notes = release.Notes.Trim();
             if (notes.Length > 1200) notes = notes[..1200] + "…";
-            var body = $"You have v{Updater.Current}. The launcher downloads {release.Tag}, replaces itself and restarts; " +
-                       "your settings, profiles and trophies stay." +
-                       (ws.Game.Running ? "\n\nThe game keeps running, but key remapping and trophy notifications pause until the launcher is back." : "") +
+            var size = package ? release.ZipSize : release.ExeSize;
+            var body = $"You have v{Updater.Current}. " +
+                       (package
+                           ? $"This update includes a new engine, so the whole package is downloaded ({size / 1048576} MB) and updated in place."
+                           : $"The launcher downloads {release.Tag} ({size / 1048576} MB), replaces itself and restarts.") +
+                       " Your settings, saves, mods and profiles stay." +
                        (notes.Length > 0 ? "\n\nWhat's new:\n" + notes : "");
             if (!Prompt.Confirm($"Update to {release.Name}?", body, "Update now"))
                 return;
 
+            TitleUpdate.Visibility = Visibility.Visible;
             TitleUpdate.IsEnabled = false;
             var progress = new Progress<double>(p => TitleUpdateText.Text = $"Downloading {p:P0}");
             try
             {
                 ws.SaveNow();
-                await Updater.InstallAsync(release, progress);
+                await Updater.InstallAsync(release, package, progress);
                 Application.Current.Shutdown();
             }
             catch (Exception ex)

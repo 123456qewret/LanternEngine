@@ -22,7 +22,7 @@ The launcher updates itself from the Releases page.
 - **Graphics** – FSR 4, FSR 3, DLSS, TAA, sharpening, picture and camera tuning, game effects.
 - **Controls** – keyboard and mouse for all 29 actions (one key and one mouse input each),
   mouse camera, mouse pointer in the game's menus, sensitivity and invert.
-  - **Profiles**: save layouts, copy them as JSON to any paste site, import from a link or file.
+  - **Profiles**: EldenRingStyle (the default), PC default and Mouse focus built in; save your own, copy them as JSON to any paste site, import from a link or file.
 - **Trophies** – all 40, completion rate, in-game unlock notification with sound.
 - **Mods & patches**, **Online** (shadNet), **Game output** log.
 
@@ -60,7 +60,7 @@ install into a package folder instead of `LauncherApp/`.
 ## Engine
 
 The engine (`out/`, `scripts/`) is [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
-at tag `v0.4.0-darkizuku-preview.1`, which builds on
+at tag `v0.4.0-darkizuku-preview.1` with the small changes in [engine/](engine/) (120 / 144 / uncapped FPS on Windows), which builds on
 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (bbport) and
 [shadPS4](https://github.com/shadps4-emu/shadPS4). Its source and licenses are there and in the
 package's `licenses/` folder.

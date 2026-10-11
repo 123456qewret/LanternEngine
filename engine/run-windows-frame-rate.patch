@@ -1,0 +1,17 @@
+diff --git a/scripts/run_windows.py b/scripts/run_windows.py
+index ea6daf1..09a8266 100644
+--- a/scripts/run_windows.py
++++ b/scripts/run_windows.py
+@@ -95,6 +95,12 @@ def configure_frame_rate(env):
+     legacy uncapped launch cannot saturate the desktop during menus or loading.
+     """
+     fps = env.get('BB_FPS', '60')
++    # Bloodborne PC: higher rates use the uncapped patch (with the sprint fix) and the frame
++    # limiter; "uncap" runs unlimited unless BB_FPS_LIMIT asks for a cap.
++    if fps == 'uncap' or (fps.isdigit() and int(fps) > 90):
++        limit = fps if fps.isdigit() else env.get('BB_FPS_LIMIT', '0')
++        env.update(BB_FPS='uncap', BB_FPS_LIMIT=limit if limit.isdigit() else '0', BB_VBLANK_HZ='0')
++        return 'uncap'
+     if fps not in ('30', '60', '90'):
+         print(f'Unsupported Windows FPS preset {fps!r}; using 60 FPS.', flush=True)
+         fps = '60'

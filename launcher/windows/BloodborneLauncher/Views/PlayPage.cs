@@ -14,6 +14,7 @@ namespace BloodborneLauncher.Views
     public sealed class PlayPage : LauncherPage
     {
         private readonly InfoBar _problem;
+        private readonly CardControl _engineCard;
         private readonly TextBlock _gameHint, _userHint, _statGame, _statUpscaler, _statResolution, _statFps, _statVia;
         private readonly SymbolIcon _gameIcon;
         private readonly Button _play, _resetUser;
@@ -57,6 +58,15 @@ namespace BloodborneLauncher.Views
 
             _problem = new InfoBar { IsClosable = false, IsOpen = false, Margin = new Thickness(0, 12, 0, 0) };
             Body.Children.Add(_problem);
+
+            // A package from before this launcher's engine (it updated itself, the engine did not).
+            _engineCard = Card(SymbolRegular.ArrowDownload24, "Engine update available",
+                "This package has an older engine than this launcher needs (it unlocks 120 FPS and uncapped). " +
+                "Updating downloads the latest package and keeps your settings, saves and mods.",
+                SmallButton("Update engine", SymbolRegular.ArrowDownload24, async (_, _) => await MainWindow.Instance!.UpdateEngineAsync(),
+                    ControlAppearance.Primary), out _);
+            _engineCard.Margin = new Thickness(0, 12, 0, 0);
+            Body.Children.Add(_engineCard);
 
             // ==================== Game ====================
             Group("Game");
@@ -126,6 +136,7 @@ namespace BloodborneLauncher.Views
                                (found ? "  ·  saves found" : "  ·  no saves yet; the game creates them here"));
             _resetUser.IsEnabled = custom;
 
+            _engineCard.Visibility = Updater.EngineOutdated ? Visibility.Visible : Visibility.Collapsed;
             _statGame.Text = status.Health == Health.Bad ? "Not found" : $"{status.TitleId} {status.Version}".Trim();
             RefreshSummary();
             UpdateRunning();
@@ -135,9 +146,7 @@ namespace BloodborneLauncher.Views
         {
             _statUpscaler.Text = Label(Choices.Upscalers, Ini.Get("upscaler"));
             _statResolution.Text = Ini.Get("output_res").Replace("x", " × ");
-            _statFps.Text = S.Int("fps_limit") > 0
-                ? $"{Label(Choices.FpsModes, S.Str("fps_mode"))} · cap {S.Int("fps_limit")}"
-                : Label(Choices.FpsModes, S.Str("fps_mode"));
+            _statFps.Text = Label(Choices.FpsModes, GameEnvironment.Fps(S));
             _statVia.Text = $"{Ws.Trophies.Count} / {TrophyTracker.All.Length} · {Ws.Trophies.Completion * 100:0}%";
         }
 
