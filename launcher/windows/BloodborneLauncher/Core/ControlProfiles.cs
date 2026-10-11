@@ -50,9 +50,9 @@ namespace BloodborneLauncher.Core
                     ["attack"] = "Mouse1",
                     ["strong_modifier"] = "Left Shift",
                     ["strong_attack"] = "Mouse4",
-                    ["firearm"] = "X, Mouse2",
+                    ["firearm"] = "X, Mouse3",
                     ["transform"] = "C, Mouse5",
-                    ["lock_on"] = "Q, Mouse3",
+                    ["lock_on"] = "Q, Mouse2",
                     ["roll"] = "Space",
                     ["blood_vial"] = "R",
                     ["use_item"] = "F",
@@ -68,8 +68,8 @@ namespace BloodborneLauncher.Core
                 new Dictionary<string, string>(DefaultBindings())
                 {
                     ["attack"] = "Mouse1",
-                    ["strong_attack"] = "Mouse2",
-                    ["lock_on"] = "Mouse3",
+                    ["strong_attack"] = "Mouse3",
+                    ["lock_on"] = "Mouse2",
                     ["firearm"] = "F",
                     ["use_item"] = "V",
                     ["transform"] = "C",

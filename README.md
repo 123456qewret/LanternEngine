@@ -35,7 +35,7 @@ The launcher updates itself from the Releases page.
   "name": "Mouse focus",
   "author": "you",
   "description": "Attacks on the mouse",
-  "bindings": { "attack": "Mouse1", "strong_attack": "Mouse2", "lock_on": "Mouse3", "roll": "Space" }
+  "bindings": { "attack": "Mouse1", "strong_attack": "Mouse3", "lock_on": "Mouse2", "roll": "Space" }
 }
 ```
 
@@ -43,7 +43,7 @@ Actions: `move_forward move_back move_left move_right walk roll l3 attack strong
 strong_modifier transform firearm lock_on blood_vial use_item interact switch_item switch_right
 switch_left dpad_up gestures personal_effects menu confirm back look_up look_down look_left
 look_right`. Keys use SDL names (`Space`, `Left Shift`, `Return`, `F`); mouse inputs are
-`Mouse1`–`Mouse5`, `WheelUp`, `WheelDown`. Each action takes one key and one mouse input.
+`Mouse1` (left), `Mouse2` (middle), `Mouse3` (right), `Mouse4`, `Mouse5`, `WheelUp`, `WheelDown`. Each action takes one key and one mouse input.
 
 ## Building the launcher
 

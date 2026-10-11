@@ -62,8 +62,9 @@ namespace BloodborneLauncher.Core
         public static string Display(string name) => name.ToLowerInvariant() switch
         {
             "mouse1" => "Left click",
-            "mouse2" => "Right click",
-            "mouse3" => "Middle click",
+            // SDL numbering, as the engine reads it (input.cpp): 2 is the middle button, 3 the right.
+            "mouse2" => "Middle click",
+            "mouse3" => "Right click",
             "mouse4" => "Mouse 4",
             "mouse5" => "Mouse 5",
             "wheelup" => "Wheel up",
@@ -140,8 +141,8 @@ namespace BloodborneLauncher.Core
         public static string? MouseToken(MouseButton button) => button switch
         {
             MouseButton.Left => "Mouse1",
-            MouseButton.Right => "Mouse2",
-            MouseButton.Middle => "Mouse3",
+            MouseButton.Middle => "Mouse2",
+            MouseButton.Right => "Mouse3",
             MouseButton.XButton1 => "Mouse4",
             MouseButton.XButton2 => "Mouse5",
             _ => null,
