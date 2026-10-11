@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -27,7 +27,14 @@ namespace BloodborneLauncher.Views
 
         // Capture overlay
         private readonly Grid _overlay;
-        private readonly TextBlock _captureTitle, _captureFeedback;
+        private readonly TextBlock _captureTitle, _captureFeedback, _captureHelp, _captureBoxText;
+        private readonly WrapPanel _padChoices;
+        private readonly DispatcherTimer _padTimer;
+        private string? _padInput;
+        private ControlDef? _padControl;
+        private HashSet<string> _padHeld = new();
+        private string? _padState;
+        private DateTime? _padSeen;
         private ControlDef? _target;
 
         // Profiles
@@ -79,6 +86,13 @@ namespace BloodborneLauncher.Views
 
             Group("Gamepad");
             Add(Card(SymbolRegular.XboxController24, "Controller", "", null, out _padStatus));
+            IniToggle(SymbolRegular.ArrowSwap24, "Swap sticks", "Move with the right stick and look with the left", "pad_swap_sticks", changed: () => Rebuild());
+            IniToggle(SymbolRegular.ArrowBidirectionalLeftRight24, "Invert camera left / right", "The camera stick's horizontal direction", "pad_invert_look_x");
+            IniToggle(SymbolRegular.ArrowBidirectionalUpDown24, "Invert camera up / down", "The camera stick's vertical direction", "pad_invert_look_y");
+            SliderRow(SymbolRegular.CircleSmall24, "Stick dead zone",
+                "Ignores small stick movement, for sticks that drift. 0 = off (the game's own)", 0, 30, 1,
+                () => double.TryParse(Ini.Get("pad_deadzone", "0"), out var v) ? v : 0,
+                v => Ini.Set("pad_deadzone", ((int)Math.Round(v)).ToString()), format: "0'%'");
 
             // ==================== Bindings ====================
             var header = new Grid { Margin = new Thickness(2, 24, 0, 8) };
@@ -93,7 +107,8 @@ namespace BloodborneLauncher.Views
             var tools = Row(_search, SmallButton("Reset all", SymbolRegular.ArrowUndo24, (_, _) =>
             {
                 Bindings.ResetAll(Ini);
-                Ws.Log("Key bindings reset to the defaults.", LogLevel.Step);
+                PadMap.ResetAll(Ini);
+                Ws.Log("Key and controller bindings reset to the defaults.", LogLevel.Step);
                 Changed();
             }));
             Grid.SetColumn(tools, 1);
@@ -101,7 +116,8 @@ namespace BloodborneLauncher.Views
             Body.Children.Add(header);
 
             var help = Text("Click an action and press a key, click a mouse button or turn the wheel. Each action takes one key and one " +
-                            "mouse input. × removes one, right-click unbinds the action.", "Faint");
+                            "mouse input. × removes one, right-click unbinds the action. In the Controller column, pick the button for an " +
+                            "action: one already in use swaps over.", "Faint");
             help.Margin = new Thickness(2, 0, 0, 8);
             Body.Children.Add(help);
 
@@ -111,20 +127,21 @@ namespace BloodborneLauncher.Views
 
             // ==================== Capture overlay ====================
             _captureTitle = Text("", "PageTitle");
-            var captureHelp = Text("Press a key, or click / scroll inside the box. Esc cancels.", "Muted");
-            captureHelp.Margin = new Thickness(0, 4, 0, 12);
+            _captureHelp = Text("", "Muted");
+            _captureHelp.Margin = new Thickness(0, 4, 0, 12);
             _captureFeedback = Text("", "Muted");
             _captureFeedback.SetResourceReference(TextBlock.ForegroundProperty, "WarningTextBrush");
 
-            var padText = Text("Click or scroll here", "Faint");
-            padText.HorizontalAlignment = HorizontalAlignment.Center;
-            padText.VerticalAlignment = VerticalAlignment.Center;
+            _captureBoxText = Text("", "Faint");
+            _captureBoxText.HorizontalAlignment = HorizontalAlignment.Center;
+            _captureBoxText.VerticalAlignment = VerticalAlignment.Center;
+            _captureBoxText.TextAlignment = TextAlignment.Center;
             var capturePad = new Border
             {
                 Height = 110,
                 CornerRadius = new CornerRadius(6),
                 BorderThickness = new Thickness(1),
-                Child = padText,
+                Child = _captureBoxText,
                 Tag = "capture-wheel",
                 Cursor = Cursors.Hand,
                 Margin = new Thickness(0, 0, 0, 10),
@@ -134,22 +151,35 @@ namespace BloodborneLauncher.Views
             capturePad.PreviewMouseDown += (_, e) =>
             {
                 e.Handled = true;
-                if (InputMap.MouseToken(e.ChangedButton) is { } name) Commit(name);
+                if (_padInput == null && InputMap.MouseToken(e.ChangedButton) is { } name) Commit(name);
             };
             capturePad.PreviewMouseWheel += (_, e) =>
             {
                 e.Handled = true;
-                Commit(e.Delta > 0 ? "WheelUp" : "WheelDown");
+                if (_padInput == null) Commit(e.Delta > 0 ? "WheelUp" : "WheelDown");
             };
 
+            // Controller capture: the button pressed on the pad, or one picked from this list.
+            _padChoices = new WrapPanel { Margin = new Thickness(0, 0, 0, 6) };
+            foreach (var button in PadMap.Buttons.Where(b => b.Sdl.Length > 0))
+            {
+                var sdl = button.Sdl;
+                var chip = new Wpf.Ui.Controls.Button { Content = button.Label, Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(0, 0, 4, 4), FontSize = 12 };
+                chip.Click += (_, _) => CommitPad(sdl);
+                _padChoices.Children.Add(chip);
+            }
+            _padTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+            _padTimer.Tick += (_, _) => PollPad();
+
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
-            buttons.Children.Add(SmallButton("Unbind", SymbolRegular.Dismiss24, (_, _) => Commit(null)));
+            buttons.Children.Add(SmallButton("Unbind", SymbolRegular.Dismiss24, (_, _) => { if (_padInput != null) CommitPad(""); else Commit(null); }));
             buttons.Children.Add(SmallButton("Cancel", SymbolRegular.ArrowExit20, (_, _) => EndCapture()));
 
             var dialog = new StackPanel();
             dialog.Children.Add(_captureTitle);
-            dialog.Children.Add(captureHelp);
+            dialog.Children.Add(_captureHelp);
             dialog.Children.Add(capturePad);
+            dialog.Children.Add(_padChoices);
             dialog.Children.Add(_captureFeedback);
             dialog.Children.Add(buttons);
             var dialogCard = new Border
@@ -179,6 +209,21 @@ namespace BloodborneLauncher.Views
             var status = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
             status.Tick += (_, _) => { if (IsVisible) UpdatePadStatus(); };
             status.Start();
+            // A receiver stays connected while its pad is off: only input changing shows the pad is on.
+            var activity = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            activity.Tick += (_, _) =>
+            {
+                if (!IsVisible || Ws.Game.Running || _target != null || _padInput != null || !SdlPad.Available) return;
+                var state = SdlPad.State();
+                if (_padState != null && state != _padState)
+                {
+                    var first = _padSeen == null || DateTime.Now - _padSeen > TimeSpan.FromMinutes(2);
+                    _padSeen = DateTime.Now;
+                    if (first) UpdatePadStatus();
+                }
+                _padState = state;
+            };
+            activity.Start();
             Ws.PortChanged += () => { Rebuild(); FillProfiles(); };
             Rebuild();
             FillProfiles();
@@ -193,11 +238,34 @@ namespace BloodborneLauncher.Views
 
         private void UpdatePadStatus()
         {
-            var slots = XInput.Connected();
-            SetHint(_padStatus, slots.Count == 0
-                ? "No XInput controller detected right now. PlayStation pads work in the game directly; they show here through Steam Input or DS4Windows."
-                : $"Connected: XInput {(slots.Count == 1 ? "slot" : "slots")} {string.Join(", ", slots)}. The game uses the first one.");
-        }
+            // The engine's SDL sees pads exactly as the game will (while the game runs it owns them,
+            // so the launcher's own detection stands in).
+            var devices = Ws.Game.Running ? null : SdlPad.Devices();
+            if (devices != null)
+            {
+                if (devices.Count == 0)
+                {
+                    SetHint(_padStatus, "No controller connected. Plug one in or pair it over Bluetooth: it shows here right away. " +
+                        "DualShock 4, DualSense, Xbox, Switch Pro and many generic pads work without extra tools.");
+                    return;
+                }
+                // A pad behind a 2.4 GHz receiver can show as two: one line per name.
+                devices = devices.GroupBy(d => (d.Name, d.Supported)).Select(g => g.First()).ToList();
+                var lines = devices.Select(d => d.Supported
+                    ? $"● {d.Name}"
+                    : $"● {d.Name}: connected, but the game has no button layout for it. Switch the pad to its XInput / PC mode if it has one, or use Steam Input");
+                var responding = _padSeen != null && DateTime.Now - _padSeen < TimeSpan.FromMinutes(2);
+                SetHint(_padStatus, string.Join("\n", lines) + (devices.Any(d => d.Supported)
+                    ? responding ? "\nResponding: ready to play. The game uses the pad you press."
+                    : "\nDetected. Wireless pads show here while only the receiver is plugged in: press any button to check the pad is on."
+                    : ""));
+                return;
+            }
+            var pads = Gamepads.Detect();
+            SetHint(_padStatus, pads.Count == 0
+                ? "No controller connected. Plug one in or pair it over Bluetooth: it shows here right away."
+                : "● " + string.Join("   ● ", pads.Select(p => p.Name + (p.Bluetooth ? " (Bluetooth)" : ""))) +
+                  (Ws.Game.Running ? "\nIn use by the game." : "\nConnected."));        }
 
         // ---------------------------------------------------------------- the table
 
@@ -216,7 +284,8 @@ namespace BloodborneLauncher.Views
         private void Rebuild()
         {
             _table.Children.Clear();
-            _table.IsEnabled = Ini.Get("pc_controls", "1") != "0";
+            // Keyboard and mouse follow the PC controls switch; the controller column always works.
+            var pcControls = Ini.Get("pc_controls", "1") != "0";
             var usage = Usage();
             var filter = _search.Text.Trim();
 
@@ -246,13 +315,18 @@ namespace BloodborneLauncher.Views
                         Padding = new Thickness(6),
                         ToolTip = $"Back to the default ({Show(control.Default)})",
                         VerticalAlignment = VerticalAlignment.Center,
-                        Visibility = Bindings.IsDefault(Ini, control) ? Visibility.Hidden : Visibility.Visible,
+                        Visibility = Bindings.IsDefault(Ini, control) && (PadMap.InputFor(control) is not { } padInput || PadMap.IsDefault(Ini, padInput))
+                            ? Visibility.Hidden : Visibility.Visible,
                     };
-                    reset.Click += (_, _) => Store(c, InputMap.Split(c.Default));
+                    reset.Click += (_, _) =>
+                    {
+                        if (PadMap.InputFor(c) is { } input) PadMap.Reset(Ini, input);
+                        Store(c, InputMap.Split(c.Default));
+                    };
 
-                    var pad = Text(control.Pad ?? "—", "Faint");
-                    pad.VerticalAlignment = VerticalAlignment.Center;
-                    _table.Children.Add(TableRow(name, Cell(control, usage), pad, reset));
+                    var keys = Cell(control, usage);
+                    keys.IsEnabled = pcControls;
+                    _table.Children.Add(TableRow(name, keys, PadCell(control), reset));
                 }
             }
 
@@ -389,6 +463,36 @@ namespace BloodborneLauncher.Views
 
         // ---------------------------------------------------------------- storing
 
+        /// <summary>The controller column: the button that does this action, changeable when it is a PS4 button.</summary>
+        private FrameworkElement PadCell(ControlDef control)
+        {
+            if (PadMap.InputFor(control) is not { } input)
+            {
+                var label = control.Pad ?? "—";
+                if (Ini.Flag("pad_swap_sticks"))
+                    label = label == "Left stick" ? "Right stick" : label == "Right stick" ? "Left stick" : label;
+                var text = Text(label, "Faint");
+                text.VerticalAlignment = VerticalAlignment.Center;
+                return text;
+            }
+            // A chip like the keyboard ones: click and press the button on the pad (a drop-down here
+            // opened under the pointer and picked whatever the release landed on).
+            var current = PadMap.Main(Ini, input);
+            var chip = new Wpf.Ui.Controls.Button
+            {
+                Content = current.Length > 0 ? PadMap.Label(current) : "Not bound",
+                Icon = Icon(SymbolRegular.XboxController24),
+                Padding = new Thickness(8, 3, 10, 3),
+                FontSize = 12.5,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                ToolTip = $"The controller button for this action (the game's {control.Pad}). Click, then press a button on the pad.",
+            };
+            if (!PadMap.IsDefault(Ini, input)) chip.FontWeight = FontWeights.SemiBold;
+            chip.Click += (_, _) => BeginPadCapture(control, input);
+            return chip;
+        }
+
         private void Store(ControlDef control, List<string> names)
         {
             Bindings.Set(Ini, control, names);
@@ -407,7 +511,11 @@ namespace BloodborneLauncher.Views
         private void BeginCapture(ControlDef control)
         {
             _target = control;
+            _padInput = null;
             _captureTitle.Text = $"Bind {control.Label}";
+            _captureHelp.Text = "Press a key, or click / scroll inside the box. Esc cancels.";
+            _captureBoxText.Text = "Click or scroll here";
+            _padChoices.Visibility = Visibility.Collapsed;
             _captureFeedback.Text = "";
             _overlay.Visibility = Visibility.Visible;
             _overlay.Focus();
@@ -418,6 +526,54 @@ namespace BloodborneLauncher.Views
         {
             _overlay.Visibility = Visibility.Collapsed;
             _target = null;
+            _padInput = null;
+            _padControl = null;
+            _padTimer.Stop();
+        }
+
+        private void BeginPadCapture(ControlDef control, string input)
+        {
+            _target = null;
+            _padControl = control;
+            _padInput = input;
+            _captureTitle.Text = $"Controller button for {control.Label}";
+            var live = !Ws.Game.Running && SdlPad.Available;
+            _captureHelp.Text = live
+                ? "Press the button on your controller, or pick one below. Esc cancels. A button another action uses swaps over."
+                : Ws.Game.Running ? "Pick a button below (pressing one works while the game is closed)."
+                : "Pick a button below.";
+            _captureBoxText.Text = live ? "Waiting for a button…" : "Controller input is not available right now";
+            _padChoices.Visibility = Visibility.Visible;
+            _captureFeedback.Text = "";
+            _overlay.Visibility = Visibility.Visible;
+            _overlay.Focus();
+            Keyboard.Focus(_overlay);
+            if (live)
+            {
+                // Buttons already held when the dialog opens don't count until released.
+                _padHeld = SdlPad.Held();
+                _padTimer.Start();
+            }
+        }
+
+        private void PollPad()
+        {
+            if (_padInput == null || Ws.Game.Running) { _padTimer.Stop(); return; }
+            var held = SdlPad.Held();
+            var pressed = held.Except(_padHeld).FirstOrDefault();
+            _padHeld = held;
+            if (pressed != null) CommitPad(pressed);
+        }
+
+        private void CommitPad(string button)
+        {
+            if (_padInput == null || _padControl == null) return;
+            var input = _padInput;
+            var control = _padControl;
+            EndCapture();
+            PadMap.Assign(Ini, input, button);
+            Changed();
+            Ws.Log($"Controller: {control.Label} on {(button.Length > 0 ? PadMap.Label(button) : "nothing")}.", LogLevel.Step);
         }
 
         /// <summary>name: the captured input (it replaces the one of its kind), or null to unbind.</summary>
@@ -436,9 +592,14 @@ namespace BloodborneLauncher.Views
 
         private void Page_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (_target == null) return;
+            if (_target == null && _padInput == null) return;
             e.Handled = true;
             var key = e.Key == Key.System ? e.SystemKey : e.Key;
+            if (_padInput != null)
+            {
+                if (key == Key.Escape) EndCapture();
+                return;
+            }
             if (key == Key.Escape && Keyboard.Modifiers == ModifierKeys.None)
             {
                 EndCapture();
@@ -510,7 +671,7 @@ namespace BloodborneLauncher.Views
                 match?.Name ?? (S.Str("controls_profile") is { Length: > 0 } n ? n : "My controls"),
                 match?.Author ?? S.Str("profile_author"),
                 match?.Description ?? "",
-                ControlProfiles.Current(Ini));
+                ControlProfiles.Current(Ini), Pad: PadMap.Current(Ini));
         }
 
         private void SaveProfile()
@@ -534,7 +695,7 @@ namespace BloodborneLauncher.Views
                 return;
 
             S.Set("profile_author", values[1].Trim());
-            var profile = new ControlProfiles.Profile(name, values[1].Trim(), values[2].Trim(), ControlProfiles.Current(Ini));
+            var profile = new ControlProfiles.Profile(name, values[1].Trim(), values[2].Trim(), ControlProfiles.Current(Ini), Pad: PadMap.Current(Ini));
             try
             {
                 ControlProfiles.Save(profile);

@@ -21,8 +21,11 @@ The launcher updates itself from the Releases page.
   Polish, Turkish, Russian), game language, resolution,
   fullscreen, widescreen (21:9, 32:9), 30 / 60 / 90 / 120 / 144 FPS or uncapped.
 - **Graphics** – FSR 4, FSR 3, DLSS, TAA, sharpening, picture and camera tuning, game effects.
-  Experimental: VRAM cleanup for long sessions and precise frame pacing (both on, each can be turned off).
-- **Controls** – keyboard and mouse for all 29 actions (one key and one mouse input each),
+  Experimental: VRAM cleanup, texture memory sized to the GPU, precise frame pacing, render thread priority,
+  background shader compiling (all on, each can be turned off).
+- **Controls** – keyboard and mouse for all 29 actions (one key and one mouse input each), controller
+  remapping (click an action, press the button on the pad), swap sticks, invert camera, stick dead zone,
+  live controller detection (DualShock 4, DualSense, Xbox, Switch Pro, generic pads),
   mouse camera, mouse pointer in the game's menus, sensitivity and invert.
   - **Profiles**: EldenRingStyle (the default), PC default and Mouse focus built in; save your own, copy them as JSON to any paste site, import from a link or file.
 - **Trophies** – all 40, completion rate, in-game unlock notification with sound.
@@ -62,8 +65,9 @@ install into a package folder instead of `LauncherApp/`.
 
 ## Engine
 
-Our Windows build of the engine, with our own changes: uncapped FPS, VRAM cleanup, frame pacing
-and more menu languages. Patches and build steps are in [engine/](engine/).
+Our Windows build of the engine, with our own changes: performance and stutter work, VRAM cleanup,
+uncapped FPS, controller support, more menu languages and crash fixes. The patch, the full list and build
+steps are in [engine/](engine/).
 
 ## Credits
 
@@ -71,6 +75,8 @@ and more menu languages. Patches and build steps are in [engine/](engine/).
 |---|---|
 | Engine base | [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc) (built on [bbport](https://github.com/deadinside28/bloodborne_pc) and [shadPS4](https://github.com/shadps4-emu/shadPS4)) |
 | VRAM cleanup | adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR) |
+| Crash and controller fixes | adapted from [AwesomeObserver](https://github.com/AwesomeObserver/bloodborne_pc), [Supermedo](https://github.com/Supermedo/bloodborne_pc) and [deadinside28](https://github.com/deadinside28/bloodborne_pc) |
+| Controller mappings | [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) |
 | Trophy list | [pyL1nx/bloodborne_pc](https://github.com/pyL1nx/bloodborne_pc) |
 | UI library | [WPF-UI](https://github.com/lepoco/wpfui) |
 

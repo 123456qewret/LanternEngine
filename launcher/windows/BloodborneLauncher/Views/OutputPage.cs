@@ -36,21 +36,50 @@ namespace BloodborneLauncher.Views
             _output.SetResourceReference(StyleProperty, "CodeBox");
             Body.Children.Add(_output);
 
-            Ws.GameOutput += line =>
+            // One append per batch; while the page is hidden nothing is laid out, and it catches up
+            // in one go when shown.
+            Ws.GameOutput += batch =>
             {
-                _output.AppendText(line + "\n");
-                if (_output.LineCount > Workspace.MaxOutputLines + 200)
-                    _output.Text = string.Join("\n", Ws.OutputLines) + "\n";
+                if (!IsVisible)
+                {
+                    _stale = true;
+                    return;
+                }
+                _lines += batch.Count;
+                if (_lines > Workspace.MaxOutputLines + 500)
+                {
+                    Rebuild();
+                    return;
+                }
+                _output.AppendText(string.Join("\n", batch) + "\n");
                 if (_follow.IsChecked == true)
                     _output.ScrollToEnd();
             };
-            Ws.OutputCleared += () => _output.Clear();
+            Ws.OutputCleared += () =>
+            {
+                _output.Clear();
+                _lines = 0;
+            };
+            IsVisibleChanged += (_, _) => { if (IsVisible && _stale) Rebuild(); };
+            Rebuild();
+        }
+
+        private int _lines;
+        private bool _stale;
+
+        private void Rebuild()
+        {
             _output.Text = Ws.OutputLines.Count > 0 ? string.Join("\n", Ws.OutputLines) + "\n" : "";
+            _lines = Ws.OutputLines.Count;
+            _stale = false;
+            if (_follow.IsChecked == true)
+                _output.ScrollToEnd();
         }
 
         public override void OnShown()
         {
-            if (_follow.IsChecked == true)
+            if (_stale) Rebuild();
+            else if (_follow.IsChecked == true)
                 _output.ScrollToEnd();
         }
 

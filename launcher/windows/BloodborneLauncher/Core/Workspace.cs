@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows.Threading;
 
 namespace BloodborneLauncher.Core
@@ -25,6 +25,8 @@ namespace BloodborneLauncher.Core
         public event Action? TrophiesChanged;
 
         private DispatcherTimer? _trophyTimer;
+        private DispatcherTimer? _outputTimer;
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _pendingOutput = new();
 
         /// <summary>The game's output so far (this run), oldest first.</summary>
         public List<string> OutputLines { get; } = new();
@@ -32,7 +34,8 @@ namespace BloodborneLauncher.Core
         public event Action<string, LogLevel>? Logged;
         public event Action? Saved;
         public event Action? GameStateChanged;
-        public event Action<string>? GameOutput;
+        /// <summary>New output lines, in batches (on the UI thread).</summary>
+        public event Action<IReadOnlyList<string>>? GameOutput;
         public event Action? OutputCleared;
         /// <summary>The port folder changed: pages that show paths or files reload.</summary>
         public event Action? PortChanged;
@@ -62,20 +65,18 @@ namespace BloodborneLauncher.Core
             };
             _trophyTimer.Start();
 
-            Game.Output += line => Dispatch(() =>
-            {
-                Announce(Trophies.Observe(line));
-                OutputLines.Add(line);
-                if (OutputLines.Count > MaxOutputLines)
-                    OutputLines.RemoveRange(0, OutputLines.Count - MaxOutputLines);
-                GameOutput?.Invoke(line);
-            });
+            // Output arrives on the reader threads, often thousands of lines at once (the engine's
+            // statistics when it exits): it is queued and handed on in batches, ten times a second.
+            Game.Output += line => _pendingOutput.Enqueue(line);
+            _outputTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _outputTimer.Tick += (_, _) => FlushOutput();
+            _outputTimer.Start();
             Game.Exited += code => Dispatch(() =>
             {
                 Log(code == 0 ? "The game exited normally." : $"The game exited with code {code}.",
                     code == 0 ? LogLevel.Good : LogLevel.Warn);
-                OutputLines.Add($"— the game exited (code {code}) —");
-                GameOutput?.Invoke($"— the game exited (code {code}) —");
+                _pendingOutput.Enqueue($"— the game exited (code {code}) —");
+                FlushOutput();
                 GameStateChanged?.Invoke();
             });
         }
@@ -218,6 +219,19 @@ namespace BloodborneLauncher.Core
 
         public void Log(string message, LogLevel level = LogLevel.Info) =>
             Dispatch(() => Logged?.Invoke(message, level));
+
+        private void FlushOutput()
+        {
+            if (_pendingOutput.IsEmpty) return;
+            var batch = new List<string>();
+            while (_pendingOutput.TryDequeue(out var line)) batch.Add(line);
+            foreach (var line in batch)
+                Announce(Trophies.Observe(line));
+            OutputLines.AddRange(batch);
+            if (OutputLines.Count > MaxOutputLines)
+                OutputLines.RemoveRange(0, OutputLines.Count - MaxOutputLines);
+            GameOutput?.Invoke(batch);
+        }
 
         private static void Dispatch(Action action)
         {

@@ -30,6 +30,7 @@ namespace BloodborneLauncher.Core
         {
             if (_process != null)
                 return "The game is already running.";
+            SdlPad.Stop(); // the game takes the controllers
 
             ProcessStartInfo info;
             if (Custom(s))

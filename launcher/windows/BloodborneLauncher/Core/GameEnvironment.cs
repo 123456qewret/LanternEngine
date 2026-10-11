@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 
 namespace BloodborneLauncher.Core
 {
@@ -53,6 +53,18 @@ namespace BloodborneLauncher.Core
             // Experimental engine features: on by default, each can be turned off.
             env["BB_PRECISE_PACING"] = s.Bool("exp_precise_pacing") ? "1" : "0";
             env["BB_IMAGE_WRITEBACK_GC"] = s.Bool("exp_vram_cleanup") ? "1" : "0";
+            // Gamepads (SDL3 reads its hints from the environment): DualShock 3 through SDL's own
+            // driver (with DsHidMini or Sony's sixaxis driver installed), and the community
+            // mapping database for third-party pads when the package ships it.
+            foreach (var (key, value) in SdlHints())
+                env[key] = value;
+
+            // Off: the engine's earlier behaviour; on: its default (left unset).
+            if (!s.Bool("exp_texture_budget")) { env["BB_GC_PRESSURE_PERCENT"] = "0"; env["BB_GC_PRESSURE_SECONDS"] = "0"; }
+            if (!s.Bool("exp_gpu_priority")) env["BB_GPU_THREAD_PRIORITY"] = "0";
+            if (!s.Bool("exp_short_spin")) env["BB_SLEEP_SPIN_US"] = "600";
+            if (!s.Bool("exp_async_pipelines")) env["BB_ASYNC_PIPELINES"] = "0";
+            if (s.Bool("section_stats")) env["BB_SECTIONS"] = "1";
             // The account password never goes to bbport.ini; the engine takes it from here.
             if (s.Str("online_password").Length > 0) env["BB_SHADNET_PASSWORD"] = s.Str("online_password");
 
@@ -63,6 +75,15 @@ namespace BloodborneLauncher.Core
                     env[item[..at]] = item[(at + 1)..];
             }
             return env;
+        }
+
+        /// <summary>SDL3 hints for controllers, given to the game and used by the launcher's own SDL (SdlPad).</summary>
+        public static IEnumerable<(string Key, string Value)> SdlHints()
+        {
+            yield return ("SDL_JOYSTICK_HIDAPI_PS3", "1");
+            yield return ("SDL_JOYSTICK_HIDAPI_PS3_SIXAXIS_DRIVER", "1");
+            var mappings = Path.Combine(Paths.PortDir, "gamecontrollerdb.txt");
+            if (File.Exists(mappings)) yield return ("SDL_GAMECONTROLLERCONFIG_FILE", mappings);
         }
     }
 }

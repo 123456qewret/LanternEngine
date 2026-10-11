@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -46,6 +46,11 @@ namespace BloodborneLauncher.Core
             ["fsr4_balanced"] = false,
             ["exp_vram_cleanup"] = true,
             ["exp_precise_pacing"] = true,
+            ["exp_texture_budget"] = true,
+            ["exp_gpu_priority"] = true,
+            ["exp_short_spin"] = true,
+            ["exp_async_pipelines"] = true,
+            ["section_stats"] = false,
             ["trophy_notifications"] = true,
             ["trophy_sound"] = true,
             ["trophy_volume"] = 70,

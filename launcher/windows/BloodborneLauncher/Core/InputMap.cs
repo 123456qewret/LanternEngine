@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Windows.Input;
 
 namespace BloodborneLauncher.Core
@@ -203,6 +204,169 @@ namespace BloodborneLauncher.Core
 
         public static Dictionary<string, string> Current(IniFile ini) =>
             InputMap.Controls.ToDictionary(c => c.Name, c => InputMap.Join(Get(ini, c)));
+    }
+
+    /// <summary>
+    /// The controllers plugged in or paired right now: PlayStation and Switch pads from the HID
+    /// device list (the game reads them through SDL, no DS4Windows needed), Xbox pads via XInput.
+    /// </summary>
+    public static class Gamepads
+    {
+        public sealed record Pad(string Name, bool Bluetooth);
+
+        private static readonly Dictionary<(int Vid, int Pid), string> Known = new()
+        {
+            [(0x054C, 0x05C4)] = "DualShock 4",
+            [(0x054C, 0x09CC)] = "DualShock 4",
+            [(0x054C, 0x0BA0)] = "DualShock 4 (wireless adapter)",
+            [(0x054C, 0x0CE6)] = "DualSense",
+            [(0x054C, 0x0DF2)] = "DualSense Edge",
+            [(0x054C, 0x0268)] = "DualShock 3",
+            [(0x057E, 0x2009)] = "Switch Pro Controller",
+            [(0x20BC, 0x5500)] = "Betop BFM",
+        };
+
+        private static readonly Regex VidPid = new(@"vid[_&](?:0002)?([0-9a-f]{4}).*?pid[_&]([0-9a-f]{4})",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        public static List<Pad> Detect()
+        {
+            var pads = new List<Pad>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in HidPaths())
+            {
+                var match = VidPid.Match(path);
+                if (!match.Success) continue;
+                var key = (Convert.ToInt32(match.Groups[1].Value, 16), Convert.ToInt32(match.Groups[2].Value, 16));
+                // XInput pads (IG_ in the path) are counted through XInput below.
+                if (path.Contains("ig_", StringComparison.OrdinalIgnoreCase)) continue;
+                // Any other HID joystick or gamepad (generic, DirectInput pads: Betop, PS3 clones…)
+                // by its own product name.
+                if (!Known.TryGetValue(key, out var name) && (name = GenericGamepadName(path)) == null) continue;
+                // A pad exposes several HID collections; one entry per physical instance.
+                var instance = path.Split('#').ElementAtOrDefault(2) ?? path;
+                // Sony and Nintendo pads: one per instance; other pads often expose one HID
+                // interface per mode or slot, so they show once per model.
+                var id = key.Item1 == 0x054C || key.Item1 == 0x057E
+                    ? instance.Split('&').Take(2).Aggregate(name, (a, b) => a + b)
+                    : $"{key.Item1:x4}:{key.Item2:x4}";
+                if (seen.Add(id))
+                    pads.Add(new Pad(name, path.Contains("{00001124-", StringComparison.OrdinalIgnoreCase)));
+            }
+            foreach (var _ in XInput.Connected())
+                pads.Add(new Pad("Xbox controller", false));
+            return pads;
+        }
+
+        // ---------------------------------------------------------------- HID
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct HidCaps
+        {
+            public ushort Usage, UsagePage, InputReportByteLength, OutputReportByteLength, FeatureReportByteLength;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)] public ushort[] Reserved;
+            public ushort NumberLinkCollectionNodes, NumberInputButtonCaps, NumberInputValueCaps, NumberInputDataIndices,
+                NumberOutputButtonCaps, NumberOutputValueCaps, NumberOutputDataIndices,
+                NumberFeatureButtonCaps, NumberFeatureValueCaps, NumberFeatureDataIndices;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("hid.dll")]
+        private static extern bool HidD_GetPreparsedData(Microsoft.Win32.SafeHandles.SafeFileHandle device, out IntPtr data);
+        [DllImport("hid.dll")]
+        private static extern bool HidD_FreePreparsedData(IntPtr data);
+        [DllImport("hid.dll")]
+        private static extern int HidP_GetCaps(IntPtr data, out HidCaps caps);
+        [DllImport("hid.dll", CharSet = CharSet.Unicode)]
+        private static extern bool HidD_GetProductString(Microsoft.Win32.SafeHandles.SafeFileHandle device, char[] buffer, int length);
+
+        /// <summary>The product name of a HID joystick or gamepad (usage page 1, usage 4 or 5); null for anything else.</summary>
+        private static string? GenericGamepadName(string path)
+        {
+            try
+            {
+                // No access rights needed to read the descriptor, so pads other programs hold open work too.
+                using var device = CreateFileW(path, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                if (device.IsInvalid || !HidD_GetPreparsedData(device, out var data)) return null;
+                try
+                {
+                    if (HidP_GetCaps(data, out var caps) != 0x00110000 || caps.UsagePage != 1 || caps.Usage is not (4 or 5))
+                        return null;
+                }
+                finally
+                {
+                    HidD_FreePreparsedData(data);
+                }
+                var buffer = new char[127];
+                var name = HidD_GetProductString(device, buffer, buffer.Length * 2) ? new string(buffer).TrimEnd('\0').Trim() : "";
+                return name.Length > 0 ? name : "Game controller";
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // ---------------------------------------------------------------- SetupAPI
+
+        private static Guid HidInterface = new("4D1E55B2-F16F-11CF-88CB-001111000030");
+        private const int DIGCF_PRESENT = 0x2, DIGCF_DEVICEINTERFACE = 0x10;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct InterfaceData
+        {
+            public int Size;
+            public Guid Class;
+            public int Flags;
+            public IntPtr Reserved;
+        }
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern IntPtr SetupDiGetClassDevsW(ref Guid guid, IntPtr enumerator, IntPtr parent, int flags);
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr info, ref Guid guid, int index, ref InterfaceData data);
+        [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr set, ref InterfaceData data, IntPtr detail, int size, out int required, IntPtr info);
+        [DllImport("setupapi.dll")]
+        private static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+
+        private static List<string> HidPaths()
+        {
+            var paths = new List<string>();
+            var set = SetupDiGetClassDevsW(ref HidInterface, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+            if (set == IntPtr.Zero || set == new IntPtr(-1)) return paths;
+            try
+            {
+                var data = new InterfaceData { Size = Marshal.SizeOf<InterfaceData>() };
+                for (var i = 0; SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref HidInterface, i, ref data); i++)
+                {
+                    SetupDiGetDeviceInterfaceDetailW(set, ref data, IntPtr.Zero, 0, out var required, IntPtr.Zero);
+                    if (required <= 0) continue;
+                    var buffer = Marshal.AllocHGlobal(required);
+                    try
+                    {
+                        // SP_DEVICE_INTERFACE_DETAIL_DATA_W: cbSize is 8 on x64, then the path.
+                        Marshal.WriteInt32(buffer, IntPtr.Size == 8 ? 8 : 6);
+                        if (SetupDiGetDeviceInterfaceDetailW(set, ref data, buffer, required, out _, IntPtr.Zero))
+                            paths.Add(Marshal.PtrToStringUni(buffer + 4) ?? "");
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(buffer);
+                    }
+                }
+            }
+            catch
+            {
+                // No SetupAPI access: only XInput pads show.
+            }
+            finally
+            {
+                SetupDiDestroyDeviceInfoList(set);
+            }
+            return paths;
+        }
     }
 
     /// <summary>XInput: enough to show which Xbox-compatible pads are connected.</summary>

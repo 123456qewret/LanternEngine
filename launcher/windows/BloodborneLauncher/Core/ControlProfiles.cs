@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -28,7 +28,9 @@ namespace BloodborneLauncher.Core
         public const int Version = 2;
         private const int MaxBytes = 64 * 1024;
 
-        public sealed record Profile(string Name, string Author, string Description, Dictionary<string, string> Bindings, bool BuiltIn = false, string File = "");
+        /// <summary>Pad: the controller layout (pad.* lines, only inputs off their default); null: the profile leaves the controller alone.</summary>
+        public sealed record Profile(string Name, string Author, string Description, Dictionary<string, string> Bindings, bool BuiltIn = false, string File = "",
+            Dictionary<string, string>? Pad = null);
 
         public sealed record Parsed(Profile Profile, List<string> Notes);
 
@@ -137,6 +139,8 @@ namespace BloodborneLauncher.Core
                 var value = profile.Bindings.TryGetValue(control.Name, out var v) ? v : control.Default;
                 Bindings.Set(ini, control, InputMap.Split(value));
             }
+            if (profile.Pad != null)
+                PadMap.Apply(ini, profile.Pad);
             s.Set("controls_profile", profile.Name);
         }
 
@@ -156,6 +160,13 @@ namespace BloodborneLauncher.Core
                 ["description"] = profile.Description,
                 ["bindings"] = bindings,
             };
+            if (profile.Pad != null)
+            {
+                var pad = new JsonObject();
+                foreach (var (input, buttons) in profile.Pad)
+                    pad[input] = buttons;
+                json["pad"] = pad;
+            }
             return json.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n";
         }
 
@@ -221,12 +232,33 @@ namespace BloodborneLauncher.Core
             if (result.Count == 0)
                 throw new FormatException("This profile binds nothing the launcher knows.");
 
+            // The controller layout: PS4 inputs and SDL button names the launcher offers.
+            Dictionary<string, string>? padMap = null;
+            if (root["pad"] is JsonObject pad)
+            {
+                padMap = new Dictionary<string, string>();
+                var inputs = PadMap.Inputs.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var buttons = PadMap.Buttons.Where(b => b.Sdl.Length > 0).Select(b => b.Sdl).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var (input, node) in pad)
+                {
+                    if (!inputs.Contains(input))
+                    {
+                        notes.Add($"Controller: skipped unknown input \"{Clip(input, 30)}\".");
+                        continue;
+                    }
+                    var value = node is JsonValue jv && jv.TryGetValue<string>(out var s) ? s : "";
+                    var names = value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Where(n => buttons.Contains(n)).Select(n => n.ToLowerInvariant()).Distinct().Take(4).ToList();
+                    padMap[input.ToLowerInvariant()] = string.Join(", ", names);
+                }
+            }
+
             var nameText = Clip(Str(root, "name") ?? "", 60).Trim();
             return new Parsed(new Profile(
                 nameText.Length > 0 ? nameText : "Imported profile",
                 Clip(Str(root, "author") ?? "", 60).Trim(),
                 Clip(Str(root, "description") ?? "", 400).Trim(),
-                result), notes);
+                result, Pad: padMap), notes);
         }
 
         private static string? Str(JsonObject root, string key) =>

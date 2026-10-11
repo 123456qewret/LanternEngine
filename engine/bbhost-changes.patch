@@ -1,0 +1,3486 @@
+diff --git a/build.sh b/build.sh
+index 7a41a21..8114a20 100644
+--- a/build.sh
++++ b/build.sh
+@@ -38,11 +38,27 @@ fi
+ # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libbbgpu.so.
+ # BB_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
+ # Default: use the profile in pgo/ when there is one. BB_LTO=OFF disables link-time optimization.
++# Clang (Windows CLANG64) writes pgo/default_*.profraw: merged here into pgo/default.profdata,
++# which the "use" build reads (GCC: pgo/*.gcda, read as they are).
++mkdir -p pgo
++if [[ ${BB_PGO:-} != generate && -n $(find pgo -name '*.profraw' -print -quit 2>/dev/null) &&
++      ( ! -f pgo/default.profdata || -n $(find pgo -name '*.profraw' -newer pgo/default.profdata -print -quit) ) ]]; then
++    profdata=$(command -v llvm-profdata || true)
++    if [[ -n $profdata ]]; then
++        "$profdata" merge -o pgo/default.profdata pgo/*.profraw
++        echo "PGO: merged $(find pgo -name '*.profraw' | wc -l) raw profile(s) into pgo/default.profdata"
++    else
++        echo 'PGO: pgo/*.profraw found but no llvm-profdata in PATH; not merged' >&2
++    fi
++fi
+ pgo=${BB_PGO:-}
+ if [[ -z $pgo ]]; then
+-    if [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
++    if [[ -n $(find pgo \( -name '*.gcda' -o -name 'default.profdata' \) -print -quit 2>/dev/null) ]]; then
++        pgo=use
++    else
++        pgo=off
++    fi
+ fi
+-mkdir -p pgo
+ # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
+ # to FSR-Vulkan (gpu/patches/fsr-vulkan), applied to its working tree once.
+ if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
+@@ -54,8 +70,8 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
+     fi
+ done
+ cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
+-    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" >/dev/null
+-echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
++    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" -DBB_MARCH="${BB_MARCH:-}" >/dev/null
++echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}, march ${BB_MARCH:-default}"
+ # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
+ if ! ninja -C out/gpu bbgpu bb-engine-assets > out/gpu-build.log 2>&1; then
+     grep -v '^\[' out/gpu-build.log | tail -40 >&2
+diff --git a/gpu/CMakeLists.txt b/gpu/CMakeLists.txt
+index f51df72..f57a519 100644
+--- a/gpu/CMakeLists.txt
++++ b/gpu/CMakeLists.txt
+@@ -16,6 +16,14 @@ add_compile_options(-fno-omit-frame-pointer)
+ # profile). Covers bbgpu and the static libraries linked into it. No -march: the same build
+ # runs on the Steam Deck.
+ option(BB_LTO "Link-time optimization of bbgpu" ON)
++# bbport: optional instruction set level (BB_MARCH=x86-64-v2 in build.sh; empty: the compiler's
++# default, x86-64). v2 (SSE4.2, POPCNT, SSSE3, CX16) is a subset of what the game's own code
++# already requires (probe.c check_cpu: AVX, BMI1, LZCNT, POPCNT, SSE4.2, MOVBE), so it shuts out
++# no CPU that can run the game; v3 would (it adds AVX2/BMI2/FMA).
++set(BB_MARCH "" CACHE STRING "-march for bbgpu and its static libraries (empty: default)")
++if (BB_MARCH)
++    add_compile_options(-march=${BB_MARCH})
++endif()
+ set(BB_PGO "off" CACHE STRING "Profile-guided optimization: off, generate, use")
+ set(BB_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Profile directory")
+ if (BB_LTO)
+@@ -29,9 +37,20 @@ if (BB_LTO)
+ endif()
+ if (BB_PGO STREQUAL "generate")
+     # Atomic counters: the GPU, recording, preparation and copy threads run the same code.
++    # GCC writes .gcda files into BB_PGO_DIR, clang default_<pool>.profraw files (build.sh merges
++    # them into default.profdata with llvm-profdata).
+     add_compile_options(-fprofile-generate=${BB_PGO_DIR} -fprofile-update=atomic)
+     add_link_options(-fprofile-generate=${BB_PGO_DIR})
+     add_compile_definitions(BB_PGO_GENERATE)
++elseif (BB_PGO STREQUAL "use" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++    # bbport: clang (MSYS2 CLANG64 on Windows) reads one merged profile. It has no
++    # -fprofile-partial-training; -pgso=false keeps code the profile never ran from being
++    # optimized for size instead (the closest equivalent). Changed functions are compiled
++    # without profile data (warnings off).
++    add_compile_options(-fprofile-use=${BB_PGO_DIR}/default.profdata
++                        -Wno-profile-instr-missing -Wno-profile-instr-out-of-date
++                        -Wno-profile-instr-unprofiled -Wno-backend-plugin
++                        "SHELL:-mllvm -pgso=false")
+ elseif (BB_PGO STREQUAL "use")
+     # Partial training keeps unprofiled code optimized normally; counters from concurrent
+     # threads can be slightly inconsistent (correction). Functions changed since the profile
+@@ -212,6 +231,11 @@ if (WIN32)
+     # Windows headers: no min/max macros, no winsock 1 clash; Windows 10+ APIs (SetThreadDescription).
+     target_compile_definitions(bbgpu PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+     target_link_libraries(bbgpu PUBLIC xbyak::xbyak)
++    if (BB_PGO STREQUAL "generate")
++        # bbport: the instrumented static library needs the profile runtime in bb-probe.exe's
++        # link (add_link_options does not reach it): written into bbgpu_link.txt below.
++        target_link_options(bbgpu INTERFACE -fprofile-generate=${BB_PGO_DIR})
++    endif()
+     # bb-probe.exe links libbbgpu.a with these (out/gpu/bbgpu_link.txt, one argument per line,
+     # in link order): the static library's transitive dependencies.
+     include(cmake/LinkClosure.cmake)
+@@ -252,7 +276,8 @@ endif()
+ add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
+ target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+ target_include_directories(ui-composition-test PRIVATE ..)
+-add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bbport_settings.cpp)
++add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bbport_settings.cpp
++    shim/bbport_menu_i18n.cpp)
+ target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+ target_include_directories(settings-test PRIVATE .. shim)
+ 
+@@ -280,7 +305,7 @@ add_dependencies(camera-motion-test host_shaders)
+ 
+ # bbport: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
+ add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
+-    shim/bbport_settings.cpp)
++    shim/bbport_settings.cpp shim/bbport_menu_i18n.cpp)
+ target_include_directories(upscaler-support-test PRIVATE shim)
+ target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
+ 
+@@ -315,6 +340,7 @@ target_include_directories(pc-input-test PRIVATE shim)
+ target_link_libraries(pc-input-test PRIVATE PkgConfig::SDL3)
+ target_compile_options(pc-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+ add_executable(widescreen-test EXCLUDE_FROM_ALL ../tests/test_widescreen.cpp
+-    shim/engine/widescreen.cpp shim/engine/engine_hooks.cpp shim/bbport_settings.cpp)
++    shim/engine/widescreen.cpp shim/engine/engine_hooks.cpp shim/bbport_settings.cpp
++    shim/bbport_menu_i18n.cpp)
+ target_include_directories(widescreen-test PRIVATE shim)
+ target_compile_options(widescreen-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+diff --git a/gpu/shadps4/common/thread.cpp b/gpu/shadps4/common/thread.cpp
+index e2061f7..d03f6eb 100644
+--- a/gpu/shadps4/common/thread.cpp
++++ b/gpu/shadps4/common/thread.cpp
+@@ -3,6 +3,8 @@
+ // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
++#include <cstdlib>
+ #include <ctime>
+ #include <string>
+ #include <thread>
+@@ -35,8 +37,28 @@
+ #define cpu_set_t cpuset_t
+ #endif
+ 
++#if defined(_WIN32) && !defined(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)
++// Older MinGW headers (or _WIN32_WINNT < 0x0600) lack it; Windows 10 1803+ understands it.
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++
+ namespace Common {
+ 
++bool PrecisePacingEnabled() {
++    static const bool value = [] {
++        const char* v = std::getenv("BB_PRECISE_PACING");
++        if (v && v[0] != '\0') {
++            return v[0] != '0' && v[0] != 'n' && v[0] != 'N' && v[0] != 'f' && v[0] != 'F';
++        }
++#ifdef _WIN32
++        return true;
++#else
++        return false; // Linux keeps its original pacing unless asked.
++#endif
++    }();
++    return value;
++}
++
+ #ifdef __APPLE__
+ 
+ void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
+@@ -109,6 +131,49 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
+ 
+ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
+                    const bool interruptible) {
++    if (PrecisePacingEnabled()) {
++        // Adapted from IFreemz/shadPS4-Bloodborne-DLSS-FSR (f296a02, src/common/thread.cpp),
++        // GPL-2.0-or-later. Same approach as host_sleep_until_ns in src/runtime_host.c.
++        const auto begin = std::chrono::steady_clock::now();
++        DWORD ret = WAIT_OBJECT_0;
++        if (duration.count() <= 0) {
++            // A zero sleep is a yield.
++            SwitchToThread();
++        } else {
++            // One timer per thread, high resolution where available (Windows 10 1803+): a plain
++            // waitable timer rounds up to the system timer period (1 ms at best), and creating
++            // one per call costs two more system calls. The handle lives as long as the process
++            // (one per thread that sleeps here; only the present thread does).
++            thread_local HANDLE timer = [] {
++                HANDLE handle = CreateWaitableTimerExW(
++                    nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++                if (!handle) {
++                    handle = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
++                }
++                return handle;
++            }();
++            LARGE_INTEGER interval{
++                .QuadPart = -std::max<LONGLONG>(1, (duration.count() + 99) / 100),
++            };
++            if (timer && SetWaitableTimer(timer, &interval, 0, nullptr, nullptr, FALSE)) {
++                ret = WaitForSingleObjectEx(timer, INFINITE, interruptible ? TRUE : FALSE);
++            } else {
++                ret = SleepEx(static_cast<DWORD>((duration.count() + 999'999) / 1'000'000),
++                              interruptible ? TRUE : FALSE) == 0
++                          ? WAIT_OBJECT_0
++                          : WAIT_IO_COMPLETION;
++            }
++        }
++        if (remaining) {
++            const auto slept = std::chrono::steady_clock::now() - begin;
++            *remaining = duration > slept
++                             ? std::chrono::duration_cast<std::chrono::nanoseconds>(duration - slept)
++                             : std::chrono::nanoseconds(0);
++        }
++        return ret == WAIT_OBJECT_0;
++    }
++
++    // The original sleep (a new waitable timer per call); BB_PRECISE_PACING=0.
+     const auto begin_sleep = std::chrono::high_resolution_clock::now();
+ 
+     LARGE_INTEGER interval{
+@@ -230,7 +295,24 @@ AccurateTimer::AccurateTimer(std::chrono::nanoseconds target_interval)
+ void AccurateTimer::Start() {
+     const auto begin_sleep = std::chrono::high_resolution_clock::now();
+     if (total_wait.count() > 0) {
+-        AccurateSleep(total_wait, nullptr, false);
++        if (PrecisePacingEnabled()) {
++            // Adapted from IFreemz/shadPS4-Bloodborne-DLSS-FSR (1f75c63), GPL-2.0-or-later.
++            // OS timers wake up late. This timer paces vblank and therefore the frames a
++            // variable refresh rate display shows, so sleep most of the wait and spin the rest
++            // to keep every interval even (at most 1.5 ms, and 1/8 of the interval).
++            const std::chrono::nanoseconds spin =
++                std::min<std::chrono::nanoseconds>(std::chrono::microseconds(1500),
++                                                   target_interval / 8);
++            if (total_wait > spin) {
++                AccurateSleep(total_wait - spin, nullptr, false);
++            }
++            const auto deadline = begin_sleep + total_wait;
++            while (std::chrono::high_resolution_clock::now() < deadline) {
++                std::this_thread::yield();
++            }
++        } else {
++            AccurateSleep(total_wait, nullptr, false);
++        }
+     }
+     start_time = std::chrono::high_resolution_clock::now();
+     total_wait -= std::chrono::duration_cast<std::chrono::nanoseconds>(start_time - begin_sleep);
+diff --git a/gpu/shadps4/common/thread.h b/gpu/shadps4/common/thread.h
+index a300d10..d79dd6c 100644
+--- a/gpu/shadps4/common/thread.h
++++ b/gpu/shadps4/common/thread.h
+@@ -29,6 +29,11 @@ void SetThreadName(void* thread, const char* name);
+ bool AccurateSleep(std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
+                    bool interruptible);
+ 
++/// bbport: precise frame pacing (high-resolution timer sleeps plus a short spin, vblank ticks
++/// on a fixed schedule, a minimum gap between flips). On by default on Windows, off elsewhere;
++/// BB_PRECISE_PACING=0 / =1 overrides.
++bool PrecisePacingEnabled();
++
+ class AccurateTimer {
+     std::chrono::nanoseconds target_interval{};
+     std::chrono::nanoseconds total_wait{};
+diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
+index 30de04f..25e0c0f 100644
+--- a/gpu/shadps4/core/libraries/videoout/driver.cpp
++++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
+@@ -813,8 +813,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+     const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
+                                           : std::chrono::nanoseconds(0);
+     auto next_flip = std::chrono::steady_clock::now();
+-    std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
+-                EmulatorSettings.GetVblankFrequency(), frame_limit);
++    std::printf("VideoOut: vblank %u Hz, frame limit %u FPS, precise pacing %s\n",
++                EmulatorSettings.GetVblankFrequency(), frame_limit,
++                Common::PrecisePacingEnabled() ? "on" : "off");
+ 
+     const auto receive_request = [this] -> Request {
+         std::scoped_lock lk{mutex};
+@@ -831,6 +832,132 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+     // next vblank tick.
+     const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
+ 
++    const auto signal_vblank = [this] {
++        auto& vblank_status = main_port.vblank_status;
++        // Needs lock here as can be concurrently read by `sceVideoOutGetVblankStatus`
++        std::scoped_lock lock{main_port.vo_mutex};
++
++        // Trigger flip events for the port
++        for (auto event : main_port.vblank_events) {
++            auto equeue = Kernel::GetEqueue(event);
++            if (equeue != nullptr) {
++                equeue->TriggerEvent(static_cast<u64>(OrbisVideoOutInternalEventId::Vblank),
++                                     Kernel::OrbisKernelEvent::Filter::VideoOut,
++                                     reinterpret_cast<void*>(
++                                         static_cast<u64>(OrbisVideoOutInternalEventId::Vblank) |
++                                         (vblank_status.count << 16)));
++            }
++        }
++
++        // Update vblank status
++        vblank_status.count++;
++        vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
++        vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
++        main_port.vblank_cv.notify_all();
++    };
++
++    // bbport: precise pacing for immediate flips (Common::PrecisePacingEnabled: on by default on
++    // Windows, BB_PRECISE_PACING=0 turns it off; off on Linux unless =1). Adapted from
++    // IFreemz/shadPS4-Bloodborne-DLSS-FSR (6c69c55, "Even flip pacing for G-Sync, precise
++    // vblank ticks"), GPL-2.0-or-later.
++    // - Vblank ticks run on a fixed schedule (next = previous + period), re-anchored to now only
++    //   after a stall of more than a period; waits sleep on a high-resolution timer and spin the
++    //   last stretch, so ticks neither drift nor jitter by the OS timer granularity.
++    // - Flips keep an even rhythm of one pace period (the frame limit's period, or the vblank
++    //   period without a limit), and two flips are never closer than 7/8 of it: a late frame is
++    //   not followed by a catch-up flip right after it. With G-Sync/FreeSync the display
++    //   refreshes on every flip, so uneven flips are refresh rate swings (judder, flicker).
++    // Flips on vblank ticks without a frame limit keep the AccurateTimer path below.
++    if (immediate_flips && Common::PrecisePacingEnabled()) {
++        using Clock = std::chrono::steady_clock;
++        const std::chrono::nanoseconds pace = frame_limit ? frame_period : vblank_period;
++        const std::chrono::nanoseconds min_gap = pace * 7 / 8;
++        const std::chrono::nanoseconds slack = pace - min_gap;
++        // OS sleeps wake up late: sleep most of the way, spin the rest (at most 1.5 ms, and 1/8
++        // of the vblank period so 480 Hz ticks do not keep a core busy).
++        const std::chrono::nanoseconds spin = std::min<std::chrono::nanoseconds>(
++            std::chrono::microseconds(1500), vblank_period / 8);
++        const auto wait_until = [&](Clock::time_point deadline) {
++            const auto left = deadline - Clock::now();
++            if (left > spin) {
++                Common::AccurateSleep(
++                    std::chrono::duration_cast<std::chrono::nanoseconds>(left - spin), nullptr,
++                    false);
++            }
++            while (Clock::now() < deadline) {
++                std::this_thread::yield();
++            }
++        };
++
++        Clock::time_point next_tick = Clock::now();
++        next_flip = next_tick;
++        Clock::time_point last_flip = next_tick - min_gap;
++        const auto take_flip = [&](const Request& request, Clock::time_point now) {
++            next_flip = std::max<Clock::time_point>(next_flip + pace, now + min_gap);
++            last_flip = now;
++            Flip(request);
++            FRAME_END;
++        };
++        const auto end_tick = [&](Clock::time_point tick_deadline) {
++            wait_until(tick_deadline);
++            // Fixed schedule; after a long stall (a breakpoint, a hitch) start again from now.
++            const auto now = Clock::now();
++            next_tick = now - tick_deadline > vblank_period ? now : tick_deadline;
++        };
++
++        while (!token.stop_requested()) {
++            const Clock::time_point tick_deadline = next_tick + vblank_period;
++
++            if (DebugState.IsGuestThreadsPaused()) {
++                DrawLastFrame();
++                end_tick(tick_deadline);
++                continue;
++            }
++
++            // Check if it's time to take a request. On a tick, a flip up to `slack` before its
++            // slot is fine (ticks and flips run on separate schedules), as long as it keeps the
++            // minimum gap.
++            const auto now = Clock::now();
++            const bool flip_slot = now + slack >= next_flip && now >= last_flip + min_gap;
++            if (flip_slot && main_port.vblank_status.count % (main_port.flip_rate + 1) == 0) {
++                const auto request = receive_request();
++                if (!request) {
++                    if (!main_port.is_open) {
++                        DrawBlankFrame();
++                    } else if (ImGui::Core::MustKeepDrawing()) {
++                        DrawLastFrame();
++                    }
++                } else {
++                    take_flip(request, now);
++                }
++            }
++
++            signal_vblank();
++
++            // Until the next vblank: take flip requests as they arrive (not with a flip rate,
++            // which asks for flips on vblank ticks).
++            while (main_port.flip_rate == 0 && !token.stop_requested()) {
++                {
++                    std::unique_lock lk{mutex};
++                    if (!request_cv.wait_until(lk, tick_deadline - spin,
++                                               [this] { return !requests.empty(); })) {
++                        break; // next vblank
++                    }
++                }
++                if (next_flip >= tick_deadline) {
++                    break; // its slot is at (or after) the next vblank
++                }
++                wait_until(next_flip);
++                const auto request = receive_request();
++                if (request) {
++                    take_flip(request, Clock::now());
++                }
++            }
++            end_tick(tick_deadline);
++        }
++        return;
++    }
++
+     while (!token.stop_requested()) {
+         timer.Start();
+         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
+@@ -864,29 +991,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+             }
+         }
+ 
+-        {
+-            // Needs lock here as can be concurrently read by `sceVideoOutGetVblankStatus`
+-            std::scoped_lock lock{main_port.vo_mutex};
+-
+-            // Trigger flip events for the port
+-            for (auto event : main_port.vblank_events) {
+-                auto equeue = Kernel::GetEqueue(event);
+-                if (equeue != nullptr) {
+-                    equeue->TriggerEvent(
+-                        static_cast<u64>(OrbisVideoOutInternalEventId::Vblank),
+-                        Kernel::OrbisKernelEvent::Filter::VideoOut,
+-                        reinterpret_cast<void*>(
+-                            static_cast<u64>(OrbisVideoOutInternalEventId::Vblank) |
+-                            (vblank_status.count << 16)));
+-                }
+-            }
+-
+-            // Update vblank status
+-            vblank_status.count++;
+-            vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
+-            vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
+-            main_port.vblank_cv.notify_all();
+-        }
++        signal_vblank();
+ 
+         if (!immediate_flips || main_port.flip_rate != 0) {
+             timer.End();
+diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.cpp b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
+index fa7e146..ee3859e 100644
+--- a/gpu/shadps4/video_core/amdgpu/liverpool.cpp
++++ b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
+@@ -122,6 +122,7 @@ void Liverpool::ProcessCommands() {
+ 
+ void Liverpool::Process(std::stop_token stoken) {
+     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
++    BbThreads::MakeCritical(); // bbport: Windows, see bbport_platform.cpp
+     if (const int clock = BbPlatform::ThreadCpuClock(); clock != -1) {
+         BbStats::gpu_thread_clock.store(clock);
+     }
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
+index a123982..a9c39b6 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <boost/container/small_vector.hpp>
++#include <memory>
+ #include <stdexcept>
+ 
+ #include "common/serdes.h"
+@@ -108,6 +109,29 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
+         .stage = shader_ci,
+         .layout = *pipeline_layout,
+     };
++    // bbport (BB_ASYNC_PIPELINES): as graphics pipelines (vk_graphics_pipeline.cpp); the stage
++    // info only points at its subgroup size and the module, which outlives the pipeline.
++    if (!preloading && AsyncPipelinesEnabled() && subgroup_size_ci.pNext == nullptr &&
++        shader_ci.pSpecializationInfo == nullptr) {
++        struct Pending {
++            vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size;
++            vk::ComputePipelineCreateInfo info;
++        };
++        auto job = std::make_shared<Pending>();
++        job->subgroup_size = subgroup_size_ci;
++        job->info = compute_pipeline_ci;
++        job->info.stage.pNext = shader_ci.pNext ? &job->subgroup_size : nullptr;
++        ready.store(false, std::memory_order_relaxed);
++        SubmitPipelineJob([this, job, device, cache = pipeline_cache, name = debug_str] {
++            auto [result, created] = device.createComputePipelineUnique(cache, job->info);
++            ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
++                       vk::to_string(result));
++            pipeline = std::move(created);
++            SetObjectName(device, *pipeline, "Compute Pipeline {}", name);
++            MarkReady();
++        });
++        return;
++    }
+     auto [pipeline_result, pipe] =
+         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+     if (preloading && pipeline_result != vk::Result::eSuccess) {
+@@ -122,6 +146,8 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
+     SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+ }
+ 
+-ComputePipeline::~ComputePipeline() = default;
++ComputePipeline::~ComputePipeline() {
++    WaitReady(); // bbport: a compile thread may still be creating it
++}
+ 
+ } // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
+index 0e80933..99aa389 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
+@@ -197,6 +197,7 @@ private:
+ 
+     void Run(std::stop_token stop) {
+         Common::SetCurrentThreadName("bb:DrawRec");
++        BbThreads::MakeCritical();
+         on_stage_b = true;
+         BbSections::recording_thread = true;
+         stage_b_tid.store(BbPlatform::CurrentThreadId(), std::memory_order_release);
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
+index 995eb38..d2f9c82 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
+@@ -38,6 +38,15 @@ bool ReadFile(const std::string& path, std::vector<u8>& data) {
+ }
+ 
+ FfxFsr4ModelPreset ModelPreset(int preset) {
++    // Bloodborne PC (after IFreemz/shadPS4-Bloodborne-DLSS-FSR 9b2766e): BB_FSR4_BALANCED=1 runs
++    // the balanced model for the 2x and 3x presets too; it leaves fewer trails behind moving
++    // characters than the performance models, at some GPU cost. The render size stays the preset's.
++    static const bool balanced_low = [] {
++        const char* v = std::getenv("BB_FSR4_BALANCED");
++        return v && v[0] == '1';
++    }();
++    if (balanced_low && preset >= 3)
++        return FFX_FSR4_MODEL_PRESET_BALANCED;
+     switch (preset) {
+     case 0:
+         return FFX_FSR4_MODEL_PRESET_NATIVE_AA;
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+index 87381c5..0470c03 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+@@ -2,10 +2,21 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <condition_variable>
++#include <cstdlib>
++#include <deque>
++#include <functional>
++#include <memory>
++#include <mutex>
+ #include <stdexcept>
++#include <string>
++#include <thread>
+ #include <utility>
+ #include <boost/container/small_vector.hpp>
++#include <boost/container/static_vector.hpp>
+ 
++#include "bbport_threads.h"
++#include "common/thread.h"
+ #include "common/serdes.h"
+ #include "common/assert.h"
+ #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
+@@ -21,6 +32,99 @@ namespace Vulkan {
+ 
+ using Shader::Backend::SPIRV::AuxShaderType;
+ 
++/// bbport: pipelines first created during play go to compile threads (BB_ASYNC_PIPELINES=0:
++/// on the GPU command thread, as before). Pipelines loaded from the cache at startup are
++/// always created at once.
++bool AsyncPipelinesEnabled() {
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_ASYNC_PIPELINES");
++        return !(env && env[0] == '0');
++    }();
++    return enabled;
++}
++
++namespace {
++/// A graphics pipeline's create info with everything it points to owned by the job.
++struct PendingPipeline {
++    vk::GraphicsPipelineCreateInfo info;
++    boost::container::static_vector<vk::PipelineShaderStageCreateInfo, MaxShaderStages> stages;
++    vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size;
++    VertexInputs<vk::VertexInputBindingDescription> bindings;
++    VertexInputs<vk::VertexInputAttributeDescription> attributes;
++    VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
++    vk::PipelineVertexInputDivisorStateCreateInfo divisor_state;
++    vk::PipelineVertexInputStateCreateInfo vertex_input;
++    vk::PipelineInputAssemblyStateCreateInfo input_assembly;
++    vk::PipelineTessellationStateCreateInfo tessellation;
++    vk::PipelineViewportDepthClipControlCreateInfoEXT clip_control;
++    vk::PipelineViewportStateCreateInfo viewport;
++    vk::PipelineRasterizationStateCreateInfo raster;
++    vk::PipelineRasterizationProvokingVertexStateCreateInfoEXT provoking;
++    vk::PipelineRasterizationDepthClipStateCreateInfoEXT depth_clip;
++    vk::PipelineMultisampleStateCreateInfo multisample;
++    vk::PipelineDepthStencilStateCreateInfo depth_stencil;
++    std::array<vk::PipelineColorBlendAttachmentState, AmdGpu::NUM_COLOR_BUFFERS> attachments;
++    vk::PipelineColorBlendStateCreateInfo color_blend;
++    boost::container::static_vector<vk::DynamicState, 32> dynamic_states;
++    vk::PipelineDynamicStateCreateInfo dynamic;
++    std::array<vk::Format, Shader::IR::NumRenderTargets> color_formats;
++    std::array<vk::SampleCountFlagBits, AmdGpu::NUM_COLOR_BUFFERS> color_samples;
++    vk::AttachmentSampleCountInfoAMD mixed_samples;
++    vk::PipelineRenderingCreateInfo rendering;
++};
++
++/// Compile threads (BB_PIPELINE_THREADS, default a third of the hardware threads, 1-4), first
++/// in, first out: the draw that needs a pipeline first gets it first. Never stopped: pipelines
++/// destroyed at exit wait for their job (Pipeline::WaitReady).
++class PipelineCompiler {
++public:
++    static PipelineCompiler& Get() {
++        static auto* compiler = new PipelineCompiler();
++        return *compiler;
++    }
++
++    void Submit(std::function<void()> job) {
++        {
++            std::scoped_lock lk{mutex};
++            jobs.push_back(std::move(job));
++        }
++        cv.notify_one();
++    }
++
++private:
++    PipelineCompiler() {
++        u32 count = std::clamp<u32>(BbThreads::Available() / 3, 1, 4);
++        if (const char* env = std::getenv("BB_PIPELINE_THREADS"); env && env[0]) {
++            count = std::clamp(std::atoi(env), 1, 16);
++        }
++        for (u32 i = 0; i < count; ++i) {
++            std::thread([this, i] {
++                Common::SetCurrentThreadName(("bb:Pipeline" + std::to_string(i)).c_str());
++                for (;;) {
++                    std::function<void()> job;
++                    {
++                        std::unique_lock lk{mutex};
++                        cv.wait(lk, [this] { return !jobs.empty(); });
++                        job = std::move(jobs.front());
++                        jobs.pop_front();
++                    }
++                    job();
++                }
++            }).detach();
++        }
++    }
++
++    std::mutex mutex;
++    std::condition_variable cv;
++    std::deque<std::function<void()>> jobs;
++};
++
++} // namespace
++
++void SubmitPipelineJob(std::function<void()> job) {
++    PipelineCompiler::Get().Submit(std::move(job));
++}
++
+ static constexpr std::array LogicalStageToStageBit = {
+     vk::ShaderStageFlagBits::eFragment,
+     vk::ShaderStageFlagBits::eTessellationControl,
+@@ -428,6 +532,105 @@ GraphicsPipeline::GraphicsPipeline(
+         .layout = *pipeline_layout,
+     };
+ 
++    // bbport (BB_ASYNC_PIPELINES): a pipeline first seen during play is created by a compile
++    // thread; the draw recording thread waits for it only when it records the bind (Handle).
++    // Meanwhile the GPU command thread decodes on and starts the next new pipelines, so a burst
++    // of compiles (area loads: 50-90 at once, 0.5-1.3 s on one thread) runs in parallel.
++    if (!preloading && AsyncPipelinesEnabled()) {
++        auto job = std::make_shared<PendingPipeline>();
++        auto& j = *job;
++        bool ok = true;
++        j.stages.assign(shader_stages.begin(), shader_stages.end());
++        j.subgroup_size = subgroup_size_ci;
++        ok &= subgroup_size_ci.pNext == nullptr;
++        for (auto& s : j.stages) {
++            ok &= s.pNext == nullptr || s.pNext == &subgroup_size_ci;
++            s.pNext = s.pNext ? &j.subgroup_size : nullptr;
++        }
++        j.bindings = sdata.vertex_bindings;
++        j.attributes = sdata.vertex_attributes;
++        j.divisors = sdata.divisors;
++        j.divisor_state = divisor_state;
++        ok &= divisor_state.pNext == nullptr &&
++              divisor_state.pVertexBindingDivisors == sdata.divisors.data();
++        j.divisor_state.pVertexBindingDivisors = j.divisors.data();
++        j.vertex_input = vertex_input_info;
++        ok &= vertex_input_info.pNext == nullptr || vertex_input_info.pNext == &divisor_state;
++        j.vertex_input.pNext = vertex_input_info.pNext ? &j.divisor_state : nullptr;
++        j.vertex_input.pVertexBindingDescriptions = j.bindings.data();
++        j.vertex_input.pVertexAttributeDescriptions = j.attributes.data();
++        j.input_assembly = input_assembly;
++        j.tessellation = tessellation_state;
++        j.clip_control = clip_control;
++        j.viewport = viewport_info;
++        ok &= viewport_info.pNext == nullptr || viewport_info.pNext == &clip_control;
++        j.viewport.pNext = viewport_info.pNext ? &j.clip_control : nullptr;
++        // The rasterization chain, linked again in the same order without unlinked parts.
++        j.raster = raster_chain.get<vk::PipelineRasterizationStateCreateInfo>();
++        j.provoking = raster_chain.get<vk::PipelineRasterizationProvokingVertexStateCreateInfoEXT>();
++        j.depth_clip = raster_chain.get<vk::PipelineRasterizationDepthClipStateCreateInfoEXT>();
++        {
++            const void** next = &j.raster.pNext;
++            if (instance.IsProvokingVertexSupported()) {
++                *next = &j.provoking;
++                next = &j.provoking.pNext;
++            }
++            if (instance.IsDepthClipEnableSupported()) {
++                *next = &j.depth_clip;
++                next = &j.depth_clip.pNext;
++            }
++            *next = nullptr;
++        }
++        j.multisample = sdata.multisampling;
++        ok &= sdata.multisampling.pNext == nullptr && sdata.multisampling.pSampleMask == nullptr;
++        j.depth_stencil = depth_stencil_info;
++        j.attachments = attachments;
++        j.color_blend = color_blending;
++        ok &= color_blending.pNext == nullptr;
++        j.color_blend.pAttachments = j.attachments.data();
++        j.dynamic_states.assign(dynamic_states.begin(), dynamic_states.end());
++        j.dynamic = dynamic_info;
++        j.dynamic.pDynamicStates = j.dynamic_states.data();
++        j.color_formats = color_formats;
++        j.color_samples = color_samples;
++        j.mixed_samples = mixed_samples;
++        j.mixed_samples.pColorAttachmentSamples = j.color_samples.data();
++        j.rendering = pipeline_rendering_ci;
++        ok &= pipeline_rendering_ci.pNext == nullptr || pipeline_rendering_ci.pNext == &mixed_samples;
++        j.rendering.pNext = pipeline_rendering_ci.pNext ? &j.mixed_samples : nullptr;
++        j.rendering.pColorAttachmentFormats = j.color_formats.data();
++        j.info = pipeline_info;
++        ok &= input_assembly.pNext == nullptr && tessellation_state.pNext == nullptr &&
++              clip_control.pNext == nullptr && dynamic_info.pNext == nullptr &&
++              mixed_samples.pNext == nullptr && pipeline_info.pRasterizationState == &raster_chain.get() &&
++              pipeline_info.pMultisampleState == &sdata.multisampling;
++        j.info.pNext = &j.rendering;
++        j.info.stageCount = static_cast<u32>(j.stages.size());
++        j.info.pStages = j.stages.data();
++        j.info.pVertexInputState = pipeline_info.pVertexInputState ? &j.vertex_input : nullptr;
++        j.info.pInputAssemblyState = &j.input_assembly;
++        j.info.pTessellationState = &j.tessellation;
++        j.info.pViewportState = &j.viewport;
++        j.info.pRasterizationState = &j.raster;
++        j.info.pMultisampleState = &j.multisample;
++        j.info.pDepthStencilState = pipeline_info.pDepthStencilState ? &j.depth_stencil : nullptr;
++        j.info.pColorBlendState = &j.color_blend;
++        j.info.pDynamicState = &j.dynamic;
++        // Anything this copy does not know how to own (a chain added later): created here.
++        if (ok) {
++            ready.store(false, std::memory_order_relaxed);
++            SubmitPipelineJob([this, job, device, cache = pipeline_cache, name = debug_str] {
++                auto [result, created] = device.createGraphicsPipelineUnique(cache, job->info);
++                ASSERT_MSG(result == vk::Result::eSuccess,
++                           "Failed to create graphics pipeline: {}", vk::to_string(result));
++                pipeline = std::move(created);
++                SetObjectName(device, *pipeline, "Graphics Pipeline {}", name);
++                MarkReady();
++            });
++            return;
++        }
++    }
++
+     auto [pipeline_result, pipe] =
+         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+     if (preloading && pipeline_result != vk::Result::eSuccess) {
+@@ -442,7 +645,10 @@ GraphicsPipeline::GraphicsPipeline(
+     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
+ }
+ 
+-GraphicsPipeline::~GraphicsPipeline() = default;
++GraphicsPipeline::~GraphicsPipeline() {
++    // bbport: the compile thread may still be creating it (its job points at this object).
++    WaitReady();
++}
+ 
+ template <typename Attribute, typename Binding>
+ void GraphicsPipeline::GetVertexInputs(
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
+index 52778fb..4fdc47a 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
+ #include <span>
+ 
+ #include <boost/container/small_vector.hpp>
+@@ -20,7 +21,32 @@ Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorH
+     : instance{instance_}, scheduler{scheduler_}, desc_heap{desc_heap_}, profile{profile_},
+       is_compute{is_compute_} {}
+ 
+-Pipeline::~Pipeline() = default;
++Pipeline::~Pipeline() {
++    // bbport: a compile thread may still be writing `pipeline` (BB_ASYNC_PIPELINES).
++    WaitReady();
++}
++
++// bbport: time render threads waited for pipelines created on compile threads; reported with
++// the compile time of the GPU thread (BB_FRAME_STATS "shader/pipeline compiles, ... ms").
++extern std::atomic<u64> g_bb_compile_ns;
++
++void Pipeline::WaitReady() const noexcept {
++    if (ready.load(std::memory_order_acquire)) {
++        return;
++    }
++    const auto start = std::chrono::steady_clock::now();
++    while (!ready.load(std::memory_order_acquire)) {
++        ready.wait(false, std::memory_order_acquire);
++    }
++    g_bb_compile_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                               std::chrono::steady_clock::now() - start)
++                               .count());
++}
++
++void Pipeline::MarkReady() noexcept {
++    ready.store(true, std::memory_order_release);
++    ready.notify_all();
++}
+ 
+ 
+ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data,
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h
+index ff89b44..3bc4a14 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h
+@@ -3,6 +3,9 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++#include <functional>
++
+ #include "shader_recompiler/profile.h"
+ #include "shader_recompiler/runtime_info.h"
+ #include "video_core/renderer_vulkan/vk_common.h"
+@@ -25,6 +28,12 @@ class Instance;
+ class Scheduler;
+ class DescriptorHeap;
+ 
++/// bbport: pipelines first created during play are created on compile threads
++/// (BB_ASYNC_PIPELINES=0: where they are selected, as before; vk_graphics_pipeline.cpp).
++bool AsyncPipelinesEnabled();
++/// Runs `job` on a compile thread (BB_PIPELINE_THREADS), first in, first out.
++void SubmitPipelineJob(std::function<void()> job);
++
+ class Pipeline {
+ public:
+     Pipeline(const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
+@@ -32,10 +41,20 @@ public:
+              bool is_compute = false);
+     virtual ~Pipeline();
+ 
++    /// bbport: a graphics pipeline may still be created on a compile thread
++    /// (BB_ASYNC_PIPELINES): the first caller that needs the handle waits for it.
+     vk::Pipeline Handle() const noexcept {
++        if (!ready.load(std::memory_order_acquire)) [[unlikely]] {
++            WaitReady();
++        }
+         return *pipeline;
+     }
+ 
++    /// bbport: false while the pipeline is still being created on a compile thread.
++    [[nodiscard]] bool IsReady() const noexcept {
++        return ready.load(std::memory_order_acquire);
++    }
++
+     vk::PipelineLayout GetLayout() const noexcept {
+         return *pipeline_layout;
+     }
+@@ -66,7 +85,13 @@ public:
+ 
+ protected:
+     [[nodiscard]] std::string GetDebugString() const;
++    /// bbport: blocks until a compile thread has stored `pipeline` (Handle, destructors).
++    void WaitReady() const noexcept;
++    /// bbport: the compile thread stores `pipeline`, then sets this (release) and wakes waiters.
++    void MarkReady() noexcept;
+ 
++    /// bbport: cleared by a graphics pipeline whose creation went to a compile thread.
++    std::atomic<bool> ready{true};
+     const Instance& instance;
+     Scheduler& scheduler;
+     DescriptorHeap& desc_heap;
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
+index 06eadfd..4c707fe 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
+@@ -449,7 +449,7 @@ void Scheduler::KickRecording(bool force) {
+         MaybeSplit();
+     }
+     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
+-    if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
++    if (!force && full_chunks.empty() && CurrentChunk().Size() < 32 * 1024) {
+         return;
+     }
+     HandOver();
+@@ -461,7 +461,7 @@ void Scheduler::MaybeSplit() {
+         return;
+     }
+     // Cutting inside a render pass closes and reopens it: only after a longer stretch.
+-    const size_t bytes = segment_bytes + record_chunk->Size();
++    const size_t bytes = segment_bytes + CurrentChunk().Size();
+     if (bytes < (is_rendering ? 2 * split_bytes : split_bytes)) {
+         return;
+     }
+@@ -510,6 +510,11 @@ void Scheduler::HandOver() {
+     if (!commands && !ordered) {
+         return;
+     }
++    // The chunks that take the current ones' places, taken first (AcquireChunk locks
++    // recorder_mutex) and swapped in below: record_chunk and ordered_chunk are never null, not
++    // even for a fault handler recording on this thread meanwhile (deadinside28 10baf9d, #100).
++    std::unique_ptr<RecordChunk> next_record = record_chunk->Empty() ? nullptr : AcquireChunk();
++    std::unique_ptr<RecordChunk> next_ordered = ordered_chunk->Empty() ? nullptr : AcquireChunk();
+     Worker& worker = *workers[current_segment % workers.size()];
+     bool wake = false;
+     {
+@@ -521,11 +526,12 @@ void Scheduler::HandOver() {
+                 worker.queue.push_back(std::move(chunk));
+                 ++batch->handed[current_segment];
+             }
+-            if (!record_chunk->Empty()) {
+-                segment_bytes += record_chunk->Size();
+-                record_chunk->segment = current_segment;
+-                record_chunk->batch = batch;
+-                worker.queue.push_back(std::move(record_chunk));
++            if (next_record) {
++                record_chunk.swap(next_record); // next_record: the chunk handed over
++                segment_bytes += next_record->Size();
++                next_record->segment = current_segment;
++                next_record->batch = batch;
++                worker.queue.push_back(std::move(next_record));
+                 ++batch->handed[current_segment];
+             }
+             worker.queued.store(worker.queue.size(), std::memory_order_release);
+@@ -542,8 +548,9 @@ void Scheduler::HandOver() {
+             for (auto& chunk : ordered_full) {
+                 queue(std::move(chunk));
+             }
+-            if (!ordered_chunk->Empty()) {
+-                queue(std::move(ordered_chunk));
++            if (next_ordered) {
++                ordered_chunk.swap(next_ordered); // next_ordered: the chunk handed over
++                queue(std::move(next_ordered));
+             }
+             ordered_queued.store(ordered_queue.size(), std::memory_order_release);
+             // Any thread may run them; the current segment's thread is woken for them (when it
+@@ -622,7 +629,7 @@ void Scheduler::EnterDirectMode() {
+         }
+         // A segment nothing was handed to yet is not begun: it becomes the direct one.
+         const bool untouched =
+-            batch->handed[current_segment] == 0 && full_chunks.empty() && record_chunk->Empty();
++            batch->handed[current_segment] == 0 && full_chunks.empty() && CurrentChunk().Empty();
+         if (!untouched) {
+             // Its recording thread ends the segment's command buffer (the pool is that thread's).
+             Record([](vk::CommandBuffer cmdbuf) { Check(cmdbuf.end()); });
+@@ -675,6 +682,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
+         std::snprintf(name, sizeof(name), "bb:VkRecorder%u", index);
+         Common::SetCurrentThreadName(name);
+     }
++    BbThreads::MakeCritical();
+     Worker& worker = *workers[index];
+     std::vector<std::unique_ptr<RecordChunk>> ordered;
+     const auto has_work = [&] {
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
+index a0c6485..7297871 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
+@@ -601,6 +601,37 @@ struct SubmissionBatch {
+ class RecordChunk {
+ public:
+     static constexpr size_t Capacity = 128 * 1024;
++    /// Room kept free in the chunk for the command that consumes reserved data.
++    static constexpr size_t CommandReserve = 1024;
++
++    /// Makes room for `bytes` of Allocate() data. Groups that fit stay inline (no allocation);
++    /// a group larger than an empty chunk (e.g. thousands of buffer copies or barriers) gets
++    /// one uninitialized heap block owned by this chunk, freed when the chunk is recycled, so
++    /// no span outlives the commands that read it. False: retire this chunk and retry.
++    /// Ported from AwesomeObserver/bloodborne_pc 54bd756 (Evgeniy Doronin, GPL-2.0-or-later);
++    /// it replaces an ASSERT that ended the game with exit code 23.
++    bool ReserveData(size_t bytes) {
++        const size_t remaining = Capacity - used;
++        if (remaining < CommandReserve) {
++            return false;
++        }
++        if (spill_remaining >= bytes) {
++            return true;
++        }
++        if (bytes <= remaining - CommandReserve) {
++            spill_cursor = nullptr;
++            spill_remaining = 0;
++            return true;
++        }
++        if (bytes <= Capacity - CommandReserve) {
++            return false;
++        }
++        std::unique_ptr<std::byte[]> block{new std::byte[bytes]};
++        spill_cursor = block.get();
++        spill_remaining = bytes;
++        spill_blocks.push_back(std::move(block));
++        return true;
++    }
+ 
+     /// Returns false (and leaves `func` untouched) when the chunk has no room.
+     template <typename Func>
+@@ -625,8 +656,19 @@ public:
+ 
+     /// Raw storage in the chunk for a command's variable-length data; null when full.
+     void* Allocate(size_t bytes, size_t align) {
++        if (spill_cursor) {
++            void* result = spill_cursor;
++            size_t remaining = spill_remaining;
++            if (!std::align(align, bytes, result, remaining)) {
++                return nullptr;
++            }
++            spill_used += spill_remaining - remaining + bytes;
++            spill_cursor = static_cast<std::byte*>(result) + bytes;
++            spill_remaining = remaining - bytes;
++            return result;
++        }
+         const size_t offset = (used + align - 1) & ~(align - 1);
+-        if (offset + bytes > Capacity) {
++        if (offset > Capacity || bytes > Capacity - offset) {
+             return nullptr;
+         }
+         used = offset + bytes;
+@@ -643,6 +685,9 @@ public:
+         }
+         first = last = nullptr;
+         used = 0;
++        spill_cursor = nullptr;
++        spill_remaining = spill_used = 0;
++        spill_blocks.clear();
+     }
+ 
+     [[nodiscard]] bool Empty() const noexcept {
+@@ -650,7 +695,7 @@ public:
+     }
+ 
+     [[nodiscard]] size_t Size() const noexcept {
+-        return used;
++        return used + spill_used;
+     }
+ 
+     u32 segment = 0; ///< the command buffer segment the chunk is recorded into (Scheduler)
+@@ -687,6 +732,9 @@ private:
+ 
+     alignas(64) std::byte storage[Capacity];
+     size_t used = 0;
++    std::vector<std::unique_ptr<std::byte[]>> spill_blocks; ///< oversized data (ReserveData)
++    std::byte* spill_cursor = nullptr;
++    size_t spill_remaining = 0, spill_used = 0;
+     CommandBase* first{};
+     CommandBase* last{};
+ };
+@@ -812,9 +860,9 @@ public:
+             func(current_cmdbuf);
+             return;
+         }
+-        if (!record_chunk->Push(std::forward<Func>(func))) {
++        if (!CurrentChunk().Push(std::forward<Func>(func))) {
+             RetireChunk();
+-            const bool pushed = record_chunk->Push(std::forward<Func>(func));
++            const bool pushed = CurrentChunk().Push(std::forward<Func>(func));
+             ASSERT(pushed);
+         }
+     }
+@@ -861,12 +909,15 @@ public:
+     /// Makes room for `bytes` of RecordData() plus the command that uses them in the current
+     /// chunk: data and command must share a chunk, which is recycled once executed.
+     void ReserveRecordData(size_t bytes) {
++        ProducerScope producer{*this, "ReserveRecordData"};
+         if (!IsRecordingDeferred()) {
+             return;
+         }
+-        ASSERT(bytes + 1024 <= RecordChunk::Capacity);
+-        if (RecordChunk::Capacity - record_chunk->Size() < bytes + 1024) {
++        // Oversized groups spill into a block owned by the chunk (AwesomeObserver 54bd756).
++        if (!record_chunk->ReserveData(bytes)) {
+             RetireChunk();
++            const bool reserved = record_chunk->ReserveData(bytes);
++            ASSERT_MSG(reserved, "Cannot reserve {} bytes in an empty recording chunk", bytes);
+         }
+     }
+ 
+@@ -882,6 +933,7 @@ public:
+         const size_t bytes = data.size_bytes();
+         ReserveRecordData(bytes + alignof(T));
+         auto* dst = static_cast<T*>(record_chunk->Allocate(bytes, alignof(T)));
++        ASSERT_MSG(dst, "Cannot allocate {} recorded bytes, alignment {}", bytes, alignof(T));
+         std::memcpy(dst, data.data(), bytes);
+         return {dst, data.size()};
+     }
+@@ -1011,12 +1063,32 @@ private:
+ 
+     std::unique_ptr<RecordChunk> AcquireChunk();
+ 
+-    /// Moves the full current chunk aside; a new one takes its place.
++    /// Moves the full current chunk aside; a new one takes its place (swapped in: never null).
+     void RetireChunk() {
+         ProducerScope producer{*this, "RetireChunk"};
+-        segment_bytes += record_chunk->Size();
+-        full_chunks.push_back(std::move(record_chunk));
+-        record_chunk = AcquireChunk();
++        auto full = AcquireChunk();
++        record_chunk.swap(full);
++        if (full) {
++            segment_bytes += full->Size();
++            full_chunks.push_back(std::move(full));
++        }
++    }
++
++    /// The current chunks, never null: replacements are swapped in (RetireChunk, HandOver), so
++    /// a fault handler that records on this thread while one is replaced still finds one; a
++    /// null one is replaced here. From deadinside28/bloodborne_pc 10baf9d (issue #100: a read
++    /// of RecordChunk::Capacity at address 0x20000 on a Windows build).
++    RecordChunk& CurrentChunk() {
++        if (!record_chunk) [[unlikely]] {
++            record_chunk = AcquireChunk();
++        }
++        return *record_chunk;
++    }
++    RecordChunk& OrderedChunk() {
++        if (!ordered_chunk) [[unlikely]] {
++            ordered_chunk = AcquireChunk();
++        }
++        return *ordered_chunk;
+     }
+ 
+     /// Waits for the recording threads, then records on this thread into the current segment's
+@@ -1058,10 +1130,11 @@ private:
+             return;
+         }
+         auto command = [func = std::forward<Func>(func)](vk::CommandBuffer) mutable { func(); };
+-        if (!ordered_chunk->Push(std::move(command))) {
+-            ordered_full.push_back(std::move(ordered_chunk));
+-            ordered_chunk = AcquireChunk();
+-            const bool pushed = ordered_chunk->Push(std::move(command));
++        if (!OrderedChunk().Push(std::move(command))) {
++            auto full = AcquireChunk();
++            ordered_chunk.swap(full);
++            ordered_full.push_back(std::move(full));
++            const bool pushed = OrderedChunk().Push(std::move(command));
+             ASSERT(pushed);
+         }
+     }
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
+index ed0b5ca..56a81e7 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
+@@ -85,6 +85,8 @@ void Swapchain::Create(u32 width_, u32 height_) {
+ 
+     SetupImages();
+     RefreshSemaphores();
++    // The new chain may have fewer images (AwesomeObserver b3164c1): start the indices over.
++    frame_index = image_index = 0;
+ }
+ 
+ void Swapchain::Recreate(u32 width_, u32 height_) {
+@@ -120,6 +122,11 @@ bool Swapchain::AcquireNextImage() {
+     case vk::Result::eSuccess:
+         break;
+     case vk::Result::eSuboptimalKHR:
++        // A suboptimal acquire still owns an image and signals the semaphore: present it in the
++        // normal submission, then recreate (Present() returns false). Dropping it left the
++        // semaphore signalled and never waited on. From AwesomeObserver b3164c1 (E. Doronin).
++        needs_recreation = true;
++        return true;
+     case vk::Result::eErrorSurfaceLostKHR:
+     case vk::Result::eErrorOutOfDateKHR:
+     case vk::Result::eErrorUnknown:
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
+index a3240be..ed8f364 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
+@@ -1413,7 +1413,16 @@ float TemporalUpscaler::SceneMipBias() const {
+     if (!Active() || BbSettings::Get().upscaler == BbSettings::UpscalerTaa) return 0.0f;
+     const float render = float(BbSettings::Get().active_render_width.load());
+     const float output = float(Scaled() ? target_width : 1920u);
+-    return render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
++    const float scale_bias = render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
++    // DLSS (DLAA too) wants one more mip level of texture detail than the render/output ratio
++    // (NVIDIA's DLSS programming guide). From AwesomeObserver/bloodborne_pc b3164c1
++    // (Evgeniy Doronin). BB_DLSS_MIP_BIAS=0: the ratio only, as before.
++    static const bool dlss_extra = [] {
++        const char* env = std::getenv("BB_DLSS_MIP_BIAS");
++        return !env || env[0] != '0';
++    }();
++    const bool dlss_on = BbSettings::Get().upscaler == BbSettings::UpscalerDlss && UseFsr4();
++    return scale_bias - (dlss_extra && dlss_on ? 1.0f : 0.0f);
+ }
+ 
+ bool TemporalUpscaler::Scaled() const {
+diff --git a/gpu/shadps4/video_core/texture_cache/image.h b/gpu/shadps4/video_core/texture_cache/image.h
+index 21f9e6e..6d89586 100644
+--- a/gpu/shadps4/video_core/texture_cache/image.h
++++ b/gpu/shadps4/video_core/texture_cache/image.h
+@@ -162,6 +162,8 @@ public:
+     /// bbport: gc tick of the last LRU touch; skips the LRU list (a cache miss) when current.
+     mutable u64 lru_touched_tick = ~0ULL;
+     u64 tick_accessed_last{};
++    /// bbport (image write-back GC): gc tick before which a failed write-back is not retried.
++    u64 writeback_retry_tick = 0;
+     ImageId depth_id{};
+     u64 depth_uid{};
+     u64 image_uid{};
+diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
+index 98ccdd1..ea06039 100644
+--- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
++++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
+@@ -150,8 +150,36 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
+         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
+                       DEFAULT_CRITICAL_GC_MEMORY));
+     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
++    static_pressure_gc_memory = pressure_gc_memory;
++    static_critical_gc_memory = critical_gc_memory;
+ }
+ 
++namespace {
++/// bbport: discrete GPUs: the pressure mark as a share of the driver's current budget
++/// (BB_GC_PRESSURE_PERCENT, default 80; the critical mark 10 points higher). 0: shadPS4's
++/// marks only. Those keep 60% of an up to 8 GB budget vacant: on an 8 GB card the pressure
++/// mark is ~2.5 GB while the game's VRAM sits at 3.4-4.3 GB (RTX 5060, Central Yharnam), so
++/// the collector stayed in pressure mode, evicted hundreds of textures still in use (age 80
++/// submissions, about one frame), uploaded them again and waited for the GPU to write tiled
++/// render targets back. The marks never go below shadPS4's.
++u64 DiscretePressurePercent() {
++    static const u64 percent = [] {
++        const char* env = std::getenv("BB_GC_PRESSURE_PERCENT");
++        return env && env[0] ? std::min<u64>(std::strtoull(env, nullptr, 10), 85) : 80;
++    }();
++    return percent;
++}
++/// bbport: under pressure (below the critical mark) an image goes only once unused for this
++/// many seconds (BB_GC_PRESSURE_SECONDS, default 1; 0: 80 submissions as before).
++u64 PressureIdleSeconds() {
++    static const u64 seconds = [] {
++        const char* env = std::getenv("BB_GC_PRESSURE_SECONDS");
++        return std::min<u64>(env && env[0] ? std::strtoull(env, nullptr, 10) : 1, 10);
++    }();
++    return seconds;
++}
++} // namespace
++
+ TextureCache::~TextureCache() = default;
+ 
+ std::string TextureCache::DescribeImagesIn(VAddr addr, u64 size) {
+@@ -267,6 +295,155 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+     }
+ }
+ 
++// bbport (image write-back GC). Adapted from IFreemz/shadPS4-Bloodborne-DLSS-FSR, branch exp-1.9:
++// a560287 "Reclaim unused images with guarded writeback" (Cainhurst27, credit u/EnglishDave_) and
++// 0445949 "VRAM cleanup: don't retry a failed image write-back for 600 frames" (IFreemz).
++// Original code: Copyright 2024-2026 shadPS4 Emulator Project, Cainhurst27 and IFreemz;
++// licensed GPL-2.0-or-later like this file.
++// Differences: the surface is tiled into a host-visible copy of the guest memory and stored with
++// TryWriteBacking (as DownloadImageMemory's synchronous path), not into the buffer cache's arena;
++// the padding outside the image's extent keeps its guest bytes (TileImageOver); stricter layout
++// checks; other images over the range must not hold GPU data, and the clean ones are invalidated.
++bool TextureCache::WriteBackTiledImage(ImageId image_id) {
++    Image& image = slot_images[image_id];
++    if (False(image.flags & ImageFlagBits::GpuModified)) {
++        return true; // guest memory already holds its contents
++    }
++    const auto& info = image.info;
++    if (!info.props.is_tiled || info.guest_address == 0 || info.guest_size == 0 ||
++        !image.backing) {
++        return false;
++    }
++    // Only the plain colour surface is rebuilt: compression metadata, depth/stencil, MSAA,
++    // block-compressed, volume and thick-tiled layouts stay resident. So does an image whose
++    // newest contents may be in a reduced-resolution scene proxy (SceneTargets).
++    const auto& meta = info.meta_info;
++    if (meta.cmask_addr || meta.fmask_addr || meta.htile_addr || info.stencil_addr ||
++        info.props.is_depth || info.props.has_stencil || info.props.is_block ||
++        info.props.is_volume || info.num_samples != 1 || image.scene_proxy ||
++        image.aspect_mask != vk::ImageAspectFlags{vk::ImageAspectFlagBits::eColor} ||
++        AmdGpu::GetMicroTileThickness(info.array_mode) != 1) {
++        return false;
++    }
++    switch (info.num_bits) {
++    case 8:
++    case 16:
++    case 32:
++    case 64:
++    case 96:
++    case 128:
++        break;
++    default:
++        return false; // no tiling shader for it
++    }
++    const u32 bytes_per_texel = info.num_bits / 8;
++    // The tiling shader runs whole groups of 64 texels over guest_size.
++    if (info.guest_size % (bytes_per_texel * 64) != 0) {
++        return false;
++    }
++    const u32 levels = info.resources.levels;
++    const u32 layers = info.resources.layers;
++    if (levels == 0 || levels > info.mips_layout.size() || layers == 0) {
++        return false;
++    }
++    // The shader numbers texels mip after mip (x, y, then slice); the copies place mip m at its
++    // offset with rows of `pitch` texels and slices of `height` rows. Both agree, and every byte
++    // of guest_size is produced, only when the mips are contiguous and each is exactly
++    // pitch * height * layers texels.
++    u64 expected_offset = 0;
++    for (u32 mip = 0; mip < levels; ++mip) {
++        const auto& mip_info = info.mips_layout[mip];
++        if (mip_info.pitch == 0 || mip_info.height == 0 || mip_info.pitch % 8 != 0 ||
++            mip_info.height % 8 != 0 || mip_info.offset != expected_offset ||
++            u64{mip_info.pitch} * mip_info.height * bytes_per_texel * layers != mip_info.size) {
++            return false;
++        }
++        expected_offset += mip_info.size;
++    }
++    if (expected_offset != info.guest_size) {
++        return false;
++    }
++    auto* const memory = Core::Memory::Instance();
++    const VAddr address = info.guest_address;
++    const u64 size = info.guest_size;
++    // All of the range must be mapped: TryWriteBacking may otherwise store part of it.
++    if (memory->ClampRangeSize(address, size) != size) {
++        return false;
++    }
++    // The buffer cache may hold GPU writes over the range that guest memory has not seen.
++    if (buffer_cache.IsRegionGpuModified(address, size)) {
++        return false;
++    }
++    // Other images over the range: one holding GPU data would be overwritten in guest memory;
++    // the clean ones are invalidated once the write-back has landed.
++    ImageIds overlapping;
++    bool other_gpu_data = false;
++    ForEachImageInRegion(address, size, [&](ImageId other_id, Image& other) {
++        if (other_id == image_id) {
++            return;
++        }
++        if (True(other.flags & ImageFlagBits::GpuModified)) {
++            other_gpu_data = true;
++        }
++        overlapping.push_back(other_id);
++    });
++    if (other_gpu_data) {
++        return false;
++    }
++
++    boost::container::small_vector<vk::BufferImageCopy, 14> copies;
++    for (u32 mip = 0; mip < levels; ++mip) {
++        const auto& mip_info = info.mips_layout[mip];
++        const u32 width = std::max(info.size.width >> mip, 1u);
++        const u32 height = std::max(info.size.height >> mip, 1u);
++        // The inverse of RefreshImage's upload copies.
++        copies.push_back({
++            .bufferOffset = mip_info.offset,
++            .bufferRowLength = mip_info.pitch,
++            .bufferImageHeight = mip_info.height,
++            .imageSubresource{
++                .aspectMask = vk::ImageAspectFlagBits::eColor,
++                .mipLevel = mip,
++                .baseArrayLayer = 0,
++                .layerCount = layers,
++            },
++            .imageOffset = {0, 0, 0},
++            .imageExtent = {std::min(mip_info.pitch, width), std::min(mip_info.height, height), 1},
++        });
++    }
++
++    // A host-visible copy of the guest surface, tiled over on the GPU, then stored back whole.
++    const auto download = runtime.GetStagingPool().Request(
++        size, MemoryType::HostCached, std::max<u64>(instance.StorageMinAlignment(), 16));
++    if (!download.mapped) {
++        return false;
++    }
++    memory->CopySparseMemory(address, download.mapped, size);
++    download.Flush();
++    scheduler.EndRendering();
++    tile_manager.TileImageOver(image, copies, download.buffer, download.offset);
++    runtime.FlushBarriers();
++    // Synchronously, while the image still protects its pages (see GarbageCollectImages).
++    scheduler.Finish();
++    download.Invalidate();
++    BbFreeCheck::Check(address, size, download.mapped, BbFreeCheck::ImageDownload);
++    // False when part of the range lost its mapping meanwhile: the image stays (still the
++    // complete copy), and what was stored is its own data.
++    const bool written =
++        memory->TryWriteBacking(std::bit_cast<u8*>(address), download.mapped, size);
++    // Guest memory changed under the copies made of it, even by a partial store.
++    if (!WriteTracking()) {
++        buffer_cache.InvalidateMemory(address, size);
++    }
++    // As a CPU write over them would: re-uploaded from guest memory at their next use.
++    for (const ImageId other_id : overlapping) {
++        Image& other = slot_images[other_id];
++        other.flags |= ImageFlagBits::CpuDirty;
++        UntrackImage(other_id);
++    }
++    return written;
++}
++
+ void TextureCache::DumpImagesAt(VAddr address, const char* dir) {
+     boost::container::small_vector<ImageId, 4> ids;
+     {
+@@ -1160,6 +1337,9 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
+ }
+ 
+ void TextureCache::GarbageCollectImages() {
++    const u64 second = u64(std::chrono::duration_cast<std::chrono::seconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count());
+     if (instance.CanReportMemoryUsage()) {
+         total_used_memory = instance.GetDeviceMemoryUsage();
+         // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
+@@ -1179,6 +1359,16 @@ void TextureCache::GarbageCollectImages() {
+                 pressure_gc_memory = budget / 100 * 85;
+                 critical_gc_memory = budget / 100 * 95;
+             }
++        } else if (const u64 percent = DiscretePressurePercent();
++                   percent != 0 && second != gc_budget_second) {
++            // bbport: discrete GPUs (see DiscretePressurePercent); the budget once a second.
++            gc_budget_second = second;
++            if (const u64 budget = instance.GetDeviceMemoryBudgetNow(); budget != 0) {
++                pressure_gc_memory = std::max(static_pressure_gc_memory, budget / 100 * percent);
++                critical_gc_memory =
++                    std::max({static_critical_gc_memory, budget / 100 * (percent + 10),
++                              pressure_gc_memory});
++            }
+         }
+     }
+     BbStats::gc_used_bytes.store(total_used_memory, std::memory_order_relaxed);
+@@ -1188,9 +1378,6 @@ void TextureCache::GarbageCollectImages() {
+     // discrete GPU it stays over the trigger, where an age of 16 ticks (~3 frames) evicted every
+     // texture briefly off screen and uploaded it again. Below the pressure mark an image goes
+     // once unused for BB_GC_IDLE_SECONDS (20): the textures of an area left behind.
+-    const u64 second = u64(std::chrono::duration_cast<std::chrono::seconds>(
+-                               std::chrono::steady_clock::now().time_since_epoch())
+-                               .count());
+     if (second != gc_second) {
+         gc_second = second;
+         BbStats::coarse_second.store(u32(second), std::memory_order_relaxed);
+@@ -1216,6 +1403,17 @@ void TextureCache::GarbageCollectImages() {
+     u64 below_tick = 0;
+     size_t num_deletions = 0;
+     u32 visited = 0;
++    // bbport: GPU-written tiled images are written back (re-tiled) and freed under pressure.
++    // BB_IMAGE_WRITEBACK_GC=0: kept resident instead, as before.
++    static const bool tiled_writeback = [] {
++        const char* env = std::getenv("BB_IMAGE_WRITEBACK_GC");
++        return !(env && env[0] == '0');
++    }();
++    // Each write-back waits for the GPU (scheduler.Finish): at most this many a pass, and one
++    // that failed is not tried again for a while.
++    static constexpr size_t MaxTiledWritebacks = 4;
++    static constexpr u64 WritebackRetryTicks = 600;
++    size_t tiled_writebacks = 0;
+ 
+     const auto configure = [&](bool allow_aggressive) {
+         pressured = total_used_memory >= pressure_gc_memory;
+@@ -1224,6 +1422,9 @@ void TextureCache::GarbageCollectImages() {
+         below_tick = gc_tick - ticks_to_destroy;
+         if (!pressured && !aggresive) {
+             below_tick = std::min(below_tick, idle_tick);
++        } else if (!aggresive && PressureIdleSeconds() != 0) {
++            below_tick = std::min(below_tick, gc_tick_at_second[(second - PressureIdleSeconds()) %
++                                                                gc_tick_at_second.size()]);
+         }
+         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
+         visited = 0;
+@@ -1237,16 +1438,40 @@ void TextureCache::GarbageCollectImages() {
+         const bool download = image.SafeToDownload();
+         const bool tiled = image.info.IsTiled();
+         // bbport: images that cannot go now (GPU-written: their contents exist only here, and
+-        // tiled ones cannot be written back at all) neither use up the deletions nor stay first
+-        // in line. The oldest ten being such render targets stopped the collector for good, and
+-        // VRAM grew with every area visited up to the pressure mark (~10 GB on 16 GB).
+-        if ((tiled && download) || (download && !pressured)) {
++        // tiled ones only through a write-back that succeeded) neither use up the deletions nor
++        // stay first in line. The oldest ten being such render targets stopped the collector for
++        // good, and VRAM grew with every area visited up to the pressure mark (~10 GB on 16 GB).
++        const auto keep = [&] {
+             lru_cache.Touch(image.lru_id, gc_tick);
+             BbStats::gc_kept_images.fetch_add(1, std::memory_order_relaxed);
+             return false;
++        };
++        if (download && !pressured) {
++            return keep();
++        }
++        bool written_back = false;
++        if (tiled && download) {
++            // Image write-back GC (after IFreemz/shadPS4-Bloodborne-DLSS-FSR a560287, 0445949):
++            // freed only once its contents are back in guest memory, re-tiled.
++            if (!tiled_writeback || gc_tick < image.writeback_retry_tick) {
++                ++gc_tiled_kept;
++                return keep();
++            }
++            if (tiled_writebacks >= MaxTiledWritebacks) {
++                return false; // each waits for the GPU: the next pass, still first in line
++            }
++            ++tiled_writebacks;
++            if (!WriteBackTiledImage(image_id)) {
++                // Unsupported or failed: likely the same next time; the attempt waited for the GPU.
++                image.writeback_retry_tick = gc_tick + WritebackRetryTicks;
++                ++gc_tiled_kept;
++                return keep();
++            }
++            written_back = true;
++            ++gc_tiled_written;
+         }
+         --num_deletions;
+-        if (download) {
++        if (download && !written_back) {
+             // bbport: synchronously, while the image still protects its pages. A deferred
+             // write-back landed after FreeImage had unprotected them, over whatever the game
+             // had meanwhile stored there (e.g. its heap after unloading an area).
+@@ -1279,17 +1504,19 @@ void TextureCache::GarbageCollectImages() {
+         lru_cache.ForEachItemBelow(below_tick, clean_up);
+     }
+     // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
+-    if (pressured || gc_downloads != 0) {
++    if (pressured || gc_downloads != 0 || gc_tiled_written != 0) {
+         const auto now = std::chrono::steady_clock::now();
+         if (now - gc_report_time >= std::chrono::seconds(5)) {
+             std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu): "
+-                        "%llu images evicted, %llu written back since the last report\n",
++                        "%llu images evicted, %llu written back, %llu tiled written back, "
++                        "%llu tiled kept since the last report\n",
+                         (unsigned long long)(total_used_memory >> 20),
+                         (unsigned long long)(pressure_gc_memory >> 20),
+                         (unsigned long long)(critical_gc_memory >> 20),
+-                        (unsigned long long)gc_evictions, (unsigned long long)gc_downloads);
++                        (unsigned long long)gc_evictions, (unsigned long long)gc_downloads,
++                        (unsigned long long)gc_tiled_written, (unsigned long long)gc_tiled_kept);
+             gc_report_time = now;
+-            gc_evictions = gc_downloads = 0;
++            gc_evictions = gc_downloads = gc_tiled_written = gc_tiled_kept = 0;
+         }
+     }
+ }
+diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.h b/gpu/shadps4/video_core/texture_cache/texture_cache.h
+index 2e4c529..7318299 100644
+--- a/gpu/shadps4/video_core/texture_cache/texture_cache.h
++++ b/gpu/shadps4/video_core/texture_cache/texture_cache.h
+@@ -365,6 +365,12 @@ private:
+     /// Copies image memory back to CPU.
+     void DownloadImageMemory(ImageId image_id, bool sync = false);
+ 
++    /// bbport (image write-back GC): synchronously writes a GPU-modified tiled image back to
++    /// guest memory, re-tiled, so the collector can free it. False (nothing freed, guest memory
++    /// untouched or the image still the only complete copy) when the write-back is unsupported
++    /// for this image or could not be completed.
++    bool WriteBackTiledImage(ImageId image_id);
++
+     /// Thread function for copying downloaded images out to CPU memory.
+     void DownloadedImagesThread(const std::stop_token& token);
+ 
+@@ -420,6 +426,9 @@ private:
+     std::unordered_set<ImageId> download_images;
+     u64 total_used_memory = 0;
+     u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
++    /// bbport (image write-back GC): tiled images written back / kept (write-back refused or
++    /// failed) since the last pressure report.
++    u64 gc_tiled_written = 0, gc_tiled_kept = 0;
+     std::chrono::steady_clock::time_point gc_report_time{};
+     /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
+     std::array<u64, 64> gc_tick_at_second{};
+@@ -427,6 +436,11 @@ private:
+     u64 trigger_gc_memory = 0;
+     u64 pressure_gc_memory = 0;
+     u64 critical_gc_memory = 0;
++    /// bbport: shadPS4's marks from the startup budget, the floor of the discrete-GPU rule
++    /// (GarbageCollectImages), and the second the driver's budget was last asked for.
++    u64 static_pressure_gc_memory = 0;
++    u64 static_critical_gc_memory = 0;
++    u64 gc_budget_second = ~0ull;
+     u64 total_used_samplers = 0;
+     u64 trigger_gc_samplers = 0;
+     u64 pressure_gc_samplers = 0;
+diff --git a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp b/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
+index da02543..8e9d6bb 100644
+--- a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
++++ b/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
+@@ -339,4 +339,82 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
+                          vk::AccessFlagBits2::eShaderWrite);
+ }
+ 
++// bbport (image write-back GC): TileImage for a write-back of the whole guest surface. Adapted
++// from the tiled write-back of IFreemz/shadPS4-Bloodborne-DLSS-FSR (exp-1.9, a560287 by
++// Cainhurst27, credit u/EnglishDave_; GPL-2.0-or-later). TileImage tiles a linear staging copy
++// of which only the image's extent holds data: the rest (padding rows and columns, beyond a
++// render target's hinted size) is whatever the pool held, and tiling writes it into the guest
++// surface. Here the linear staging is first detiled from `out_buffer`, which the caller filled
++// with the guest memory: bytes the image does not cover go back as they were.
++void TileManager::TileImageOver(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
++                                const VideoCore::Buffer* out_buffer, u64 out_offset) {
++    const auto& info = in_image.info;
++    ASSERT(info.props.is_tiled && !buffer_copies.empty() &&
++           buffer_copies.size() <= info.mips_layout.size());
++
++    TilingInfo params{};
++    params.bank_swizzle = info.bank_swizzle;
++    params.num_slices = info.props.is_volume ? info.size.depth : info.resources.layers;
++    params.num_mips = static_cast<u32>(buffer_copies.size());
++    for (u32 mip = 0; mip < params.num_mips; ++mip) {
++        auto& mip_info = params.mips[mip];
++        mip_info = info.mips_layout[mip];
++        if (info.props.is_block) {
++            mip_info.pitch = std::max((mip_info.pitch + 3) / 4, 1U);
++            mip_info.height = std::max((mip_info.height + 3) / 4, 1U);
++        }
++    }
++
++    const vk::DescriptorBufferInfo params_buffer_info{
++        .buffer = stream_buffer.Handle(),
++        .offset = stream_buffer.Copy(&params, sizeof(params), instance.UniformMinAlignment()),
++        .range = sizeof(params),
++    };
++
++    const auto staging = runtime.GetStagingPool().Request(
++        info.guest_size, MemoryType::DeviceLocal, instance.StorageMinAlignment());
++
++    scheduler.EndRendering();
++    runtime.FlushBarriers();
++
++    const vk::DescriptorBufferInfo tiled_buffer_info{
++        .buffer = out_buffer->Handle(),
++        .offset = out_offset,
++        .range = info.guest_size,
++    };
++    const vk::DescriptorBufferInfo linear_buffer_info{
++        .buffer = staging.buffer->Handle(),
++        .offset = staging.offset,
++        .range = info.guest_size,
++    };
++    const auto dim_x = static_cast<u32>((info.guest_size / (info.num_bits / 8)) / 64);
++
++    // 1. The guest surface, detiled into the linear staging.
++    RecordTilingDispatch(GetTilingPipeline(info, false), tiled_buffer_info, linear_buffer_info,
++                         params_buffer_info, dim_x);
++    runtime.AccessBuffer(out_buffer, out_offset, info.guest_size,
++                         vk::PipelineStageFlagBits2::eComputeShader,
++                         vk::AccessFlagBits2::eShaderRead);
++    runtime.AccessBuffer(staging.buffer, staging.offset, info.guest_size,
++                         vk::PipelineStageFlagBits2::eComputeShader,
++                         vk::AccessFlagBits2::eShaderWrite);
++
++    // 2. The image over it (DownloadImage waits for the dispatch: a write to the same range).
++    for (auto& copy : buffer_copies) {
++        copy.bufferOffset += staging.offset;
++    }
++    runtime.DownloadImage(&in_image, staging.buffer, buffer_copies);
++    runtime.FlushBarriers();
++
++    // 3. All of it tiled back into the guest surface.
++    RecordTilingDispatch(GetTilingPipeline(info, true), tiled_buffer_info, linear_buffer_info,
++                         params_buffer_info, dim_x);
++    runtime.AccessBuffer(staging.buffer, staging.offset, info.guest_size,
++                         vk::PipelineStageFlagBits2::eComputeShader,
++                         vk::AccessFlagBits2::eShaderRead);
++    runtime.AccessBuffer(out_buffer, out_offset, info.guest_size,
++                         vk::PipelineStageFlagBits2::eComputeShader,
++                         vk::AccessFlagBits2::eShaderWrite);
++}
++
+ } // namespace VideoCore
+diff --git a/gpu/shadps4/video_core/texture_cache/tile_manager.h b/gpu/shadps4/video_core/texture_cache/tile_manager.h
+index 36d0505..0de4773 100644
+--- a/gpu/shadps4/video_core/texture_cache/tile_manager.h
++++ b/gpu/shadps4/video_core/texture_cache/tile_manager.h
+@@ -49,6 +49,12 @@ public:
+     void TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
+                    const VideoCore::Buffer* out_buffer, u64 out_offset);
+ 
++    /// bbport (image write-back GC): tiles a tiled image into `out_buffer`, which holds the guest
++    /// surface (info.guest_size bytes at out_offset): bytes outside the image's extent keep the
++    /// value they had there. `buffer_copies`: one per mip, offsets relative to the linear layout.
++    void TileImageOver(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
++                       const VideoCore::Buffer* out_buffer, u64 out_offset);
++
+     std::pair<const Buffer*, u64> DetileImage(const VideoCore::Buffer* in_buffer, u64 in_offset,
+                                               const ImageInfo& info);
+ 
+diff --git a/gpu/shim/bbgpu.cpp b/gpu/shim/bbgpu.cpp
+index f38aea7..4a7aa7e 100644
+--- a/gpu/shim/bbgpu.cpp
++++ b/gpu/shim/bbgpu.cpp
+@@ -274,8 +274,29 @@ bool g_window_ready;
+ } // namespace
+ 
+ #ifdef BB_PGO_GENERATE
++#ifdef __clang__
++// bbport: clang's profile runtime (IR instrumentation, .profraw). __gcov_dump links there too
++// but writes only gcov data (none here): the profile was written at a normal exit only. With
++// -fprofile-generate=<dir> the file is default_%m.profraw and each write merges into it, hence
++// the reset after it.
++extern "C" int __llvm_profile_write_file(void);
++extern "C" void __llvm_profile_reset_counters(void);
++static void ProfileDump() {
++    __llvm_profile_write_file();
++}
++static void ProfileReset() {
++    __llvm_profile_reset_counters();
++}
++#else
+ extern "C" void __gcov_dump(void);
+ extern "C" void __gcov_reset(void);
++static void ProfileDump() {
++    __gcov_dump();
++}
++static void ProfileReset() {
++    __gcov_reset();
++}
++#endif
+ // Instrumented build (BB_PGO=generate): the game often ends through _exit (watchdog, guest
+ // exit), which skips the profile write at exit. Write every 30 s and reset: the files sum the
+ // intervals.
+@@ -284,8 +305,8 @@ static void StartProfileWriter() {
+         Common::SetCurrentThreadName("bb:pgo");
+         for (;;) {
+             std::this_thread::sleep_for(std::chrono::seconds(30));
+-            __gcov_dump();
+-            __gcov_reset();
++            ProfileDump();
++            ProfileReset();
+             std::printf("PGO: profile written\n");
+         }
+     }).detach();
+diff --git a/gpu/shim/bbport_copy.cpp b/gpu/shim/bbport_copy.cpp
+index f9d2884..35a5357 100644
+--- a/gpu/shim/bbport_copy.cpp
++++ b/gpu/shim/bbport_copy.cpp
+@@ -186,6 +186,8 @@ private:
+ 
+     void Loop(unsigned index) {
+         Common::SetCurrentThreadName(("bb:Copy" + std::to_string(index)).c_str());
++        // The GPU command thread waits for these copies (WaitHostCopies, WaitAsync).
++        BbThreads::MakeCritical();
+         u64 seen = 0;
+         std::unique_lock lk{mutex};
+         while (true) {
+diff --git a/gpu/shim/bbport_menu_i18n.cpp b/gpu/shim/bbport_menu_i18n.cpp
+new file mode 100644
+index 0000000..16a69e0
+--- /dev/null
++++ b/gpu/shim/bbport_menu_i18n.cpp
+@@ -0,0 +1,1087 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: the in-game menu (bbport_overlay.cpp) in the languages other than English and
++// Russian, which MenuText takes at its call sites. Each table maps the English text, exactly as
++// passed to MenuText (the effect labels: bbport_settings.h Effects), to its translation; text
++// missing here is shown in English. Translations keep the printf specifiers of the English text in
++// the same order and the ImGui ID after "###"; FSR, DLSS, TAA, RCAS, SSAO, key and button names,
++// preset names and paths stay as they are. The menu font (DejaVu Sans) has every character used.
++#include "bbport_menu_i18n.h"
++
++#include <array>
++#include <cstddef>
++#include <string_view>
++#include <unordered_map>
++
++namespace BbSettings {
++
++namespace {
++
++struct Entry {
++    const char* english;
++    const char* text;
++};
++
++// Spanish (es)
++constexpr Entry kSpanish[] = {
++    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
++     "Bloodborne - Gráficos  (Insert / L3+R3)###bbport_settings"},
++    {"%.0f FPS  (%.1f ms)",
++     "%.0f FPS  (%.1f ms)"},
++    {"Temporal upscaler",
++     "Escalado temporal"},
++    {"Off",
++     "Desactivado"},
++    {"TAA (native anti-aliasing)",
++     "TAA (antialiasing nativo)"},
++    {"Upscaler",
++     "Escalador"},
++    {"— not supported by this GPU",
++     "— no compatible con esta GPU"},
++    {"— in development",
++     "— en desarrollo"},
++    {"FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output "
++     "matches the DLL). One model for Native through Performance and another for Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).",
++     "FSR 4.1.1 en modo INT8: el modelo de la DLL 4.1.1 de AMD, reproducido en Vulkan (el "
++     "resultado coincide con la DLL). Un modelo de Native a Performance y otro para Ultra "
++     "Performance. Recursos: tools/fsr4cap/build_assets.sh (requiere la DLL y Proton)."},
++    {"FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality than "
++     "FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the model (a "
++     "brief pause). Assets: tools/fetch_fsr4_assets.sh.",
++     "FSR 4 en modo INT8 (modelo v07 del código fuente de AMD FidelityFX SDK). Mayor calidad "
++     "que FSR 3.1, pero el pase es más exigente. Cambiar el preajuste reconstruye el modelo "
++     "(una breve pausa). Recursos: tools/fetch_fsr4_assets.sh."},
++    {"FSR 4: auto exposure",
++     "FSR 4: exposición automática"},
++    {"FSR 4: invert jitter sign",
++     "FSR 4: invertir signo del jitter"},
++    {"For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses it to "
++     "decide when to discard previous frames. Changes apply immediately, without a restart.",
++     "Para diagnosticar ghosting: la red de FSR 4 normaliza el color según la exposición y "
++     "la usa para decidir cuándo descartar fotogramas anteriores. Los cambios se aplican al "
++     "instante, sin reiniciar."},
++    {"Preset",
++     "Preajuste"},
++    {"%s (x%.1f, render %dx%d)",
++     "%s (x%.1f, renderizado %dx%d)"},
++    {"Character motion vectors",
++     "Vectores de movimiento de personajes"},
++    {"Accurate vectors for animated objects: clothing and weapons break up less during "
++     "movement. The static scene does not get an additional pass. Changes apply after "
++     "restarting the game.",
++     "Vectores precisos para objetos animados: la ropa y las armas se deshacen menos en "
++     "movimiento. La escena estática no recibe un pase adicional. Se aplica tras reiniciar "
++     "el juego."},
++    {"Show motion vectors (debug)",
++     "Mostrar vectores de movimiento (depuración)"},
++    {"Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel "
++     "received an accurate object vector, not just camera motion. The upscaler treats a "
++     "moving object with no blue or red/green as stationary, causing trails.",
++     "Rojo/verde: movimiento horizontal/vertical (8 píxeles = brillo máximo). Azul: el píxel "
++     "recibió un vector de objeto preciso, no solo el movimiento de la cámara. El escalador "
++     "trata un objeto en movimiento sin azul ni rojo/verde como inmóvil, lo que provoca "
++     "estelas."},
++    {"Output resolution",
++     "Resolución de salida"},
++    {"Size of the final frame and UI. The preset sets the scene size relative to the output: "
++     "4K Performance = 1920x1080. Applies after restarting the game.",
++     "Tamaño del fotograma final y de la interfaz. El preajuste fija el tamaño de la escena "
++     "respecto a la salida: 4K Performance = 1920x1080. Se aplica tras reiniciar el juego."},
++    {"The final frame and UI size changes at the next frame boundary. The preset sets the "
++     "scene size relative to the output: 4K Performance = 1920x1080. Changing the size "
++     "resets FSR history and may cause a brief pause.",
++     "El tamaño del fotograma final y de la interfaz cambia en el siguiente fotograma. El "
++     "preajuste fija el tamaño de la escena respecto a la salida: 4K Performance = "
++     "1920x1080. Cambiar el tamaño reinicia el historial de FSR y puede causar una breve "
++     "pausa."},
++    {"Auto (based on GPU)",
++     "Automático (según la GPU)"},
++    {"Off (faster)",
++     "Desactivado (más rápido)"},
++    {"On",
++     "Activado"},
++    {"Live resolution changes",
++     "Cambio de resolución en vivo"},
++    {"On: output resolution and preset change without restarting, but game post-processing "
++     "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. Off: "
++     "everything renders at the preset resolution, and changes require a restart. Auto "
++     "enables this on powerful discrete GPUs. Applies after restarting the game.",
++     "Activado: la resolución de salida y el preajuste cambian sin reiniciar, pero el "
++     "posprocesado del juego se queda en 1080p, lo que es notablemente más lento en Steam "
++     "Deck y GPU antiguas. Desactivado: todo se renderiza a la resolución del preajuste y "
++     "los cambios requieren reiniciar. Automático lo activa en GPU dedicadas potentes. Se "
++     "aplica tras reiniciar el juego."},
++    {"Game effects (restart required)",
++     "Efectos del juego (requiere reinicio)"},
++    {"Highest (-2)",
++     "Máximo (-2)"},
++    {"Game default",
++     "Predeterminado del juego"},
++    {"Lower (1)",
++     "Bajo (1)"},
++    {"Lowest (2)",
++     "Mínimo (2)"},
++    {"Model detail",
++     "Detalle de modelos"},
++    {"Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
++     "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
++     "Los efectos se activan y desactivan mediante parches del juego al iniciar "
++     "(patches/Bloodborne.xml). El desenfoque de movimiento y las sombras de luces dinámicas "
++     "cargan notablemente la GPU."},
++    {"Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad "
++     "/ Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from Nexus mod "
++     "#253. Right touchpad: Backspace.",
++     "Cámara libre: mantén Cross y pulsa L3 (teclado: Space + Z). Menú de depuración: "
++     "touchpad izquierdo / Tab. Requiere DbgFont14h.ccm y DbgFont14h.tpf en dvdroot_ps4/font "
++     "del mod #253 de Nexus. Touchpad derecho: Backspace."},
++    {"Changes apply after restarting the game",
++     "Los cambios se aplican tras reiniciar el juego"},
++    {"Apply and restart game",
++     "Aplicar y reiniciar el juego"},
++    {"Other",
++     "Otros"},
++    {"FPS counter in corner",
++     "Contador de FPS en la esquina"},
++    {"Close",
++     "Cerrar"},
++    {"Settings are saved to bbport.ini",
++     "Los ajustes se guardan en bbport.ini"},
++    {"Chromatic aberration",
++     "Aberración cromática"},
++    {"Depth of field (DoF)",
++     "Profundidad de campo (DoF)"},
++    {"Motion blur",
++     "Desenfoque de movimiento"},
++    {"Ambient occlusion (SSAO)",
++     "Oclusión ambiental (SSAO)"},
++    {"Game's own anti-aliasing",
++     "Antialiasing propio del juego"},
++    {"Shadows from dynamic lights",
++     "Sombras de luces dinámicas"},
++    {"Screen-space reflections (not in original game)",
++     "Reflejos en espacio de pantalla (no estaban en el juego)"},
++    {"Skip startup intros",
++     "Omitir intros al iniciar"},
++    {"Free camera (Cross + L3)",
++     "Cámara libre (Cross + L3)"},
++    {"Debug menu (requires font files)",
++     "Menú de depuración (requiere archivos de fuente)"},
++};
++
++// Portuguese, Brazil (pt_BR)
++constexpr Entry kPortugueseBrazil[] = {
++    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
++     "Bloodborne - Gráficos  (Insert / L3+R3)###bbport_settings"},
++    {"%.0f FPS  (%.1f ms)",
++     "%.0f FPS  (%.1f ms)"},
++    {"Temporal upscaler",
++     "Upscaler temporal"},
++    {"Off",
++     "Desligado"},
++    {"TAA (native anti-aliasing)",
++     "TAA (anti-aliasing nativo)"},
++    {"Upscaler",
++     "Upscaler"},
++    {"— not supported by this GPU",
++     "— não suportado por esta GPU"},
++    {"— in development",
++     "— em desenvolvimento"},
++    {"FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output "
++     "matches the DLL). One model for Native through Performance and another for Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).",
++     "FSR 4.1.1 no modo INT8: o modelo da DLL 4.1.1 da AMD, reproduzido em Vulkan (o "
++     "resultado é igual ao da DLL). Um modelo de Native a Performance e outro para Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requer a DLL e o Proton)."},
++    {"FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality than "
++     "FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the model (a "
++     "brief pause). Assets: tools/fetch_fsr4_assets.sh.",
++     "FSR 4 no modo INT8 (modelo v07 do código-fonte do AMD FidelityFX SDK). Qualidade maior "
++     "que a do FSR 3.1, mas a passada é mais pesada. Trocar a predefinição reconstrói o "
++     "modelo (uma breve pausa). Assets: tools/fetch_fsr4_assets.sh."},
++    {"FSR 4: auto exposure",
++     "FSR 4: exposição automática"},
++    {"FSR 4: invert jitter sign",
++     "FSR 4: inverter sinal do jitter"},
++    {"For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses it to "
++     "decide when to discard previous frames. Changes apply immediately, without a restart.",
++     "Para diagnosticar ghosting: a rede do FSR 4 normaliza a cor pela exposição e a usa "
++     "para decidir quando descartar quadros anteriores. As alterações valem na hora, sem "
++     "reiniciar."},
++    {"Preset",
++     "Predefinição"},
++    {"%s (x%.1f, render %dx%d)",
++     "%s (x%.1f, renderização %dx%d)"},
++    {"Character motion vectors",
++     "Vetores de movimento dos personagens"},
++    {"Accurate vectors for animated objects: clothing and weapons break up less during "
++     "movement. The static scene does not get an additional pass. Changes apply after "
++     "restarting the game.",
++     "Vetores precisos para objetos animados: roupas e armas se desfazem menos durante o "
++     "movimento. A cena estática não recebe uma passada extra. Aplica-se após reiniciar o "
++     "jogo."},
++    {"Show motion vectors (debug)",
++     "Mostrar vetores de movimento (depuração)"},
++    {"Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel "
++     "received an accurate object vector, not just camera motion. The upscaler treats a "
++     "moving object with no blue or red/green as stationary, causing trails.",
++     "Vermelho/verde: movimento horizontal/vertical (8 pixels = brilho máximo). Azul: o "
++     "pixel recebeu um vetor de objeto preciso, não apenas o movimento da câmera. O upscaler "
++     "trata um objeto em movimento sem azul nem vermelho/verde como parado, o que causa "
++     "rastros."},
++    {"Output resolution",
++     "Resolução de saída"},
++    {"Size of the final frame and UI. The preset sets the scene size relative to the output: "
++     "4K Performance = 1920x1080. Applies after restarting the game.",
++     "Tamanho do quadro final e da interface. A predefinição define o tamanho da cena em "
++     "relação à saída: 4K Performance = 1920x1080. Aplica-se após reiniciar o jogo."},
++    {"The final frame and UI size changes at the next frame boundary. The preset sets the "
++     "scene size relative to the output: 4K Performance = 1920x1080. Changing the size "
++     "resets FSR history and may cause a brief pause.",
++     "O tamanho do quadro final e da interface muda no próximo quadro. A predefinição define "
++     "o tamanho da cena em relação à saída: 4K Performance = 1920x1080. Mudar o tamanho "
++     "redefine o histórico do FSR e pode causar uma breve pausa."},
++    {"Auto (based on GPU)",
++     "Automático (conforme a GPU)"},
++    {"Off (faster)",
++     "Desligada (mais rápido)"},
++    {"On",
++     "Ligada"},
++    {"Live resolution changes",
++     "Mudança de resolução em tempo real"},
++    {"On: output resolution and preset change without restarting, but game post-processing "
++     "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. Off: "
++     "everything renders at the preset resolution, and changes require a restart. Auto "
++     "enables this on powerful discrete GPUs. Applies after restarting the game.",
++     "Ligada: a resolução de saída e a predefinição mudam sem reiniciar, mas o "
++     "pós-processamento do jogo fica em 1080p, o que é bem mais lento no Steam Deck e em "
++     "GPUs antigas. Desligada: tudo é renderizado na resolução da predefinição, e as "
++     "mudanças exigem reinício. Automático a liga em GPUs dedicadas potentes. Aplica-se após "
++     "reiniciar o jogo."},
++    {"Game effects (restart required)",
++     "Efeitos do jogo (requer reinício)"},
++    {"Highest (-2)",
++     "Máximo (-2)"},
++    {"Game default",
++     "Padrão do jogo"},
++    {"Lower (1)",
++     "Baixo (1)"},
++    {"Lowest (2)",
++     "Mínimo (2)"},
++    {"Model detail",
++     "Detalhe dos modelos"},
++    {"Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
++     "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
++     "Os efeitos são ligados e desligados por patches do jogo na inicialização "
++     "(patches/Bloodborne.xml). Desfoque de movimento e sombras de luzes dinâmicas pesam "
++     "bastante na GPU."},
++    {"Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad "
++     "/ Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from Nexus mod "
++     "#253. Right touchpad: Backspace.",
++     "Câmera livre: segure Cross e pressione L3 (teclado: Space + Z). Menu de depuração: "
++     "touchpad esquerdo / Tab. Requer DbgFont14h.ccm e DbgFont14h.tpf em dvdroot_ps4/font, "
++     "do mod #253 do Nexus. Touchpad direito: Backspace."},
++    {"Changes apply after restarting the game",
++     "As alterações valem após reiniciar o jogo"},
++    {"Apply and restart game",
++     "Aplicar e reiniciar o jogo"},
++    {"Other",
++     "Outros"},
++    {"FPS counter in corner",
++     "Contador de FPS no canto"},
++    {"Close",
++     "Fechar"},
++    {"Settings are saved to bbport.ini",
++     "As configurações são salvas em bbport.ini"},
++    {"Chromatic aberration",
++     "Aberração cromática"},
++    {"Depth of field (DoF)",
++     "Profundidade de campo (DoF)"},
++    {"Motion blur",
++     "Desfoque de movimento"},
++    {"Ambient occlusion (SSAO)",
++     "Oclusão de ambiente (SSAO)"},
++    {"Game's own anti-aliasing",
++     "Anti-aliasing próprio do jogo"},
++    {"Shadows from dynamic lights",
++     "Sombras de luzes dinâmicas"},
++    {"Screen-space reflections (not in original game)",
++     "Reflexos em espaço de tela (não existiam no jogo)"},
++    {"Skip startup intros",
++     "Pular vídeos de abertura"},
++    {"Free camera (Cross + L3)",
++     "Câmera livre (Cross + L3)"},
++    {"Debug menu (requires font files)",
++     "Menu de depuração (requer arquivos de fonte)"},
++};
++
++// French (fr)
++constexpr Entry kFrench[] = {
++    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
++     "Bloodborne - Graphismes  (Insert / L3+R3)###bbport_settings"},
++    {"%.0f FPS  (%.1f ms)",
++     "%.0f FPS  (%.1f ms)"},
++    {"Temporal upscaler",
++     "Mise à l'échelle temporelle"},
++    {"Off",
++     "Désactivé"},
++    {"TAA (native anti-aliasing)",
++     "TAA (anticrénelage natif)"},
++    {"Upscaler",
++     "Upscaler"},
++    {"— not supported by this GPU",
++     "— non pris en charge par ce GPU"},
++    {"— in development",
++     "— en développement"},
++    {"FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output "
++     "matches the DLL). One model for Native through Performance and another for Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).",
++     "FSR 4.1.1 en mode INT8 : le modèle de la DLL 4.1.1 d'AMD, reproduit en Vulkan "
++     "(résultat identique à la DLL). Un modèle de Native à Performance et un autre pour "
++     "Ultra Performance. Ressources : tools/fsr4cap/build_assets.sh (nécessite la DLL et "
++     "Proton)."},
++    {"FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality than "
++     "FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the model (a "
++     "brief pause). Assets: tools/fetch_fsr4_assets.sh.",
++     "FSR 4 en mode INT8 (modèle v07 issu des sources du AMD FidelityFX SDK). Meilleure "
++     "qualité que FSR 3.1, mais la passe est plus exigeante. Changer de préréglage "
++     "reconstruit le modèle (brève pause). Ressources : tools/fetch_fsr4_assets.sh."},
++    {"FSR 4: auto exposure",
++     "FSR 4 : exposition automatique"},
++    {"FSR 4: invert jitter sign",
++     "FSR 4 : inverser le signe du jitter"},
++    {"For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses it to "
++     "decide when to discard previous frames. Changes apply immediately, without a restart.",
++     "Pour diagnostiquer le ghosting : le réseau FSR 4 normalise la couleur selon "
++     "l'exposition et s'en sert pour décider quand rejeter les images précédentes. Les "
++     "changements s'appliquent immédiatement, sans redémarrage."},
++    {"Preset",
++     "Préréglage"},
++    {"%s (x%.1f, render %dx%d)",
++     "%s (x%.1f, rendu %dx%d)"},
++    {"Character motion vectors",
++     "Vecteurs de mouvement des personnages"},
++    {"Accurate vectors for animated objects: clothing and weapons break up less during "
++     "movement. The static scene does not get an additional pass. Changes apply after "
++     "restarting the game.",
++     "Vecteurs précis pour les objets animés : les vêtements et les armes se désagrègent "
++     "moins en mouvement. La scène statique ne reçoit pas de passe supplémentaire. "
++     "S'applique après le redémarrage du jeu."},
++    {"Show motion vectors (debug)",
++     "Afficher les vecteurs de mouvement (débogage)"},
++    {"Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel "
++     "received an accurate object vector, not just camera motion. The upscaler treats a "
++     "moving object with no blue or red/green as stationary, causing trails.",
++     "Rouge/vert : mouvement horizontal/vertical (8 pixels = luminosité maximale). Bleu : le "
++     "pixel a reçu un vecteur d'objet précis, pas seulement le mouvement de la caméra. "
++     "L'upscaler considère un objet en mouvement sans bleu ni rouge/vert comme immobile, "
++     "d'où des traînées."},
++    {"Output resolution",
++     "Résolution de sortie"},
++    {"Size of the final frame and UI. The preset sets the scene size relative to the output: "
++     "4K Performance = 1920x1080. Applies after restarting the game.",
++     "Taille de l'image finale et de l'interface. Le préréglage fixe la taille de la scène "
++     "par rapport à la sortie : 4K Performance = 1920x1080. S'applique après le redémarrage "
++     "du jeu."},
++    {"The final frame and UI size changes at the next frame boundary. The preset sets the "
++     "scene size relative to the output: 4K Performance = 1920x1080. Changing the size "
++     "resets FSR history and may cause a brief pause.",
++     "La taille de l'image finale et de l'interface change à l'image suivante. Le préréglage "
++     "fixe la taille de la scène par rapport à la sortie : 4K Performance = 1920x1080. "
++     "Changer de taille réinitialise l'historique FSR et peut provoquer une brève pause."},
++    {"Auto (based on GPU)",
++     "Auto (selon le GPU)"},
++    {"Off (faster)",
++     "Désactivé (plus rapide)"},
++    {"On",
++     "Activé"},
++    {"Live resolution changes",
++     "Changement de résolution à la volée"},
++    {"On: output resolution and preset change without restarting, but game post-processing "
++     "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. Off: "
++     "everything renders at the preset resolution, and changes require a restart. Auto "
++     "enables this on powerful discrete GPUs. Applies after restarting the game.",
++     "Activé : la résolution de sortie et le préréglage changent sans redémarrage, mais le "
++     "post-traitement du jeu reste en 1080p, ce qui est nettement plus lent sur Steam Deck "
++     "et les GPU anciens. Désactivé : tout est rendu à la résolution du préréglage, et les "
++     "changements nécessitent un redémarrage. Auto l'active sur les GPU dédiés puissants. "
++     "S'applique après le redémarrage du jeu."},
++    {"Game effects (restart required)",
++     "Effets du jeu (redémarrage requis)"},
++    {"Highest (-2)",
++     "Maximal (-2)"},
++    {"Game default",
++     "Valeur par défaut du jeu"},
++    {"Lower (1)",
++     "Réduit (1)"},
++    {"Lowest (2)",
++     "Minimal (2)"},
++    {"Model detail",
++     "Détail des modèles"},
++    {"Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
++     "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
++     "Les effets sont activés et désactivés par des patchs du jeu au démarrage "
++     "(patches/Bloodborne.xml). Le flou de mouvement et les ombres des lumières dynamiques "
++     "sollicitent fortement le GPU."},
++    {"Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad "
++     "/ Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from Nexus mod "
++     "#253. Right touchpad: Backspace.",
++     "Caméra libre : maintenez Cross et appuyez sur L3 (clavier : Space + Z). Menu de "
++     "débogage : pavé tactile gauche / Tab. Nécessite DbgFont14h.ccm et DbgFont14h.tpf dans "
++     "dvdroot_ps4/font, issus du mod Nexus #253. Pavé tactile droit : Backspace."},
++    {"Changes apply after restarting the game",
++     "Les changements s'appliquent après le redémarrage du jeu"},
++    {"Apply and restart game",
++     "Appliquer et redémarrer le jeu"},
++    {"Other",
++     "Divers"},
++    {"FPS counter in corner",
++     "Compteur FPS dans le coin"},
++    {"Close",
++     "Fermer"},
++    {"Settings are saved to bbport.ini",
++     "Les réglages sont enregistrés dans bbport.ini"},
++    {"Chromatic aberration",
++     "Aberration chromatique"},
++    {"Depth of field (DoF)",
++     "Profondeur de champ (DoF)"},
++    {"Motion blur",
++     "Flou de mouvement"},
++    {"Ambient occlusion (SSAO)",
++     "Occlusion ambiante (SSAO)"},
++    {"Game's own anti-aliasing",
++     "Anticrénelage propre au jeu"},
++    {"Shadows from dynamic lights",
++     "Ombres des lumières dynamiques"},
++    {"Screen-space reflections (not in original game)",
++     "Réflexions en espace écran (absentes du jeu d'origine)"},
++    {"Skip startup intros",
++     "Passer les intros au démarrage"},
++    {"Free camera (Cross + L3)",
++     "Caméra libre (Cross + L3)"},
++    {"Debug menu (requires font files)",
++     "Menu de débogage (fichiers de police requis)"},
++};
++
++// German (de)
++constexpr Entry kGerman[] = {
++    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
++     "Bloodborne - Grafik  (Insert / L3+R3)###bbport_settings"},
++    {"%.0f FPS  (%.1f ms)",
++     "%.0f FPS  (%.1f ms)"},
++    {"Temporal upscaler",
++     "Temporales Upscaling"},
++    {"Off",
++     "Aus"},
++    {"TAA (native anti-aliasing)",
++     "TAA (native Kantenglättung)"},
++    {"Upscaler",
++     "Upscaler"},
++    {"— not supported by this GPU",
++     "— von dieser GPU nicht unterstützt"},
++    {"— in development",
++     "— in Entwicklung"},
++    {"FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output "
++     "matches the DLL). One model for Native through Performance and another for Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).",
++     "FSR 4.1.1 im INT8-Modus: das Modell aus AMDs 4.1.1-DLL, in Vulkan nachgebildet "
++     "(Ausgabe identisch mit der DLL). Ein Modell für Native bis Performance und ein "
++     "weiteres für Ultra Performance. Assets: tools/fsr4cap/build_assets.sh (benötigt die "
++     "DLL und Proton)."},
++    {"FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality than "
++     "FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the model (a "
++     "brief pause). Assets: tools/fetch_fsr4_assets.sh.",
++     "FSR 4 im INT8-Modus (v07-Modell aus den Quellen des AMD FidelityFX SDK). Höhere "
++     "Qualität als FSR 3.1, aber der Pass ist aufwendiger. Ein Wechsel der Voreinstellung "
++     "baut das Modell neu auf (kurze Pause). Assets: tools/fetch_fsr4_assets.sh."},
++    {"FSR 4: auto exposure",
++     "FSR 4: Automatische Belichtung"},
++    {"FSR 4: invert jitter sign",
++     "FSR 4: Jitter-Vorzeichen umkehren"},
++    {"For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses it to "
++     "decide when to discard previous frames. Changes apply immediately, without a restart.",
++     "Zur Diagnose von Ghosting: Das FSR-4-Netz normalisiert die Farbe anhand der Belichtung "
++     "und entscheidet damit, wann frühere Frames verworfen werden. Änderungen gelten sofort, "
++     "ohne Neustart."},
++    {"Preset",
++     "Voreinstellung"},
++    {"%s (x%.1f, render %dx%d)",
++     "%s (x%.1f, Rendering %dx%d)"},
++    {"Character motion vectors",
++     "Bewegungsvektoren für Figuren"},
++    {"Accurate vectors for animated objects: clothing and weapons break up less during "
++     "movement. The static scene does not get an additional pass. Changes apply after "
++     "restarting the game.",
++     "Genaue Vektoren für animierte Objekte: Kleidung und Waffen zerfallen bei Bewegung "
++     "weniger. Die statische Szene erhält keinen zusätzlichen Pass. Gilt nach einem Neustart "
++     "des Spiels."},
++    {"Show motion vectors (debug)",
++     "Bewegungsvektoren anzeigen (Debug)"},
++    {"Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel "
++     "received an accurate object vector, not just camera motion. The upscaler treats a "
++     "moving object with no blue or red/green as stationary, causing trails.",
++     "Rot/Grün: horizontale/vertikale Bewegung (8 Pixel = volle Helligkeit). Blau: Das Pixel "
++     "hat einen genauen Objektvektor erhalten, nicht nur die Kamerabewegung. Ein bewegtes "
++     "Objekt ohne Blau oder Rot/Grün hält der Upscaler für unbewegt, daher Schlieren."},
++    {"Output resolution",
++     "Ausgabeauflösung"},
++    {"Size of the final frame and UI. The preset sets the scene size relative to the output: "
++     "4K Performance = 1920x1080. Applies after restarting the game.",
++     "Größe des fertigen Bildes und der Oberfläche. Die Voreinstellung legt die Szenengröße "
++     "relativ zur Ausgabe fest: 4K Performance = 1920x1080. Gilt nach einem Neustart des "
++     "Spiels."},
++    {"The final frame and UI size changes at the next frame boundary. The preset sets the "
++     "scene size relative to the output: 4K Performance = 1920x1080. Changing the size "
++     "resets FSR history and may cause a brief pause.",
++     "Die Größe des fertigen Bildes und der Oberfläche ändert sich ab dem nächsten Frame. "
++     "Die Voreinstellung legt die Szenengröße relativ zur Ausgabe fest: 4K Performance = "
++     "1920x1080. Eine Größenänderung setzt den FSR-Verlauf zurück und kann eine kurze Pause "
++     "verursachen."},
++    {"Auto (based on GPU)",
++     "Auto (je nach GPU)"},
++    {"Off (faster)",
++     "Aus (schneller)"},
++    {"On",
++     "An"},
++    {"Live resolution changes",
++     "Auflösung live ändern"},
++    {"On: output resolution and preset change without restarting, but game post-processing "
++     "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. Off: "
++     "everything renders at the preset resolution, and changes require a restart. Auto "
++     "enables this on powerful discrete GPUs. Applies after restarting the game.",
++     "An: Ausgabeauflösung und Voreinstellung ändern sich ohne Neustart, aber die "
++     "Nachbearbeitung des Spiels bleibt bei 1080p, was auf dem Steam Deck und älteren GPUs "
++     "spürbar langsamer ist. Aus: Alles wird in der Auflösung der Voreinstellung gerendert, "
++     "Änderungen erfordern einen Neustart. Auto aktiviert dies auf leistungsstarken "
++     "dedizierten GPUs. Gilt nach einem Neustart des Spiels."},
++    {"Game effects (restart required)",
++     "Spieleffekte (Neustart erforderlich)"},
++    {"Highest (-2)",
++     "Maximal (-2)"},
++    {"Game default",
++     "Spielstandard"},
++    {"Lower (1)",
++     "Niedriger (1)"},
++    {"Lowest (2)",
++     "Minimal (2)"},
++    {"Model detail",
++     "Modelldetails"},
++    {"Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
++     "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
++     "Effekte werden beim Start durch Spiel-Patches ein- und ausgeschaltet "
++     "(patches/Bloodborne.xml). Bewegungsunschärfe und Schatten dynamischer Lichter belasten "
++     "die GPU spürbar."},
++    {"Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad "
++     "/ Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from Nexus mod "
++     "#253. Right touchpad: Backspace.",
++     "Freie Kamera: Cross halten und L3 drücken (Tastatur: Space + Z). Debug-Menü: linkes "
++     "Touchpad / Tab. Benötigt DbgFont14h.ccm und DbgFont14h.tpf in dvdroot_ps4/font aus "
++     "Nexus-Mod #253. Rechtes Touchpad: Backspace."},
++    {"Changes apply after restarting the game",
++     "Änderungen gelten nach einem Neustart des Spiels"},
++    {"Apply and restart game",
++     "Übernehmen und Spiel neu starten"},
++    {"Other",
++     "Sonstiges"},
++    {"FPS counter in corner",
++     "FPS-Anzeige in der Ecke"},
++    {"Close",
++     "Schließen"},
++    {"Settings are saved to bbport.ini",
++     "Einstellungen werden in bbport.ini gespeichert"},
++    {"Chromatic aberration",
++     "Chromatische Aberration"},
++    {"Depth of field (DoF)",
++     "Tiefenschärfe (DoF)"},
++    {"Motion blur",
++     "Bewegungsunschärfe"},
++    {"Ambient occlusion (SSAO)",
++     "Umgebungsverdeckung (SSAO)"},
++    {"Game's own anti-aliasing",
++     "Spieleigene Kantenglättung"},
++    {"Shadows from dynamic lights",
++     "Schatten dynamischer Lichter"},
++    {"Screen-space reflections (not in original game)",
++     "Bildschirmraum-Reflexionen (nicht im Originalspiel)"},
++    {"Skip startup intros",
++     "Intros beim Start überspringen"},
++    {"Free camera (Cross + L3)",
++     "Freie Kamera (Cross + L3)"},
++    {"Debug menu (requires font files)",
++     "Debug-Menü (benötigt Schriftdateien)"},
++};
++
++// Italian (it)
++constexpr Entry kItalian[] = {
++    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
++     "Bloodborne - Grafica  (Insert / L3+R3)###bbport_settings"},
++    {"%.0f FPS  (%.1f ms)",
++     "%.0f FPS  (%.1f ms)"},
++    {"Temporal upscaler",
++     "Upscaler temporale"},
++    {"Off",
++     "Disattivato"},
++    {"TAA (native anti-aliasing)",
++     "TAA (anti-aliasing nativo)"},
++    {"Upscaler",
++     "Upscaler"},
++    {"— not supported by this GPU",
++     "— non supportato da questa GPU"},
++    {"— in development",
++     "— in sviluppo"},
++    {"FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output "
++     "matches the DLL). One model for Native through Performance and another for Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).",
++     "FSR 4.1.1 in modalità INT8: il modello della DLL 4.1.1 di AMD, riprodotto in Vulkan "
++     "(il risultato coincide con la DLL). Un modello da Native a Performance e un altro per "
++     "Ultra Performance. Risorse: tools/fsr4cap/build_assets.sh (richiede la DLL e Proton)."},
++    {"FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality than "
++     "FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the model (a "
++     "brief pause). Assets: tools/fetch_fsr4_assets.sh.",
++     "FSR 4 in modalità INT8 (modello v07 dai sorgenti di AMD FidelityFX SDK). Qualità "
++     "superiore a FSR 3.1, ma il passaggio è più pesante. Cambiare preset ricostruisce il "
++     "modello (breve pausa). Risorse: tools/fetch_fsr4_assets.sh."},
++    {"FSR 4: auto exposure",
++     "FSR 4: esposizione automatica"},
++    {"FSR 4: invert jitter sign",
++     "FSR 4: inverti segno del jitter"},
++    {"For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses it to "
++     "decide when to discard previous frames. Changes apply immediately, without a restart.",
++     "Per diagnosticare il ghosting: la rete di FSR 4 normalizza il colore in base "
++     "all'esposizione e la usa per decidere quando scartare i fotogrammi precedenti. Le "
++     "modifiche si applicano subito, senza riavvio."},
++    {"Preset",
++     "Preset"},
++    {"%s (x%.1f, render %dx%d)",
++     "%s (x%.1f, rendering %dx%d)"},
++    {"Character motion vectors",
++     "Vettori di movimento dei personaggi"},
++    {"Accurate vectors for animated objects: clothing and weapons break up less during "
++     "movement. The static scene does not get an additional pass. Changes apply after "
++     "restarting the game.",
++     "Vettori precisi per gli oggetti animati: vestiti e armi si sfaldano meno durante il "
++     "movimento. La scena statica non riceve un passaggio aggiuntivo. Si applica dopo il "
++     "riavvio del gioco."},
++    {"Show motion vectors (debug)",
++     "Mostra vettori di movimento (debug)"},
++    {"Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel "
++     "received an accurate object vector, not just camera motion. The upscaler treats a "
++     "moving object with no blue or red/green as stationary, causing trails.",
++     "Rosso/verde: movimento orizzontale/verticale (8 pixel = luminosità massima). Blu: il "
++     "pixel ha ricevuto un vettore oggetto preciso, non solo il movimento della telecamera. "
++     "L'upscaler considera fermo un oggetto in movimento senza blu né rosso/verde, causando "
++     "scie."},
++    {"Output resolution",
++     "Risoluzione di uscita"},
++    {"Size of the final frame and UI. The preset sets the scene size relative to the output: "
++     "4K Performance = 1920x1080. Applies after restarting the game.",
++     "Dimensione del fotogramma finale e dell'interfaccia. Il preset imposta la dimensione "
++     "della scena rispetto all'uscita: 4K Performance = 1920x1080. Si applica dopo il "
++     "riavvio del gioco."},
++    {"The final frame and UI size changes at the next frame boundary. The preset sets the "
++     "scene size relative to the output: 4K Performance = 1920x1080. Changing the size "
++     "resets FSR history and may cause a brief pause.",
++     "La dimensione del fotogramma finale e dell'interfaccia cambia dal fotogramma "
++     "successivo. Il preset imposta la dimensione della scena rispetto all'uscita: 4K "
++     "Performance = 1920x1080. Cambiare dimensione azzera la cronologia di FSR e può causare "
++     "una breve pausa."},
++    {"Auto (based on GPU)",
++     "Auto (in base alla GPU)"},
++    {"Off (faster)",
++     "Disattivato (più veloce)"},
++    {"On",
++     "Attivato"},
++    {"Live resolution changes",
++     "Cambio di risoluzione al volo"},
++    {"On: output resolution and preset change without restarting, but game post-processing "
++     "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. Off: "
++     "everything renders at the preset resolution, and changes require a restart. Auto "
++     "enables this on powerful discrete GPUs. Applies after restarting the game.",
++     "Attivato: risoluzione di uscita e preset cambiano senza riavvio, ma la "
++     "post-elaborazione del gioco resta a 1080p, cosa nettamente più lenta su Steam Deck e "
++     "GPU meno recenti. Disattivato: tutto viene renderizzato alla risoluzione del preset e "
++     "le modifiche richiedono un riavvio. Auto lo attiva sulle GPU dedicate potenti. Si "
++     "applica dopo il riavvio del gioco."},
++    {"Game effects (restart required)",
++     "Effetti di gioco (richiede riavvio)"},
++    {"Highest (-2)",
++     "Massimo (-2)"},
++    {"Game default",
++     "Predefinito del gioco"},
++    {"Lower (1)",
++     "Basso (1)"},
++    {"Lowest (2)",
++     "Minimo (2)"},
++    {"Model detail",
++     "Dettaglio modelli"},
++    {"Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
++     "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
++     "Gli effetti vengono attivati e disattivati da patch del gioco all'avvio "
++     "(patches/Bloodborne.xml). Sfocatura di movimento e ombre delle luci dinamiche pesano "
++     "molto sulla GPU."},
++    {"Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad "
++     "/ Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from Nexus mod "
++     "#253. Right touchpad: Backspace.",
++     "Telecamera libera: tieni premuto Cross e premi L3 (tastiera: Space + Z). Menu di "
++     "debug: touchpad sinistro / Tab. Richiede DbgFont14h.ccm e DbgFont14h.tpf in "
++     "dvdroot_ps4/font dalla mod Nexus #253. Touchpad destro: Backspace."},
++    {"Changes apply after restarting the game",
++     "Le modifiche si applicano dopo il riavvio del gioco"},
++    {"Apply and restart game",
++     "Applica e riavvia il gioco"},
++    {"Other",
++     "Altro"},
++    {"FPS counter in corner",
++     "Contatore FPS nell'angolo"},
++    {"Close",
++     "Chiudi"},
++    {"Settings are saved to bbport.ini",
++     "Le impostazioni sono salvate in bbport.ini"},
++    {"Chromatic aberration",
++     "Aberrazione cromatica"},
++    {"Depth of field (DoF)",
++     "Profondità di campo (DoF)"},
++    {"Motion blur",
++     "Sfocatura di movimento"},
++    {"Ambient occlusion (SSAO)",
++     "Occlusione ambientale (SSAO)"},
++    {"Game's own anti-aliasing",
++     "Anti-aliasing del gioco"},
++    {"Shadows from dynamic lights",
++     "Ombre delle luci dinamiche"},
++    {"Screen-space reflections (not in original game)",
++     "Riflessi in screen space (assenti nel gioco originale)"},
++    {"Skip startup intros",
++     "Salta i filmati iniziali"},
++    {"Free camera (Cross + L3)",
++     "Telecamera libera (Cross + L3)"},
++    {"Debug menu (requires font files)",
++     "Menu di debug (richiede file dei font)"},
++};
++
++// Polish (pl)
++constexpr Entry kPolish[] = {
++    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
++     "Bloodborne - Grafika  (Insert / L3+R3)###bbport_settings"},
++    {"%.0f FPS  (%.1f ms)",
++     "%.0f FPS  (%.1f ms)"},
++    {"Temporal upscaler",
++     "Skalowanie czasowe"},
++    {"Off",
++     "Wyłączone"},
++    {"TAA (native anti-aliasing)",
++     "TAA (natywny antyaliasing)"},
++    {"Upscaler",
++     "Upscaler"},
++    {"— not supported by this GPU",
++     "— nieobsługiwane przez ten GPU"},
++    {"— in development",
++     "— w przygotowaniu"},
++    {"FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output "
++     "matches the DLL). One model for Native through Performance and another for Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).",
++     "FSR 4.1.1 w trybie INT8: model z biblioteki DLL AMD 4.1.1 odtworzony w Vulkanie (wynik "
++     "zgodny z DLL). Jeden model od Native do Performance i osobny dla Ultra Performance. "
++     "Zasoby: tools/fsr4cap/build_assets.sh (wymaga DLL i Protona)."},
++    {"FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality than "
++     "FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the model (a "
++     "brief pause). Assets: tools/fetch_fsr4_assets.sh.",
++     "FSR 4 w trybie INT8 (model v07 ze źródeł AMD FidelityFX SDK). Wyższa jakość niż FSR "
++     "3.1, ale przebieg jest bardziej wymagający. Zmiana profilu przebudowuje model (krótka "
++     "pauza). Zasoby: tools/fetch_fsr4_assets.sh."},
++    {"FSR 4: auto exposure",
++     "FSR 4: automatyczna ekspozycja"},
++    {"FSR 4: invert jitter sign",
++     "FSR 4: odwróć znak jittera"},
++    {"For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses it to "
++     "decide when to discard previous frames. Changes apply immediately, without a restart.",
++     "Do diagnozowania smużenia (ghosting): sieć FSR 4 normalizuje kolor według ekspozycji i "
++     "na tej podstawie decyduje, kiedy odrzucić poprzednie klatki. Zmiany działają od razu, "
++     "bez restartu."},
++    {"Preset",
++     "Profil"},
++    {"%s (x%.1f, render %dx%d)",
++     "%s (x%.1f, renderowanie %dx%d)"},
++    {"Character motion vectors",
++     "Wektory ruchu postaci"},
++    {"Accurate vectors for animated objects: clothing and weapons break up less during "
++     "movement. The static scene does not get an additional pass. Changes apply after "
++     "restarting the game.",
++     "Dokładne wektory dla animowanych obiektów: ubrania i broń mniej się rozpadają w ruchu. "
++     "Statyczna scena nie dostaje dodatkowego przebiegu. Działa po ponownym uruchomieniu gry."},
++    {"Show motion vectors (debug)",
++     "Pokaż wektory ruchu (debug)"},
++    {"Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel "
++     "received an accurate object vector, not just camera motion. The upscaler treats a "
++     "moving object with no blue or red/green as stationary, causing trails.",
++     "Czerwony/zielony: ruch w poziomie/pionie (8 pikseli = pełna jasność). Niebieski: "
++     "piksel otrzymał dokładny wektor obiektu, a nie tylko ruch kamery. Poruszający się "
++     "obiekt bez niebieskiego ani czerwonego/zielonego upscaler uznaje za nieruchomy, stąd "
++     "smugi."},
++    {"Output resolution",
++     "Rozdzielczość wyjściowa"},
++    {"Size of the final frame and UI. The preset sets the scene size relative to the output: "
++     "4K Performance = 1920x1080. Applies after restarting the game.",
++     "Rozmiar gotowej klatki i interfejsu. Profil ustala rozmiar sceny względem wyjścia: 4K "
++     "Performance = 1920x1080. Działa po ponownym uruchomieniu gry."},
++    {"The final frame and UI size changes at the next frame boundary. The preset sets the "
++     "scene size relative to the output: 4K Performance = 1920x1080. Changing the size "
++     "resets FSR history and may cause a brief pause.",
++     "Rozmiar gotowej klatki i interfejsu zmienia się od następnej klatki. Profil ustala "
++     "rozmiar sceny względem wyjścia: 4K Performance = 1920x1080. Zmiana rozmiaru resetuje "
++     "historię FSR i może spowodować krótką pauzę."},
++    {"Auto (based on GPU)",
++     "Auto (zależnie od GPU)"},
++    {"Off (faster)",
++     "Wyłączona (szybciej)"},
++    {"On",
++     "Włączona"},
++    {"Live resolution changes",
++     "Zmiana rozdzielczości na żywo"},
++    {"On: output resolution and preset change without restarting, but game post-processing "
++     "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. Off: "
++     "everything renders at the preset resolution, and changes require a restart. Auto "
++     "enables this on powerful discrete GPUs. Applies after restarting the game.",
++     "Włączona: rozdzielczość wyjściowa i profil zmieniają się bez restartu, ale "
++     "postprocessing gry zostaje w 1080p, co na Steam Decku i starszych GPU jest wyraźnie "
++     "wolniejsze. Wyłączona: wszystko jest renderowane w rozdzielczości profilu, a zmiany "
++     "wymagają restartu. Auto włącza ją na mocnych dedykowanych GPU. Działa po ponownym "
++     "uruchomieniu gry."},
++    {"Game effects (restart required)",
++     "Efekty gry (wymagany restart)"},
++    {"Highest (-2)",
++     "Najwyższa (-2)"},
++    {"Game default",
++     "Jak w grze"},
++    {"Lower (1)",
++     "Niższa (1)"},
++    {"Lowest (2)",
++     "Najniższa (2)"},
++    {"Model detail",
++     "Szczegółowość modeli"},
++    {"Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
++     "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
++     "Efekty są włączane i wyłączane przez łatki gry przy uruchomieniu "
++     "(patches/Bloodborne.xml). Rozmycie ruchu i cienie od dynamicznych świateł wyraźnie "
++     "obciążają GPU."},
++    {"Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad "
++     "/ Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from Nexus mod "
++     "#253. Right touchpad: Backspace.",
++     "Wolna kamera: przytrzymaj Cross i naciśnij L3 (klawiatura: Space + Z). Menu "
++     "debugowania: lewy touchpad / Tab. Wymaga DbgFont14h.ccm i DbgFont14h.tpf w "
++     "dvdroot_ps4/font z moda Nexus #253. Prawy touchpad: Backspace."},
++    {"Changes apply after restarting the game",
++     "Zmiany zadziałają po ponownym uruchomieniu gry"},
++    {"Apply and restart game",
++     "Zastosuj i uruchom grę ponownie"},
++    {"Other",
++     "Inne"},
++    {"FPS counter in corner",
++     "Licznik FPS w rogu"},
++    {"Close",
++     "Zamknij"},
++    {"Settings are saved to bbport.ini",
++     "Ustawienia są zapisywane w bbport.ini"},
++    {"Chromatic aberration",
++     "Aberracja chromatyczna"},
++    {"Depth of field (DoF)",
++     "Głębia ostrości (DoF)"},
++    {"Motion blur",
++     "Rozmycie ruchu"},
++    {"Ambient occlusion (SSAO)",
++     "Okluzja otoczenia (SSAO)"},
++    {"Game's own anti-aliasing",
++     "Własny antyaliasing gry"},
++    {"Shadows from dynamic lights",
++     "Cienie od dynamicznych świateł"},
++    {"Screen-space reflections (not in original game)",
++     "Odbicia w przestrzeni ekranu (nie było ich w grze)"},
++    {"Skip startup intros",
++     "Pomiń intro przy uruchomieniu"},
++    {"Free camera (Cross + L3)",
++     "Wolna kamera (Cross + L3)"},
++    {"Debug menu (requires font files)",
++     "Menu debugowania (wymaga plików czcionek)"},
++};
++
++// Turkish (tr)
++constexpr Entry kTurkish[] = {
++    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
++     "Bloodborne - Grafik  (Insert / L3+R3)###bbport_settings"},
++    {"%.0f FPS  (%.1f ms)",
++     "%.0f FPS  (%.1f ms)"},
++    {"Temporal upscaler",
++     "Zamansal ölçekleyici"},
++    {"Off",
++     "Kapalı"},
++    {"TAA (native anti-aliasing)",
++     "TAA (yerel kenar yumuşatma)"},
++    {"Upscaler",
++     "Ölçekleyici"},
++    {"— not supported by this GPU",
++     "— bu GPU tarafından desteklenmiyor"},
++    {"— in development",
++     "— geliştiriliyor"},
++    {"FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output "
++     "matches the DLL). One model for Native through Performance and another for Ultra "
++     "Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).",
++     "INT8 modunda FSR 4.1.1: AMD'nin 4.1.1 DLL'indeki model, Vulkan'da yeniden üretildi "
++     "(çıktı DLL ile aynı). Native'den Performance'a kadar bir model, Ultra Performance için "
++     "ayrı bir model. Dosyalar: tools/fsr4cap/build_assets.sh (DLL ve Proton gerekir)."},
++    {"FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality than "
++     "FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the model (a "
++     "brief pause). Assets: tools/fetch_fsr4_assets.sh.",
++     "INT8 modunda FSR 4 (AMD FidelityFX SDK kaynaklarından v07 modeli). FSR 3.1'den daha "
++     "yüksek kalite, ancak geçiş daha ağır. Ön ayarı değiştirmek modeli yeniden oluşturur "
++     "(kısa bir duraklama). Dosyalar: tools/fetch_fsr4_assets.sh."},
++    {"FSR 4: auto exposure",
++     "FSR 4: otomatik pozlama"},
++    {"FSR 4: invert jitter sign",
++     "FSR 4: jitter işaretini ters çevir"},
++    {"For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses it to "
++     "decide when to discard previous frames. Changes apply immediately, without a restart.",
++     "Hayalet görüntü (ghosting) teşhisi için: FSR 4 ağı rengi pozlamaya göre normalleştirir "
++     "ve önceki kareleri ne zaman atacağına buna göre karar verir. Değişiklikler yeniden "
++     "başlatmadan hemen uygulanır."},
++    {"Preset",
++     "Ön ayar"},
++    {"%s (x%.1f, render %dx%d)",
++     "%s (x%.1f, işleme %dx%d)"},
++    {"Character motion vectors",
++     "Karakter hareket vektörleri"},
++    {"Accurate vectors for animated objects: clothing and weapons break up less during "
++     "movement. The static scene does not get an additional pass. Changes apply after "
++     "restarting the game.",
++     "Animasyonlu nesneler için hassas vektörler: kıyafetler ve silahlar hareket sırasında "
++     "daha az dağılır. Statik sahne ek bir geçiş almaz. Oyun yeniden başlatıldıktan sonra "
++     "uygulanır."},
++    {"Show motion vectors (debug)",
++     "Hareket vektörlerini göster (hata ayıklama)"},
++    {"Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel "
++     "received an accurate object vector, not just camera motion. The upscaler treats a "
++     "moving object with no blue or red/green as stationary, causing trails.",
++     "Kırmızı/yeşil: yatay/dikey hareket (8 piksel = tam parlaklık). Mavi: piksel yalnızca "
++     "kamera hareketini değil, hassas bir nesne vektörünü aldı. Ölçekleyici, mavisi ya da "
++     "kırmızısı/yeşili olmayan hareketli bir nesneyi sabit sayar; bu da iz bırakmaya yol "
++     "açar."},
++    {"Output resolution",
++     "Çıkış çözünürlüğü"},
++    {"Size of the final frame and UI. The preset sets the scene size relative to the output: "
++     "4K Performance = 1920x1080. Applies after restarting the game.",
++     "Son karenin ve arayüzün boyutu. Ön ayar, sahne boyutunu çıkışa göre belirler: 4K "
++     "Performance = 1920x1080. Oyun yeniden başlatıldıktan sonra uygulanır."},
++    {"The final frame and UI size changes at the next frame boundary. The preset sets the "
++     "scene size relative to the output: 4K Performance = 1920x1080. Changing the size "
++     "resets FSR history and may cause a brief pause.",
++     "Son karenin ve arayüzün boyutu bir sonraki karede değişir. Ön ayar, sahne boyutunu "
++     "çıkışa göre belirler: 4K Performance = 1920x1080. Boyutu değiştirmek FSR geçmişini "
++     "sıfırlar ve kısa bir duraklamaya neden olabilir."},
++    {"Auto (based on GPU)",
++     "Otomatik (GPU'ya göre)"},
++    {"Off (faster)",
++     "Kapalı (daha hızlı)"},
++    {"On",
++     "Açık"},
++    {"Live resolution changes",
++     "Anlık çözünürlük değişimi"},
++    {"On: output resolution and preset change without restarting, but game post-processing "
++     "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. Off: "
++     "everything renders at the preset resolution, and changes require a restart. Auto "
++     "enables this on powerful discrete GPUs. Applies after restarting the game.",
++     "Açık: çıkış çözünürlüğü ve ön ayar yeniden başlatmadan değişir, ancak oyunun son "
++     "işlemesi 1080p'de kalır; bu, Steam Deck'te ve eski GPU'larda belirgin şekilde daha "
++     "yavaştır. Kapalı: her şey ön ayarın çözünürlüğünde işlenir ve değişiklikler yeniden "
++     "başlatma gerektirir. Otomatik, bunu güçlü harici GPU'larda açar. Oyun yeniden "
++     "başlatıldıktan sonra uygulanır."},
++    {"Game effects (restart required)",
++     "Oyun efektleri (yeniden başlatma gerekir)"},
++    {"Highest (-2)",
++     "En yüksek (-2)"},
++    {"Game default",
++     "Oyun varsayılanı"},
++    {"Lower (1)",
++     "Düşük (1)"},
++    {"Lowest (2)",
++     "En düşük (2)"},
++    {"Model detail",
++     "Model detayı"},
++    {"Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
++     "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
++     "Efektler, başlangıçta oyun yamalarıyla açılıp kapatılır (patches/Bloodborne.xml). "
++     "Hareket bulanıklığı ve dinamik ışıkların gölgeleri GPU'ya belirgin bir yük bindirir."},
++    {"Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad "
++     "/ Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from Nexus mod "
++     "#253. Right touchpad: Backspace.",
++     "Serbest kamera: Cross'u basılı tutup L3'e basın (klavye: Space + Z). Hata ayıklama "
++     "menüsü: sol touchpad / Tab. Nexus mod #253'ten dvdroot_ps4/font içine DbgFont14h.ccm "
++     "ve DbgFont14h.tpf gerekir. Sağ touchpad: Backspace."},
++    {"Changes apply after restarting the game",
++     "Değişiklikler oyun yeniden başlatıldıktan sonra uygulanır"},
++    {"Apply and restart game",
++     "Uygula ve oyunu yeniden başlat"},
++    {"Other",
++     "Diğer"},
++    {"FPS counter in corner",
++     "Köşede FPS sayacı"},
++    {"Close",
++     "Kapat"},
++    {"Settings are saved to bbport.ini",
++     "Ayarlar bbport.ini dosyasına kaydedilir"},
++    {"Chromatic aberration",
++     "Renk sapması"},
++    {"Depth of field (DoF)",
++     "Alan derinliği (DoF)"},
++    {"Motion blur",
++     "Hareket bulanıklığı"},
++    {"Ambient occlusion (SSAO)",
++     "Ortam perdelemesi (SSAO)"},
++    {"Game's own anti-aliasing",
++     "Oyunun kendi kenar yumuşatması"},
++    {"Shadows from dynamic lights",
++     "Dinamik ışıkların gölgeleri"},
++    {"Screen-space reflections (not in original game)",
++     "Ekran alanı yansımaları (orijinal oyunda yoktu)"},
++    {"Skip startup intros",
++     "Açılış videolarını atla"},
++    {"Free camera (Cross + L3)",
++     "Serbest kamera (Cross + L3)"},
++    {"Debug menu (requires font files)",
++     "Hata ayıklama menüsü (yazı tipi dosyaları gerekir)"},
++};
++
++using Table = std::unordered_map<std::string_view, const char*>;
++
++template <std::size_t N>
++Table Build(const Entry (&entries)[N]) {
++    Table table;
++    table.reserve(N);
++    for (const Entry& entry : entries) {
++        table.emplace(entry.english, entry.text);
++    }
++    return table;
++}
++
++} // namespace
++
++const char* MenuTranslation(MenuLanguage language, const char* english) {
++    // Built once (thread-safe static initialization); looked up for every string every frame.
++    static const std::array<Table, 7> tables = {
++        Build(kSpanish), Build(kPortugueseBrazil), Build(kFrench), Build(kGerman),
++        Build(kItalian), Build(kPolish), Build(kTurkish),
++    };
++    std::size_t index = 0;
++    switch (language) {
++    case MenuLanguage::Spanish: index = 0; break;
++    case MenuLanguage::PortugueseBrazil: index = 1; break;
++    case MenuLanguage::French: index = 2; break;
++    case MenuLanguage::German: index = 3; break;
++    case MenuLanguage::Italian: index = 4; break;
++    case MenuLanguage::Polish: index = 5; break;
++    case MenuLanguage::Turkish: index = 6; break;
++    default: return english;
++    }
++    const Table& table = tables[index];
++    const auto it = table.find(english);
++    return it != table.end() ? it->second : english;
++}
++
++} // namespace BbSettings
+diff --git a/gpu/shim/bbport_menu_i18n.h b/gpu/shim/bbport_menu_i18n.h
+new file mode 100644
+index 0000000..693ca50
+--- /dev/null
++++ b/gpu/shim/bbport_menu_i18n.h
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: the in-game menu's text in the languages other than English and Russian
++// (bbport_menu_i18n.cpp), for MenuText (bbport_settings.h).
++#pragma once
++
++#include "bbport_settings.h"
++
++namespace BbSettings {
++
++/// The translation of a menu text, looked up by its English text; the English text itself when the
++/// table has none (or for English and Russian, which MenuText answers itself). Static storage.
++const char* MenuTranslation(MenuLanguage language, const char* english);
++
++} // namespace BbSettings
+diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
+index 83e5538..d4b93b1 100644
+--- a/gpu/shim/bbport_overlay.cpp
++++ b/gpu/shim/bbport_overlay.cpp
+@@ -17,7 +17,8 @@
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ 
+-// DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
++// DejaVu Sans (Latin with Latin Extended, Greek, Cyrillic), embedded (third_party/fonts, Bitstream
++// Vera license).
+ #ifdef _WIN32
+ // PE/COFF assemblers have no .hidden/.previous: the compiler embeds the file (#embed, a GCC
+ // extension in C++).
+@@ -206,12 +207,15 @@ void Menu() {
+             dirty = true;
+         }
+     }
+-    // Always readable, even when the rest of the menu is in Russian.
+-    static const char* languages[] = {"English", "Русский"};
+-    int language = s.menu_language == BbSettings::MenuLanguage::Russian ? 1 : 0;
+-    if (ImGui::Combo("Language", &language, languages, 2)) {
++    // Always readable, whatever language the rest of the menu is in: each language by its own
++    // name, in MenuLanguage order.
++    static const char* languages[] = {"English",  "Русский",  "Español", "Português (Brasil)",
++                                      "Français", "Deutsch",  "Italiano", "Polski", "Türkçe"};
++    static_assert(std::size(languages) == BbSettings::MenuLanguageCount);
++    int language = int(s.menu_language.load());
++    if (ImGui::Combo("Language", &language, languages, BbSettings::MenuLanguageCount)) {
+         s.menu_language =
+-            language == 1 ? BbSettings::MenuLanguage::Russian : BbSettings::MenuLanguage::English;
++            BbSettings::MenuLanguage(std::clamp(language, 0, BbSettings::MenuLanguageCount - 1));
+         BbSettings::Save();
+     }
+     ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
+@@ -587,6 +591,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+     style.GrabRounding = 4.0f;
+     style.Colors[ImGuiCol_WindowBg].w = 0.92f;
+ 
++    // No GlyphRanges: the Vulkan backend has ImGuiBackendFlags_RendererHasTextures (ImGui 1.92), so
++    // the atlas loads each glyph of the font when first drawn (Cyrillic, ñ ç ü ß ą ł ş ğ ı, —).
++    // Ranges would only limit that.
+     ImFontConfig font_config;
+     font_config.FontDataOwnedByAtlas = false;
+     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
+diff --git a/gpu/shim/bbport_platform.cpp b/gpu/shim/bbport_platform.cpp
+index 8f2e888..b7cd129 100644
+--- a/gpu/shim/bbport_platform.cpp
++++ b/gpu/shim/bbport_platform.cpp
+@@ -5,6 +5,7 @@
+ #include <algorithm>
+ #include <bit>
+ #include <cstdio>
++#include <cstdlib>
+ #include <thread>
+ #include <windows.h>
+ #include <psapi.h>
+@@ -98,5 +99,20 @@ void MakeBackground() {
+     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+ }
+ 
++// The game runs dozens of threads at normal priority (cloth, character, Havok, job pools); on
++// 12 or fewer hardware threads Windows gives a ready thread of equal priority a core only when
++// another one's quantum ends (tens of ms), so a render-chain thread queued behind them delays
++// the frame. Its idle spins are bounded (BB_GPU_SPIN_US, BB_PIPE_SPIN_US, recording: 200 us)
++// before it sleeps, so the higher priority takes no lasting time from the game's threads.
++void MakeCritical() {
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_GPU_THREAD_PRIORITY");
++        return !(env && env[0] == '0');
++    }();
++    if (enabled) {
++        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
++    }
++}
++
+ } // namespace BbThreads
+ #endif
+diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
+index cf4fbd8..fc787ce 100644
+--- a/gpu/shim/bbport_settings.cpp
++++ b/gpu/shim/bbport_settings.cpp
+@@ -6,9 +6,11 @@
+ #endif
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #include "bbport_settings.h"
++#include "bbport_menu_i18n.h"
+ #include "input/ini_bindings.h"
+ 
+ #include <algorithm>
++#include <cctype>
+ #include <cstdio>
+ #include <cmath>
+ #include <cstdlib>
+@@ -35,9 +37,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+     const float f = float(std::atof(value.c_str()));
+     const int i = std::atoi(value.c_str());
+     if (key == "menu_language") {
+-        if (value == "en") v.menu_language = MenuLanguage::English;
+-        else if (value == "ru") v.menu_language = MenuLanguage::Russian;
+-        else std::printf("Settings: unknown menu_language '%s' (expected en or ru)\n", value.c_str());
++        bool known = false;
++        for (int l = 0; l < MenuLanguageCount; ++l) {
++            if (value == MenuLanguageCodes[l]) {
++                v.menu_language = MenuLanguage(l);
++                known = true;
++            }
++        }
++        if (!known) {
++            std::printf("Settings: unknown menu_language '%s' (expected en, ru, es, pt_BR, fr, de, it, pl "
++                        "or tr)\n",
++                        value.c_str());
++        }
+     } else if (key == "upscaler") {
+         for (int u = 0; u < UpscalerCount; ++u) {
+             if (value == UpscalerName(u)) {
+@@ -138,6 +149,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+     }
+ }
+ 
++// The menu's language for the launcher's code (BB_MENU_LANGUAGE: en, ru, pt_BR...) or a locale
++// (ru_RU.UTF-8, de_DE...): its first two letters; Portuguese only as pt_BR. Else English.
++MenuLanguage LanguageOfLocale(const char* lang) {
++    if (!lang || !lang[0] || !lang[1]) {
++        return MenuLanguage::English;
++    }
++    const auto lower = [lang](int i) { return char(std::tolower(static_cast<unsigned char>(lang[i]))); };
++    if (lower(0) == 'p' && lower(1) == 't') {
++        return (lang[2] == '_' || lang[2] == '-') && lower(3) == 'b' && lower(4) == 'r'
++                   ? MenuLanguage::PortugueseBrazil
++                   : MenuLanguage::English;
++    }
++    for (int l = 0; l < MenuLanguageCount; ++l) {
++        const char* code = MenuLanguageCodes[l];
++        if (code[2] == '\0' && lower(0) == code[0] && lower(1) == code[1]) {
++            return MenuLanguage(l);
++        }
++    }
++    return MenuLanguage::English;
++}
++
+ } // namespace
+ 
+ Values& Get() {
+@@ -146,7 +178,11 @@ Values& Get() {
+ }
+ 
+ const char* MenuText(const char* english, const char* russian) {
+-    return Get().menu_language == MenuLanguage::Russian ? russian : english;
++    switch (const MenuLanguage language = Get().menu_language) {
++    case MenuLanguage::English: return english;
++    case MenuLanguage::Russian: return russian;
++    default: return MenuTranslation(language, english);
++    }
+ }
+ 
+ void Load() {
+@@ -166,9 +202,7 @@ void Load() {
+                 }
+             }
+         }
+-        v.menu_language = lang && (lang[0] == 'r' || lang[0] == 'R') && (lang[1] == 'u' || lang[1] == 'U')
+-                              ? MenuLanguage::Russian
+-                              : MenuLanguage::English;
++        v.menu_language = LanguageOfLocale(lang);
+     }
+     if (FILE* file = std::fopen(Path(), "r")) {
+         char line[256];
+@@ -264,7 +298,7 @@ void Save() {
+         return std::string(text);
+     };
+     const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
+-    put("menu_language", v.menu_language == MenuLanguage::Russian ? "ru" : "en");
++    put("menu_language", MenuLanguageCodes[int(v.menu_language.load())]);
+     put("upscaler", UpscalerName(v.upscaler));
+     put("preset", std::to_string(v.preset.load()));
+     put("sharpen", flag(v.sharpen));
+diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
+index c0e8a94..10c0f80 100644
+--- a/gpu/shim/bbport_settings.h
++++ b/gpu/shim/bbport_settings.h
+@@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
+ }
+ enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
+ enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
+-enum class MenuLanguage { English, Russian };
++/// The menu's language, in the Language selector's order (bbport_overlay.cpp).
++enum class MenuLanguage {
++    English, Russian, Spanish, PortugueseBrazil, French, German, Italian, Polish, Turkish
++};
++/// menu_language in bbport.ini, by MenuLanguage; the launcher's BB_MENU_LANGUAGE uses the same codes.
++inline constexpr const char* MenuLanguageCodes[] = {"en", "ru", "es", "pt_BR", "fr", "de", "it", "pl", "tr"};
++inline constexpr int MenuLanguageCount = int(sizeof(MenuLanguageCodes) / sizeof(MenuLanguageCodes[0]));
++static_assert(MenuLanguageCount == int(MenuLanguage::Turkish) + 1);
+ 
+ /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
+ /// menu label, default (the game's own behaviour).
+@@ -103,7 +110,8 @@ struct Values {
+ };
+ 
+ Values& Get();
+-/// Localized overlay text; the Language selector itself stays in English.
++/// Localized overlay text; the Language selector itself stays in English. The other languages
++/// look the English text up (bbport_menu_i18n.cpp) and show it when they have no translation.
+ const char* MenuText(const char* english, const char* russian);
+ 
+ /// Reads the file, then the environment overrides. Called once at start.
+diff --git a/gpu/shim/bbport_threads.h b/gpu/shim/bbport_threads.h
+index 50d0422..d856520 100644
+--- a/gpu/shim/bbport_threads.h
++++ b/gpu/shim/bbport_threads.h
+@@ -19,7 +19,12 @@ namespace BbThreads {
+ // Windows (bbport_platform.cpp): the process affinity mask; THREAD_PRIORITY_IDLE.
+ unsigned Available();
+ void MakeBackground();
++/// The serial render chain (GPU command thread, draw recording, Vulkan recording) runs above
++/// the game's own threads (THREAD_PRIORITY_ABOVE_NORMAL; BB_GPU_THREAD_PRIORITY=0: normal).
++void MakeCritical();
+ #else
++/// Linux: unchanged (normal priority; raising it needs privileges).
++inline void MakeCritical() {}
+ /// Hardware threads available to the process.
+ inline unsigned Available() {
+     cpu_set_t set;
+diff --git a/gpu/shim/core/emulator_settings.h b/gpu/shim/core/emulator_settings.h
+index f176cc1..bcf4185 100644
+--- a/gpu/shim/core/emulator_settings.h
++++ b/gpu/shim/core/emulator_settings.h
+@@ -36,12 +36,8 @@ public:
+     u32 GetVblankFrequency() {
+         static const u32 value = [] {
+             const long hz = Number("BB_VBLANK_HZ", 60);
+-#ifdef _WIN32
+-            // Direct runtime launches must be safe too, even with legacy uncapped env vars.
+-            return hz == 30 || hz == 60 || hz == 90 ? u32(hz) : 60u;
+-#else
+-            return hz > 0 ? u32(hz) : 480u;
+-#endif
++            // Bloodborne PC: Windows runs uncapped too (0 or above 120: 480 Hz), as on Linux.
++            return hz > 0 && hz <= 120 ? u32(hz) : 480u;
+         }();
+         return value;
+     }
+@@ -49,24 +45,17 @@ public:
+     bool IsUncappedVblank() {
+         static const bool value = [] {
+             const long hz = Number("BB_VBLANK_HZ", 60);
+-#ifdef _WIN32
+-            (void)hz;
+-            return false;
+-#else
+             return hz <= 0 || hz > 120;
+-#endif
+         }();
+         return value;
+     }
+     /// Frames per second the present thread lets through; 0 = no limit (BB_FPS_LIMIT).
+     u32 GetFrameLimit() {
+         static const u32 value = [] {
+-#ifdef _WIN32
+-            const long fps = Number("BB_FPS_LIMIT", GetInstance()->GetVblankFrequency());
+-            return fps == 30 || fps == 60 || fps == 90 ? u32(fps) : 60u;
+-#else
+-            return u32(std::max(0L, Number("BB_FPS_LIMIT", 0)));
+-#endif
++            // Bloodborne PC: any limit the launcher asks for (0 = none); without one, the fixed
++            // presets still limit to their own rate.
++            const u32 vblank = GetInstance()->GetVblankFrequency();
++            return u32(std::max(0L, Number("BB_FPS_LIMIT", vblank <= 120 ? long(vblank) : 0L)));
+         }();
+         return value;
+     }
+diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
+index f475c39..8b574fb 100644
+--- a/gpu/shim/window.cpp
++++ b/gpu/shim/window.cpp
+@@ -169,6 +169,18 @@ bool WindowSDL::PollEvents() {
+             UpdateTextTitle();
+             continue;
+         }
++        // The controller finishes the text dialog too: Cross (South) accepts, Circle (East)
++        // cancels. From Supermedo/bloodborne_pc 1d34202.
++        if (text_active && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
++            (event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ||
++             event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)) {
++            std::scoped_lock lock{text_mutex};
++            text_state = event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ? 1 : 2;
++            text_active = false;
++            SDL_StopTextInput(window);
++            UpdateTextTitle();
++            continue;
++        }
+         if (BbOverlay::HandleEvent(event)) {
+             continue;
+         }
+diff --git a/src/probe.c b/src/probe.c
+index b0e7c32..b926998 100644
+--- a/src/probe.c
++++ b/src/probe.c
+@@ -8,6 +8,7 @@
+ #include <cpuid.h>
+ #include "runtime.h"
+ #include "gpu/bbgpu.h"
++#include "respawn_patch.h"
+ #if !defined(__x86_64__) || !defined(__GNUC__)
+ #error This prototype requires x86-64 GCC or Clang (including MinGW).
+ #endif
+@@ -903,6 +904,20 @@ int main(int argc, char **argv) {
+         memcpy(image + relocs[i].target, &value, 8);
+     }
+     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
++    /* AwesomeObserver 149972b: no 12-second minimum loading time after death. */
++    if (!cpu_only) {
++        const char *respawn_fix = getenv("BB_RESPAWN_DELAY_FIX");
++        if (respawn_fix && !strcmp(respawn_fix, "0")) {
++            puts("Respawn loading: original minimum delay requested (BB_RESPAWN_DELAY_FIX=0)");
++        } else {
++            int patched = bb_patch_respawn_delay(image, (size_t)size);
++            if (patched == BB_RESPAWN_APPLIED || patched == BB_RESPAWN_ALREADY_APPLIED)
++                printf("Respawn loading: 12-second minimum delay removed%s; readiness checks preserved\n",
++                       patched == BB_RESPAWN_ALREADY_APPLIED ? " (already patched)" : "");
++            else
++                puts("Respawn loading: unsupported or modified instructions; minimum-delay fix skipped");
++        }
++    }
+ #ifdef _WIN32
+     printf("Guest thread pointer reads: %" PRIu64 " use TEB TLS slot %u\n", patch_tls_reads(segments, ns), runtime_win_tls_slot());
+ #endif
+diff --git a/src/respawn_patch.h b/src/respawn_patch.h
+new file mode 100644
+index 0000000..c73a186
+--- /dev/null
++++ b/src/respawn_patch.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later
++ * Removes the 12-second minimum loading time after the player dies (CUSA03173 1.09).
++ * Ported from AwesomeObserver/bloodborne_pc 149972b, "Remove death-triggered minimum
++ * loading delay on Windows" (Evgeniy Doronin).
++ *
++ * The player-death flag initializes a minimum loading countdown to 12.0 seconds; the
++ * world-loading step waits on it independently of character readiness. Only that
++ * initialization changes (vmovss xmm0,[12.0] -> vxorps xmm0,xmm0,xmm0 + nop, 8 bytes).
++ * The character readiness branch, the resource-loading steps and the 15-second multiplayer
++ * timeout stay intact. Nothing is written unless the whole init block, the readiness branch
++ * and the 12.0 constant match byte for byte. Offsets refer to the loaded image, not to
++ * SELF/ELF file offsets. BB_RESPAWN_DELAY_FIX=0 keeps the original delay (probe.c).
++ */
++#ifndef BB_RESPAWN_PATCH_H
++#define BB_RESPAWN_PATCH_H
++
++#include <stddef.h>
++#include <string.h>
++
++enum { BB_RESPAWN_UNSUPPORTED, BB_RESPAWN_APPLIED, BB_RESPAWN_ALREADY_APPLIED };
++
++static inline int bb_patch_respawn_delay(unsigned char *image, size_t size) {
++    static const unsigned char init[] = {
++        0x41,0x80,0xbc,0x24,0xe4,0x00,0x00,0x00,0x00, /* cmp byte [r12+0xe4],0 */
++        0x74,0x0a,                                    /* je +10 */
++        0xc5,0xfa,0x10,0x05,0x5c,0xf5,0xfe,0x02,      /* vmovss xmm0,[rip+..] (12.0) */
++        0xeb,0x04,0xc5,0xf8,0x57,0xc0,                /* jmp +4; vxorps xmm0,xmm0,xmm0 */
++        0xc4,0xc1,0x7a,0x11,0x84,0x24,0x78,0x02,0x00,0x00, /* countdown = xmm0 */
++        0x41,0xc7,0x84,0x24,0x7c,0x02,0x00,0x00,0x00,0x00,0x70,0x41 /* 15 s timeout */
++    };
++    static const unsigned char ready[] = {
++        0xc5,0xf8,0x2e,0xca,0x0f,0x87,0x53,0x06,0x00,0x00,
++        0x45,0x84,0xff,0x0f,0x84,0x4a,0x06,0x00,0x00
++    };
++    static const unsigned char twelve[] = {0x00,0x00,0x40,0x41};
++    static const unsigned char zero[] = {0xc5,0xf8,0x57,0xc0,0x0f,0x1f,0x40,0x00};
++    const size_t init_at = 0x1938b59, instruction_at = 0x1938b64;
++    const size_t twelve_at = 0x49280c8, ready_at = 0x193a581;
++    unsigned char expected[sizeof(init)];
++    if (!image || size < twelve_at + sizeof(twelve)) return BB_RESPAWN_UNSUPPORTED;
++    if (memcmp(image + twelve_at, twelve, sizeof(twelve)) ||
++        memcmp(image + ready_at, ready, sizeof(ready))) return BB_RESPAWN_UNSUPPORTED;
++    if (!memcmp(image + init_at, init, sizeof(init))) {
++        memcpy(image + instruction_at, zero, sizeof(zero));
++        return BB_RESPAWN_APPLIED;
++    }
++    memcpy(expected, init, sizeof(init));
++    memcpy(expected + (instruction_at - init_at), zero, sizeof(zero));
++    return !memcmp(image + init_at, expected, sizeof(expected)) ?
++        BB_RESPAWN_ALREADY_APPLIED : BB_RESPAWN_UNSUPPORTED;
++}
++
++#endif
+diff --git a/src/runtime_host.c b/src/runtime_host.c
+index 73f3762..9baefdd 100644
+--- a/src/runtime_host.c
++++ b/src/runtime_host.c
+@@ -76,19 +76,22 @@ uint64_t host_realtime_ns(void) {
+     return (ticks - UINT64_C(116444736000000000)) * 100;
+ }
+ static __thread HANDLE sleep_timer;
+-/* High-resolution waitable timers (Windows 10 1803+) wake within ~0.5 ms; the rest of a
+- * short wait is spun, so frame pacing and audio deadlines stay precise. */
+-void host_sleep_until_ns(uint64_t deadline) {
+-    enum { SPIN_NS = 600000 };
++static __thread int sleep_timer_high_resolution;
++enum { PRECISE_SPIN_NS = 600000 };
++/* High-resolution waitable timers (Windows 10 1803+) wake within ~0.5 ms; the last spin_ns of
++ * a wait is spun (all of it without such a timer). */
++static void sleep_until_spinning(uint64_t deadline, uint64_t spin_ns) {
+     uint64_t now = host_monotonic_ns();
+     if (now >= deadline) return;
+-    if (deadline - now > SPIN_NS) {
+-        if (!sleep_timer) {
+-            sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+-            if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+-        }
++    if (!sleep_timer) {
++        sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++        sleep_timer_high_resolution = sleep_timer != NULL;
++        if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
++    }
++    if (!sleep_timer_high_resolution && spin_ns < PRECISE_SPIN_NS) spin_ns = PRECISE_SPIN_NS;
++    if (deadline - now > spin_ns) {
+         LARGE_INTEGER due;
+-        due.QuadPart = -(LONGLONG)((deadline - now - SPIN_NS) / 100);
++        due.QuadPart = -(LONGLONG)((deadline - now - spin_ns) / 100);
+         if (sleep_timer && due.QuadPart < 0 && SetWaitableTimer(sleep_timer, &due, 0, NULL, NULL, FALSE))
+             WaitForSingleObject(sleep_timer, INFINITE);
+         else
+@@ -96,9 +99,26 @@ void host_sleep_until_ns(uint64_t deadline) {
+     }
+     while (host_monotonic_ns() < deadline) YieldProcessor();
+ }
++/* Frame pacing and audio deadlines: precise. */
++void host_sleep_until_ns(uint64_t deadline) { sleep_until_spinning(deadline, PRECISE_SPIN_NS); }
++/* The game's own sleeps (sceKernelUsleep, nanosleep: ~20-26 per frame, ~4 ms each in Central
++ * Yharnam) only need to last at least as long as asked: a shorter spin tail
++ * (BB_SLEEP_SPIN_US, default 200; 600 as before) leaves ~0.4 ms of a core per sleep to the
++ * render threads. Waking a little later than asked is within what a sleep promises. */
++static uint64_t guest_sleep_spin_ns(void) {
++    static uint64_t spin = UINT64_MAX;
++    uint64_t value = __atomic_load_n(&spin, __ATOMIC_RELAXED);
++    if (value == UINT64_MAX) {
++        const char *env = getenv("BB_SLEEP_SPIN_US");
++        value = env && env[0] ? strtoull(env, NULL, 10) * 1000 : 200000;
++        if (value > PRECISE_SPIN_NS) value = PRECISE_SPIN_NS;
++        __atomic_store_n(&spin, value, __ATOMIC_RELAXED);
++    }
++    return value;
++}
+ void host_sleep_ns(uint64_t ns) {
+     if (!ns) { SwitchToThread(); return; }
+-    host_sleep_until_ns(host_monotonic_ns() + ns);
++    sleep_until_spinning(host_monotonic_ns() + ns, guest_sleep_spin_ns());
+ }
+ #else
+ #include <pthread.h>
+diff --git a/src/runtime_pad.c b/src/runtime_pad.c
+index fac0ac7..96c326f 100644
+--- a/src/runtime_pad.c
++++ b/src/runtime_pad.c
+@@ -86,6 +86,52 @@ static int is_preferred(SDL_JoystickID id, const char *want) {
+     const char *name=SDL_GetGamepadNameForID(id);
+     return !SDL_strcasecmp(guid,want) || (name && SDL_strcasestr(name,want));
+ }
++/* bbport: several gamepads at once (also one pad behind a 2.4 GHz receiver that shows as two):
++ * without a chosen one, the pad being used takes over, checked five times a second. */
++#define MAX_OTHER_PADS 4
++static SDL_Gamepad *other_pads[MAX_OTHER_PADS];
++static SDL_JoystickID other_pad_ids[MAX_OTHER_PADS];
++static int pad_active(SDL_Gamepad *p) {
++    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT;++b) if (SDL_GetGamepadButton(p,(SDL_GamepadButton)b)) return 1;
++    for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a) {
++        const int v=SDL_GetGamepadAxis(p,(SDL_GamepadAxis)a);
++        if (v>20000 || v<-20000) return 1;
++    }
++    return 0;
++}
++static void follow_active_pad(void) {
++    static uint64_t last;
++    const uint64_t now=now_us();
++    if (now-last<200000) return;
++    last=now;
++    for (int s=0;s<MAX_OTHER_PADS;++s)
++        if (other_pads[s] && !SDL_GamepadConnected(other_pads[s])) { SDL_CloseGamepad(other_pads[s]); other_pads[s]=NULL; }
++    int count=0;
++    SDL_JoystickID *ids=SDL_GetGamepads(&count);
++    if (!ids) return;
++    for (int i=0;count>1 && i<count;++i) {
++        if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue;
++        int slot=-1, free_slot=-1;
++        for (int s=0;s<MAX_OTHER_PADS;++s) {
++            if (other_pads[s] && other_pad_ids[s]==ids[i]) slot=s;
++            else if (!other_pads[s] && free_slot<0) free_slot=s;
++        }
++        if (slot<0 && free_slot>=0 && (other_pads[free_slot]=SDL_OpenGamepad(ids[i]))) {
++            other_pad_ids[free_slot]=ids[i];
++            slot=free_slot;
++        }
++        if (slot>=0 && pad_active(other_pads[slot])) {
++            SDL_Gamepad *previous=gamepad;
++            gamepad=other_pads[slot];
++            other_pads[slot]=previous;
++            other_pad_ids[slot]=previous ? SDL_GetGamepadID(previous) : 0;
++            printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(gamepad));
++            break;
++        }
++    }
++    SDL_free(ids);
++}
++
+ /* The chosen gamepad, else the first while it is not connected (checked again every second, it
+  * is taken as soon as it connects); called under lock. */
+ static SDL_Gamepad *current_gamepad(void) {
+@@ -117,6 +163,7 @@ static SDL_Gamepad *current_gamepad(void) {
+         }
+         SDL_free(ids);
+     }
++    if (!want) follow_active_pad();
+     return gamepad;
+ }
+ /* bbport (frame stats): the game's libc heap, read every 5 s from a game thread (it reads the pad)
+@@ -168,6 +215,10 @@ enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* trigge
+ typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; } Binding;
+ static Binding bindings[IN_COUNT];
+ static int bindings_ready;
++/* bbport: stick options (bbport.ini): pad_swap_sticks=1 moves with the right stick and looks with
++ * the left; pad_invert_look_x / pad_invert_look_y=1 invert the camera stick; pad_deadzone=N
++ * (percent, 0-50) ignores small stick movement (worn sticks that drift). */
++static int pad_swap_sticks, pad_invert_look_x, pad_invert_look_y, pad_deadzone;
+ 
+ static void bind_defaults(void) {
+     static const struct { int input; SDL_Scancode key; } keys[]={
+@@ -216,6 +267,14 @@ static void load_bindings(void) {
+     while (fgets(line,sizeof line,f)) {
+         const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4);
+         char *eq=strchr(line,'=');
++        if (!strncmp(line,"pad_",4) && eq) {
++            const int value=atoi(eq+1);
++            if (!strncmp(line,"pad_swap_sticks=",16)) pad_swap_sticks=value!=0;
++            else if (!strncmp(line,"pad_invert_look_x=",18)) pad_invert_look_x=value!=0;
++            else if (!strncmp(line,"pad_invert_look_y=",18)) pad_invert_look_y=value!=0;
++            else if (!strncmp(line,"pad_deadzone=",13)) pad_deadzone=value<0 ? 0 : value>50 ? 50 : value;
++            continue;
++        }
+         if ((!keyboard && !pad) || !eq) continue;
+         *eq=0;
+         int input=-1;
+@@ -296,6 +355,17 @@ static void sample_host(PadData *d) {
+         }
+         d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
+         d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
++        if (pad_deadzone) {
++            const int dz=pad_deadzone*128/100;
++            uint8_t *sticks[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
++            for (int s=0;s<4;++s) if (*sticks[s]-128<dz && 128-*sticks[s]<dz) *sticks[s]=128;
++        }
++        if (pad_swap_sticks) {
++            uint8_t t=d->left_x; d->left_x=d->right_x; d->right_x=t;
++            t=d->left_y; d->left_y=d->right_y; d->right_y=t;
++        }
++        if (pad_invert_look_x) d->right_x=(uint8_t)(255-d->right_x);
++        if (pad_invert_look_y) d->right_y=(uint8_t)(255-d->right_y);
+         if (SDL_GetNumGamepadTouchpads(g)>0) {
+             const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
+             for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
+@@ -456,13 +526,21 @@ static void touch_ids(PadData *d) {
+     else if (!since) since=d->timestamp;
+     d->touch_held_time=d->touch_count ? (uint32_t)(d->timestamp-since) : 0;
+ }
++/* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
++ * name, the button that closed the menu) stay hidden until all are released: the game would
++ * take them as a new press. From Supermedo/bloodborne_pc 1d34202 (hold_after_capture). */
++static int hold_after_capture;
+ static void sample(PadData *d) {
+     sample_host(d);
+-    if (bbgpu_overlay_captures_input()) return;
++    if (bbgpu_overlay_captures_input()) { hold_after_capture=1; return; }
+     record_sample(d);
+     read_inject();
+     replay_sample(d);
+     d->buttons|=injected.buttons;
++    if (hold_after_capture) {
++        if (d->buttons) { d->buttons=0; d->l2=d->r2=0; }
++        else hold_after_capture=0;
++    }
+     if (injected.touch_side>=0) touch_click(d,injected.touch_side);
+     else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
+     if (injected.buttons & BTN_L2) d->l2=255;
+diff --git a/src/runtime_services.c b/src/runtime_services.c
+index 5f31782..97d2b4f 100644
+--- a/src/runtime_services.c
++++ b/src/runtime_services.c
+@@ -262,10 +262,13 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
+     utf16_to_utf8(param->title,128,prompt,sizeof(prompt));
+     const char *preset=getenv("BB_IME_TEXT");
+     if (preset) { ime_complete(0,preset); return 0; }
+-    if (!bbgpu_text_input_begin(initial,prompt[0] ? prompt : "Text")) {
+-        const char *name=getenv("BB_USER_NAME");
++    /* An empty field starts with the player name (launcher) or "Hunter", so a controller alone
++     * can accept it: there is no on-screen keyboard (Supermedo/bloodborne_pc 1d34202). */
++    const char *name=getenv("BB_USER_NAME");
++    const char *start=initial[0] ? initial : name && *name ? name : "Hunter";
++    if (!bbgpu_text_input_begin(start,prompt[0] ? prompt : "Text")) {
+         ime_complete(0,name ? name : initial[0] ? initial : "Hunter");
+-    } else printf("Runtime: ImeDialog opened: type in the game window, Enter to confirm, Esc to cancel\n");
++    } else printf("Runtime: ImeDialog opened: type in the game window; Enter or Cross accepts, Esc or Circle cancels\n");
+     return 0;
+ }
+ static ABI int32_t ime_status(void) {
+diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
+index 593fed4..6cf97cf 100644
+--- a/tests/test_settings.cpp
++++ b/tests/test_settings.cpp
+@@ -84,6 +84,19 @@ int main() {
+     { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
+     BbSettings::Load();
+     assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
++    // Menu languages: the code is read and written back; the added languages translate by the
++    // English text and fall back to it; Russian keeps its own text.
++    { std::ofstream file(path); file << "menu_language=pt_BR\n"; }
++    BbSettings::Load();
++    assert(s.menu_language == BbSettings::MenuLanguage::PortugueseBrazil);
++    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Fechar");
++    assert(std::string(BbSettings::MenuText("Not in the tables", "x")) == "Not in the tables");
++    BbSettings::Save();
++    assert(Read(path).find("menu_language=pt_BR\n") != std::string::npos);
++    s.menu_language = BbSettings::MenuLanguage::Turkish;
++    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Kapat");
++    s.menu_language = BbSettings::MenuLanguage::Russian;
++    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Закрыть");
+     std::filesystem::remove(temporary);
+     std::puts("PASS: settings save keeps other keys, menu position");
+ }
