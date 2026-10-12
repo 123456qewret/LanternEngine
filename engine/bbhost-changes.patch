@@ -6873,7 +6873,7 @@ index f88cc52..e4fee68 100644
  } // namespace BbSections
  
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..7dfa2d8 100644
+index cf4fbd8..6b742f5 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -6954,7 +6954,19 @@ index cf4fbd8..7dfa2d8 100644
      } else if (key == "upscaler") {
          for (int u = 0; u < UpscalerCount; ++u) {
              if (value == UpscalerName(u)) {
-@@ -121,8 +172,47 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -117,12 +168,59 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+         v.graphics_bloom=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
+     } else if (key == "graphics_saturation") {
+         v.graphics_saturation=Clamp(std::isfinite(f)?f:1.0f,0.0f,2.0f);
++    } else if (key == "graphics_fog") {
++        v.graphics_fog=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
++    } else if (key == "graphics_brightness") {
++        v.graphics_brightness=Clamp(std::isfinite(f)?f:1.0f,0.5f,1.5f);
++    } else if (key == "graphics_contrast") {
++        v.graphics_contrast=Clamp(std::isfinite(f)?f:1.0f,0.95f,1.05f);
++    } else if (key == "graphics_hue") {
++        v.graphics_hue=Clamp(std::isfinite(f)?f:0.0f,-20.0f,20.0f);
+     } else if (key == "model_lod") {
          v.model_lod = std::clamp(i, -2, 2);
      } else if (key == "fullscreen") {
          v.fullscreen = i != 0;
@@ -7002,7 +7014,7 @@ index cf4fbd8..7dfa2d8 100644
      } else if (key == "output_res") {
          for (int r = 0; r < OutputCount; ++r) {
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
-@@ -138,6 +228,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -138,6 +236,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -7030,7 +7042,7 @@ index cf4fbd8..7dfa2d8 100644
  } // namespace
  
  Values& Get() {
-@@ -146,7 +257,11 @@ Values& Get() {
+@@ -146,7 +265,11 @@ Values& Get() {
  }
  
  const char* MenuText(const char* english, const char* russian) {
@@ -7043,7 +7055,7 @@ index cf4fbd8..7dfa2d8 100644
  }
  
  void Load() {
-@@ -166,9 +281,7 @@ void Load() {
+@@ -166,9 +289,7 @@ void Load() {
                  }
              }
          }
@@ -7054,7 +7066,7 @@ index cf4fbd8..7dfa2d8 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -196,6 +309,9 @@ void Load() {
+@@ -196,6 +317,9 @@ void Load() {
          {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
          {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
          {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
@@ -7064,7 +7076,7 @@ index cf4fbd8..7dfa2d8 100644
      };
      for (const auto& [env, key] : env_keys) {
          if (const char* value = std::getenv(env)) {
-@@ -211,6 +327,7 @@ void Load() {
+@@ -211,6 +335,7 @@ void Load() {
      v.startup_model_lod = v.model_lod;
      v.startup_output_res = v.output_res;
      v.startup_live_resolution = v.live_resolution;
@@ -7072,7 +7084,7 @@ index cf4fbd8..7dfa2d8 100644
  }
  
  void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
-@@ -264,7 +381,7 @@ void Save() {
+@@ -264,7 +389,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -7081,7 +7093,7 @@ index cf4fbd8..7dfa2d8 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -284,6 +401,11 @@ void Save() {
+@@ -284,12 +409,21 @@ void Save() {
          put(Effects[e].key, flag(v.effects[e]));
      }
      put("fullscreen", flag(v.fullscreen));
@@ -7093,7 +7105,17 @@ index cf4fbd8..7dfa2d8 100644
      put("graphics_controls",flag(v.graphics_controls));
      put("graphics_vignette",flag(v.graphics_vignette));
      put("graphics_ao_strength",fixed(v.graphics_ao_strength,2));
-@@ -305,6 +427,15 @@ void Save() {
+     put("graphics_shadow_scale",fixed(v.graphics_shadow_scale,2));
+     put("graphics_bloom",fixed(v.graphics_bloom,2));
+     put("graphics_saturation",fixed(v.graphics_saturation,2));
++    put("graphics_fog",fixed(v.graphics_fog,2));
++    put("graphics_brightness",fixed(v.graphics_brightness,2));
++    put("graphics_contrast",fixed(v.graphics_contrast,2));
++    put("graphics_hue",fixed(v.graphics_hue,0));
+     put("camera_controls", flag(v.camera_controls));
+     put("widescreen",flag(v.widescreen));
+     put("pc_controls",flag(v.pc_controls));
+@@ -305,6 +439,15 @@ void Save() {
      put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
      put("camera_height_scale", fixed(v.camera_height_scale, 2));
      put("model_lod", std::to_string(v.model_lod.load()));
@@ -7110,7 +7132,7 @@ index cf4fbd8..7dfa2d8 100644
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..0f07f43 100644
+index c0e8a94..3d614ce 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -7155,7 +7177,13 @@ index c0e8a94..0f07f43 100644
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -83,8 +109,28 @@ struct Values {
+@@ -80,11 +106,34 @@ struct Values {
+     std::atomic<bool> change_appearance{false}, rebirth{false}; // next launch, engine features
+     std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
+     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
++    /// Fog opacity (0..1 of the area's), the tone map's brightness (ColorV) and contrast (Contrust)
++    /// scales and a hue offset in degrees (ColorH); 1, 1, 1 and 0 leave the area's own.
++    std::atomic<float> graphics_fog{1},graphics_brightness{1},graphics_contrast{1},graphics_hue{0};
      std::atomic<float> camera_fov_scale{1.0f}, camera_distance_scale{1.0f}, camera_height_scale{1.0f};
      std::atomic<int> model_lod{0}; ///< -2 highest .. 2 lowest, 0 the game's
      std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
@@ -7184,7 +7212,7 @@ index c0e8a94..0f07f43 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +146,12 @@ struct Values {
+@@ -100,10 +149,12 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
@@ -7327,11 +7355,66 @@ index eff8103..c663792 100644
          for (auto& hook : hooks) Discard(hook);
          Log("engine enhancements disabled: no compatible feature could be prepared"); return;
      }
+diff --git a/gpu/shim/engine/engine_hooks.cpp b/gpu/shim/engine/engine_hooks.cpp
+index 8d8698a..1b32e71 100644
+--- a/gpu/shim/engine/engine_hooks.cpp
++++ b/gpu/shim/engine/engine_hooks.cpp
+@@ -142,6 +142,39 @@ bool Prepare(Hook& hook, std::uint8_t* image, std::size_t size, std::size_t offs
+     return true;
+ }
+ 
++std::uint8_t* TailStub(Callback callback, std::uint64_t resume) {
++    if (!callback || !resume) return nullptr;
++#ifdef _WIN32
++    auto* page = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
++    if (!page) return nullptr;
++#else
++    auto* page = static_cast<std::uint8_t*>(mmap(nullptr, 4096, PROT_READ | PROT_WRITE,
++        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
++    if (page == MAP_FAILED) return nullptr;
++#endif
++    EmitPrologueStub(page, 0, reinterpret_cast<void*>(callback), resume, nullptr, 0, false);
++#ifdef _WIN32
++    DWORD previous = 0;
++    if (!VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &previous) ||
++        !FlushInstructionCache(GetCurrentProcess(), page, 4096)) {
++        FreeStub(page); return nullptr;
++    }
++#else
++    if (mprotect(page, 4096, PROT_READ | PROT_EXEC)) { FreeStub(page); return nullptr; }
++    __builtin___clear_cache(reinterpret_cast<char*>(page), reinterpret_cast<char*>(page + 4096));
++#endif
++    return page;
++}
++
++void FreeStub(std::uint8_t* stub) {
++    if (!stub) return;
++#ifdef _WIN32
++    VirtualFree(stub, 0, MEM_RELEASE);
++#else
++    munmap(stub, 4096);
++#endif
++}
++
+ void Discard(Hook& hook) {
+     if (hook.stub) {
+ #ifdef _WIN32
 diff --git a/gpu/shim/engine/engine_hooks.h b/gpu/shim/engine/engine_hooks.h
-index a88772c..9e394a7 100644
+index a88772c..15c4726 100644
 --- a/gpu/shim/engine/engine_hooks.h
 +++ b/gpu/shim/engine/engine_hooks.h
-@@ -27,11 +27,19 @@ template <typename T> std::int64_t Argument(T value) {
+@@ -17,6 +17,10 @@ struct Hook {
+ bool Prepare(Hook& hook, std::uint8_t* image, std::size_t size, std::size_t offset,
+              std::span<const std::uint8_t> expected, Callback callback);
+ void Discard(Hook& hook);
++// A stub that calls `callback` and then jumps to `resume` (no displaced bytes): for a tail call
++// redirected to it. Null when no page could be had.
++std::uint8_t* TailStub(Callback callback, std::uint64_t resume);
++void FreeStub(std::uint8_t* stub);
+ void Commit(std::span<Hook> hooks);
+ bool WriteCode(void* address, const void* bytes, std::size_t size);
+ 
+@@ -27,11 +31,19 @@ template <typename T> std::int64_t Argument(T value) {
      else return static_cast<std::int64_t>(value);
  }
  template <typename... A> std::int64_t Call(std::uint64_t fn, A... args) {
@@ -7449,6 +7532,203 @@ index a2bc45d..ad7e742 100644
  bool player_stat_get(const char* name,std::int64_t* value);
  bool player_stat_set(const char* name,std::int64_t value);
  bool player_origin(int* origin);
+diff --git a/gpu/shim/engine/graphics.cpp b/gpu/shim/engine/graphics.cpp
+index c1e5ac1..7a9226c 100644
+--- a/gpu/shim/engine/graphics.cpp
++++ b/gpu/shim/engine/graphics.cpp
+@@ -24,6 +24,13 @@ const std::uint8_t kYebisRecordPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
+                                              0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x28, 0x4d, 0x89, 0xcd};
+ constexpr std::uint64_t kPostBlock = 0x59406e0;
+ constexpr std::size_t kSaturation = 0xc8, kVignettePower = 0xd0, kGlareLuminance = 0xdc;
++// bbport: the rest of the tone map's colour correction. sub_269e990 copies the blended tone map
++// (a stack block in the area GPARAM's group order: ToneMapExposure, Gamma, ToneType,
++// ToneMappingFactor, FilmicContrast, ColorH, ColorS, ColorV, Contrust, ...) field by field into
++// this block at 0x269fa5c-0x269fb8c: +0x98 exposure, +0x9c gamma, +0xa8 filmic contrast,
++// +0xc4 hue, +0xc8 saturation, +0xcc value, +0x248 contrast. Across the 86 areas hue is 0-8.7
++// (degrees), value 0.2-4 and contrast 0.983-1.069 - steep, so its setting stays within 5%.
++constexpr std::size_t kHue = 0xc4, kValue = 0xcc, kContrast = 0x248;
+ constexpr std::size_t kYebisHeld = 0x2710;  // on the YEBIS object: the block was not refreshed
+ std::uint8_t* g_post_block = nullptr;
+ 
+@@ -51,6 +58,21 @@ const std::uint8_t kShadowSetupPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
+ constexpr std::size_t kShadowBlock = 0x80, kShadowHeld = 0x297c;  // on the renderer
+ constexpr std::size_t kShadowScaled[] = {0x38, 0x3c, 0x44, 0x48};
+ 
++// bbport: fog, after bbhost graphics_patch.cpp (droogie, later than 7c790536). The fog manager
++// (graphics manager +0x5888) keeps one 0x60-byte block per fog the area defines, in the form the
++// shaders read; floats 0, 8 and 12 are its opacities (the fog colour's alpha times the area's
++// fogAlpha, and the height fog's). sub_26da690 rebuilds the table from the area's parameters
++// every time and ends with a tail call - `jmp sub_122e6b0` at 0x26daadf, the table in rdx - that
++// copies it to the GPU, so the scaling goes between the two. Another exit path follows that jump
++// at once, so the jump is pointed at the 13 bytes of padding after the function, which jump on
++// to the stub; sub_122e6b0 is shared with two other managers' uploads, which is why the jump.
++constexpr std::uint64_t kGraphicsManager = 0x5940dd8, kFogUploadJump = 0x26daadf, kFogPadding = 0x26daaf3,
++    kTableUpload = 0x122e6b0;
++constexpr std::size_t kFogManager = 0x5888, kFogMap = 0x248, kFogTable = 0x250, kFogCount = 0x258, kFogBlock = 0x60;
++constexpr int kFogOpacity[] = {0, 8, 12};
++const std::uint8_t kFogPaddingBytes[] = {0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0};
++std::uint8_t* g_graphics_manager = nullptr;  // the pointer's slot in the image
++
+ template<typename T> bool Read(std::uint64_t at,T* out) { return at && host_read_safe(reinterpret_cast<void*>(at),out,sizeof(T)); }
+ template<typename T> void Write(std::uint64_t at,const T& value) { std::memcpy(reinterpret_cast<void*>(at),&value,sizeof(T)); }
+ GUEST_ABI std::int64_t RenderView(std::uint64_t,const std::uint64_t* saved) {
+@@ -81,10 +103,25 @@ GUEST_ABI std::int64_t YebisRecord(std::uint64_t,const std::uint64_t* saved) {
+     if (!object || !g_post_block || !Read(object+kYebisHeld,&held) || held) return 0;
+     const auto& s=BbSettings::Get();
+     const auto block=reinterpret_cast<std::uint64_t>(g_post_block);
+-    float glare=0,saturation=0,power=0;
++    float glare=0,saturation=0,power=0,hue=0,value=0,contrast=0;
+     if (s.graphics_bloom!=1 && Read(block+kGlareLuminance,&glare) && std::isfinite(glare)) Write(block+kGlareLuminance,glare*s.graphics_bloom);
+     if (s.graphics_saturation!=1 && Read(block+kSaturation,&saturation) && std::isfinite(saturation)) Write(block+kSaturation,saturation*s.graphics_saturation);
+     if (!s.graphics_vignette && Read(block+kVignettePower,&power)) Write(block+kVignettePower,0.0f);
++    if (s.graphics_hue!=0 && Read(block+kHue,&hue) && std::isfinite(hue)) Write(block+kHue,hue+s.graphics_hue);
++    if (s.graphics_brightness!=1 && Read(block+kValue,&value) && std::isfinite(value)) Write(block+kValue,value*s.graphics_brightness);
++    if (s.graphics_contrast!=1 && Read(block+kContrast,&contrast) && std::isfinite(contrast)) Write(block+kContrast,contrast*s.graphics_contrast);
++    return 0;
++}
++// At the fog table's upload: rdi the id map, rdx the table, both checked against the fog
++// manager before anything is written.
++GUEST_ABI std::int64_t FogUpload(std::uint64_t,const std::uint64_t* saved) {
++    const float k=BbSettings::Get().graphics_fog;
++    std::uint64_t manager=0,fog=0,map=0,table=0;std::uint32_t count=0;
++    if (k==1 || !std::isfinite(k) || !Read(reinterpret_cast<std::uint64_t>(g_graphics_manager),&manager) ||
++        !Read(manager+kFogManager,&fog) || !Read(fog+kFogMap,&map) || !Read(fog+kFogTable,&table) ||
++        !Read(fog+kFogCount,&count) || map!=saved[5] || table!=saved[3] || !table || !count || count>4096) return 0;
++    auto* blocks=reinterpret_cast<float*>(table);
++    for (std::uint32_t i=0;i<count;++i) for (const int o:kFogOpacity) blocks[i*(kFogBlock/4)+o]*=k;
+     return 0;
+ }
+ }
+@@ -100,8 +137,22 @@ bool Install(std::uint8_t* image,std::size_t size) {
+         host_log("live graphics disabled: engine bytes differ; all original paths retained");return false;
+     }
+     g_post_block=image+0x55406e0;
++    // Fog: the jump and the padding checked, the stub made, before anything is written.
++    const std::size_t jump=kFogUploadJump-0x400000,padding=kFogPadding-0x400000,upload=kTableUpload-0x400000;
++    std::uint8_t* fog=nullptr;std::int32_t rel=0;
++    if (size>padding+sizeof(kFogPaddingBytes)) std::memcpy(&rel,image+jump+1,4);
++    if (size>padding+sizeof(kFogPaddingBytes) && image[jump]==0xe9 && static_cast<std::int64_t>(jump+5)+rel==static_cast<std::int64_t>(upload) &&
++        !std::memcmp(image+padding,kFogPaddingBytes,sizeof(kFogPaddingBytes)))
++        fog=TailStub(FogUpload,reinterpret_cast<std::uint64_t>(image+upload));
+     Commit(hooks);enabled=true;
+-    host_log("bbhost live graphics enabled: AA, SSAO, AO strength, shadow distance, bloom, saturation and vignette");
++    if (fog) {
++        g_graphics_manager=image+(kGraphicsManager-0x400000);
++        std::uint8_t* p=image+padding;*p++=0x49;*p++=0xbb;  // movabs r11, stub; jmp r11
++        const auto target=reinterpret_cast<std::uint64_t>(fog);std::memcpy(p,&target,8);p+=8;*p++=0x41;*p++=0xff;*p=0xe3;
++        const std::int32_t to_padding=static_cast<std::int32_t>(padding-(jump+5));std::memcpy(image+jump+1,&to_padding,4);
++    }
++    host_log("bbhost live graphics enabled: AA, SSAO, AO strength, shadow distance, bloom, saturation, vignette, "
++             "brightness, contrast, hue%s",fog ? " and fog" : " (fog: engine bytes differ, left alone)");
+     return true;
+ }
+ }
+diff --git a/gpu/shim/engine/option_menu.cpp b/gpu/shim/engine/option_menu.cpp
+index cf652fe..a4938ac 100644
+--- a/gpu/shim/engine/option_menu.cpp
++++ b/gpu/shim/engine/option_menu.cpp
+@@ -606,7 +606,12 @@ Slider camera[] = {
+ bool seeded=false;
+ bool camera_page=false,graphics_page=false,input_page=false;
+ Slider graphics_sliders[]={{nullptr,117007,0,0.2f,5},{nullptr,117006,1,0.2f,0}};
+-Slider effect_sliders[]={{nullptr,120000,0,0.1f,10},{nullptr,120002,0,0.2f,5}};
++Slider effect_sliders[]={{nullptr,120000,0,0.1f,10}};
++Slider fog_slider[]={{nullptr,117008,0,0.1f,10}};  // after the output list: the list stays row 4
++// Brightness, contrast, saturation and hue (bbport): 5 is the area's own.
++Slider color_sliders[]={{nullptr,125000,0.5f,0.1f,5},{nullptr,125001,0.95f,0.01f,5},{nullptr,125002,0,0.2f,5},
++                        {nullptr,125003,-20.0f,4.0f,5}};
++bool color_seeded=false;
+ struct StartupToggle { std::atomic<bool>* setting=nullptr; std::uint32_t id; std::uint8_t value=0,last=0; };
+ StartupToggle enhancements[]={{nullptr,124001},{nullptr,124002},{nullptr,124004}};
+ bool enhancements_seeded=false;
+@@ -662,7 +667,9 @@ GUEST_ABI void GraphicsHandler(void* dialog,void* params) {
+     for (auto& s:graphics_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
+     output_resolution=last_resolution=BbSettings::Get().output_res;
+     add_list_row(dialog,&output_resolution,117004,outputs,BbSettings::OutputCount,BbSettings::OutputDefault);
+-    graphics_seeded=true;log_rows("PCGraphics",dialog,5,5);
++    SeedSliders(fog_slider);
++    for (auto& s:fog_slider) add_slider_row(dialog,&s.value,s.id,s.def);
++    graphics_seeded=true;log_rows("PCGraphics",dialog,6,6);
+ }
+ GUEST_ABI void EffectsHandler(void* dialog,void* params) {
+     host_log("pc-options: PCEffects opened, dialog=%p params=%p",dialog,params);
+@@ -671,7 +678,15 @@ GUEST_ABI void EffectsHandler(void* dialog,void* params) {
+     for (auto& t:effect_toggles) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,1); }
+     SeedSliders(effect_sliders);
+     for (auto& s:effect_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
+-    effects_seeded=true;log_rows("PCEffects",dialog,6,6);
++    effects_seeded=true;log_rows("PCEffects",dialog,5,5);
++}
++GUEST_ABI void ColorHandler(void* dialog,void* params) {
++    host_log("pc-options: PCColour opened, dialog=%p params=%p",dialog,params);
++    alignas(16) std::uint8_t scratch[0x100]{};
++    hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
++    SeedSliders(color_sliders);
++    for (auto& s:color_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
++    color_seeded=true;log_rows("PCColour",dialog,4,4);
+ }
+ GUEST_ABI std::int64_t OpenGraphics(void* root,void* params) {
+     return open_named(root,params,"PCGraphics",reinterpret_cast<void*>(&GraphicsHandler),4);
+@@ -687,6 +702,13 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
+     GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenEffects));
+     hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;
+ }
++GUEST_ABI std::int64_t OpenColor(void* root,void* params) {
++    return open_named(root,params,"PCColour",reinterpret_cast<void*>(&ColorHandler),-1);
++}
++GUEST_ABI void* OpenColorRow(void* out,void* ctx) {
++    GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenColor));
++    hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;
++}
+ 
+ StartupToggle controls[]={{nullptr,118000},{nullptr,118002},{nullptr,118003},{nullptr,116002},{nullptr,118005}};
+ std::uint8_t sensitivity=5,last_sensitivity=5;bool controls_seeded=false;
+@@ -712,6 +734,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+           hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
+         { Captions c(110010);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenEffectsRow));
+           hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
++        { Captions c(110014);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenColorRow));
++          hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
+     }
+     if(input_page) {
+         {Captions c(110008);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenControlsRow));hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag);}
+@@ -720,7 +744,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+     if (camera_page) { Captions c(110011);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenCameraRow));
+       hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
+     hle_call_guest<std::int64_t>(guest_fn(kSystemFinalize),out,builder,arg3);
+-    host_log("pc-options: System list includes PC Enhancements%s%s",graphics_page?", PC Graphics / PC Effects":"",camera_page?", PC Camera":"");
++    host_log("pc-options: System list includes PC Enhancements%s%s",graphics_page?", PC Graphics / PC Effects / PC Colour":"",camera_page?", PC Camera":"");
+     return out;
+ }
+ } // namespace
+@@ -783,7 +807,9 @@ bool Install(std::uint8_t* image,std::size_t size) {
+     graphics_sliders[0].setting=&settings.graphics_ao_strength;graphics_sliders[1].setting=&settings.graphics_shadow_scale;
+     effect_toggles[0].setting=&settings.effects[2];effect_toggles[1].setting=&settings.effects[1];
+     effect_toggles[2].setting=&settings.effects[0];effect_toggles[3].setting=&settings.graphics_vignette;
+-    effect_sliders[0].setting=&settings.graphics_bloom;effect_sliders[1].setting=&settings.graphics_saturation;
++    effect_sliders[0].setting=&settings.graphics_bloom;fog_slider[0].setting=&settings.graphics_fog;
++    color_sliders[0].setting=&settings.graphics_brightness;color_sliders[1].setting=&settings.graphics_contrast;
++    color_sliders[2].setting=&settings.graphics_saturation;color_sliders[3].setting=&settings.graphics_hue;
+     enhancements[0].setting=&settings.change_appearance;
+     enhancements[1].setting=&settings.rebirth;
+     enhancements[2].setting=&settings.camera_controls;
+@@ -797,7 +823,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
+     std::memcpy(p,&target,8); p+=8; *p++=0x41; *p++=0xff; *p=0xe3;
+     const std::int32_t to_pad=pad-(call+5); std::memcpy(image+call+1,&to_pad,4);
+     g_installed=true;
+-    host_log("pc-options: native System pages installed (%u local assets): Enhancements%s%s",installed,graphics_page?", Graphics / Effects":"",camera_page?", Camera":"");
++    host_log("pc-options: native System pages installed (%u local assets): Enhancements%s%s",installed,graphics_page?", Graphics / Effects / Colour":"",camera_page?", Camera":"");
+     return true;
+ }
+ bool ClickDecides(std::uint8_t* list, int index) {
+@@ -858,6 +884,7 @@ void Tick() {
+         for (auto& t:rows) if (t.value!=t.last) { t.last=t.value;*t.setting=t.value!=0;changed=true; }
+     };
+     push_sliders(graphics_sliders,graphics_seeded);push_sliders(effect_sliders,effects_seeded);
++    push_sliders(fog_slider,graphics_seeded);push_sliders(color_sliders,color_seeded);
+     push_toggles(controls,controls_seeded);
+     if(controls_seeded && sensitivity!=last_sensitivity){last_sensitivity=std::min<std::uint8_t>(sensitivity,10);BbSettings::Get().mouse_sensitivity=last_sensitivity;changed=true;}
+     push_toggles(graphics_toggles,graphics_seeded);push_toggles(effect_toggles,effects_seeded);
 diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
 index f475c39..8b574fb 100644
 --- a/gpu/shim/window.cpp
@@ -8591,10 +8871,10 @@ index 65883c0..e46c2a7 100644
  }
  static ABI int32_t thread_set_affinity(GuestThread *t,uint64_t mask) {
 diff --git a/tests/test_engine_hooks.cpp b/tests/test_engine_hooks.cpp
-index 50e085f..8ce55a5 100644
+index 50e085f..316ab02 100644
 --- a/tests/test_engine_hooks.cpp
 +++ b/tests/test_engine_hooks.cpp
-@@ -67,10 +67,16 @@ int main() {
+@@ -67,10 +67,32 @@ int main() {
      assert(reinterpret_cast<Floating>(image)(1.5,2.5) == 4.0);
      assert(floats[0] == 1.5 && floats[1] == 2.5);
      BbEngine::Discard(hook);
@@ -8604,13 +8884,29 @@ index 50e085f..8ce55a5 100644
 +    const std::uint8_t seventh[] = {0x55,0x48,0x89,0xe5,0x48,0x8b,0x45,0x10,0x4c,0x01,0xc8,0x5d,0xc3};
 +    std::memcpy(image + 0x100, seventh, sizeof seventh);
 +    assert(BbEngine::Call(reinterpret_cast<std::uint64_t>(image + 0x100), 1,2,3,4,5,6,70) == 76);
++
++    // A redirected tail call (the fog table's upload): its jmp rel32 goes to padding that jumps on
++    // to a stub, which calls the host and then the jump's target with the arguments intact.
++    calls = 0;
++    std::memcpy(image + 16, sum, sizeof sum);
++    auto* stub = BbEngine::TailStub(Observe, reinterpret_cast<std::uint64_t>(image + 16));
++    assert(stub);
++    std::uint8_t* p = image + 0x210; *p++ = 0x49; *p++ = 0xbb;  // movabs r11, stub; jmp r11
++    const auto target = reinterpret_cast<std::uint64_t>(stub);
++    std::memcpy(p, &target, 8); p += 8; *p++ = 0x41; *p++ = 0xff; *p = 0xe3;
++    image[0x200] = 0xe9;
++    const std::int32_t rel = 0x210 - (0x200 + 5);
++    std::memcpy(image + 0x201, &rel, 4);
++    assert(BbEngine::Call(reinterpret_cast<std::uint64_t>(image + 0x200), 1,2,3,4,5,6) == 21);
++    assert(calls == 1 && arguments == (std::array<std::uint64_t,6>{1,2,3,4,5,6}));
++    BbEngine::FreeStub(stub);
  #ifdef _WIN32
      VirtualFree(image, 0, MEM_RELEASE);
  #else
      munmap(image, 4096);
  #endif
 -    std::puts("PASS: guest ABI arguments, XMM preservation, return slot, byte/range guards and staged hook installation");
-+    std::puts("PASS: guest ABI arguments (seven with a stack argument), XMM preservation, return slot, byte/range guards and staged hook installation");
++    std::puts("PASS: guest ABI arguments (seven with a stack argument), XMM preservation, return slot, byte/range guards, staged hook installation and a redirected tail call");
  }
 diff --git a/tests/test_gpu_runtime_stubs.cpp b/tests/test_gpu_runtime_stubs.cpp
 index 75eca24..45ea45d 100644
@@ -8919,6 +9215,79 @@ index 593fed4..2087d68 100644
 +    std::filesystem::remove(temporary);
      std::puts("PASS: settings save keeps other keys, menu position");
  }
+diff --git a/tools/engine/menu_assets.cpp b/tools/engine/menu_assets.cpp
+index d51b554..1d2b1f1 100644
+--- a/tools/engine/menu_assets.cpp
++++ b/tools/engine/menu_assets.cpp
+@@ -31,7 +31,7 @@ using Bytes = std::vector<std::uint8_t>;
+ 
+ // Bumped whenever a generator or the recipe changes, so installs remake their
+ // assets instead of keeping the last generation.
+-constexpr int kGeneratorVersion = 8;  // 8: PC Enhancements' three rows; 7: the PC Enhancements section; 6: event text (group 30) for the altar's rebirth
++constexpr int kGeneratorVersion = 9;  // 9: PC Colour, Fog on PC Graphics; 8: 8: PC Enhancements' three rows; 7: the PC Enhancements section; 6: event text (group 30) for the altar's rebirth
+ 
+ const char kMessagesTsv[] =
+ #include "pc_option_messages.inc"
+@@ -765,7 +765,7 @@ Bytes add_list_slot(const Bytes& b, const std::string& list) {
+     return out;
+ }
+ 
+-// The movie: eight sections, then the System list's scroll bar. PCDeck is
++// The movie: nine sections, then the System list's scroll bar. PCDeck is
+ // opened on a Steam Deck only (engine/option_menu.cpp), but is always made.
+ Bytes build_option_movie(const Bytes& src) {
+     Bytes m = src;
+@@ -781,13 +781,14 @@ Bytes build_option_movie(const Bytes& src) {
+         m = add_option_section(m, a);
+     };
+     section("PCSetting", 116020, 383, 6, 0, {});
+-    section("PCGraphics", 117020, 384, 5, 0, {"Item_5_0"});
++    section("PCGraphics", 117020, 384, 6, 0, {});
+     section("PCControls", 118020, 385, 6, 0, {});
+     section("PCKeys", 119020, 386, std::nullopt, 2, {});
+-    section("PCEffects", 120020, 387, 6, 0, {});
++    section("PCEffects", 120020, 387, 5, 0, {"Item_5_0"});
+     section("PCCamera", 121020, 388, 3, 0, {"Item_3_0", "Item_4_0", "Item_5_0"});
+     section("PCDeck", 123020, 389, 2, 0, {"Item_2_0", "Item_3_0", "Item_4_0", "Item_5_0"});
+     section("PCEnhance", 124020, 390, 3, 0, {"Item_3_0", "Item_4_0", "Item_5_0"});
++    section("PCColour", 125020, 391, 4, 0, {"Item_4_0", "Item_5_0"});
+     return add_scrollbar(m, "Top", 1290, 354.5);
+ }
+ 
+diff --git a/tools/engine/pc_option_messages.tsv b/tools/engine/pc_option_messages.tsv
+index 2199381..2c06fbf 100644
+--- a/tools/engine/pc_option_messages.tsv
++++ b/tools/engine/pc_option_messages.tsv
+@@ -7,7 +7,7 @@
+ # The port takes the next free blocks - 116000 PC Settings, 117000 PC
+ # Graphics, 118000 PC Controls, 119000 Key Bindings, 120000 PC Effects, 121000
+ # PC Camera, 122000 the title menu's Quit Game, 123000 Steam Deck (shown on a
+-# Deck only), 124000 PC Enhancements - and 110006..110013 for the System rows
++# Deck only), 124000 PC Enhancements, 125000 PC Colour - and 110006..110014 for the System rows
+ # that open them. All are unused in the shipped menu.msgbnd. (Motion blur,
+ # depth of field and chromatic aberration moved to PC Effects with their
+ # 117000 ids.)
+@@ -33,6 +33,7 @@
+ 110011	PC Camera	The follow camera: field of view, distance and height.
+ 110012	Steam Deck	Frame rate and model detail for the Steam Deck.
+ 110013	PC Enhancements	Enable the mirror, rebirth and PC Camera controls. Each needs a restart.
++110014	PC Colour	Brightness, contrast, saturation and hue of the picture.
+ 116000	Vertical Sync	Wait for the display. Off can tear.
+ 116001	Fullscreen	Borderless, at the desktop resolution.
+ 116002	Mouse in Menus	Move and click to select.
+@@ -59,7 +60,11 @@
+ 120020	PC Effects	
+ 120000	Bloom	The glow around bright light. 10 is the game's own.
+ 120001	Vignette	The darkened frame edges some areas use.
+-120002	Saturation	Colour. 5 is the game's own; 0 is black and white.
++125020	PC Colour	
++125000	Brightness	How bright the picture is. 5 is the game's own.
++125001	Contrast	The difference between dark and bright. 5 is the game's own.
++125002	Saturation	Colour. 5 is the game's own; 0 is black and white.
++125003	Hue	Shifts every colour. 5 is the game's own.
+ 121020	PC Camera	
+ 121000	Camera Distance	How far behind the character the camera sits. 5 is the game's own.
+ 121001	Camera Height	How high above the character the camera looks. 5 is the game's own.
 diff --git a/docs/hdr.md b/docs/hdr.md
 new file mode 100644
 index 0000000..8db00a1

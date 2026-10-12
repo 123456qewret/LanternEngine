@@ -40,12 +40,16 @@ namespace BloodborneLauncher.Views
             // The engine's picture and camera controls (bbport_settings.cpp clamps the same ranges).
             Group("Picture");
             var picture = new StackPanel();
-            IniToggle(SymbolRegular.Color24, "Picture tuning", "Turns the four settings below on", "graphics_controls");
+            IniToggle(SymbolRegular.Color24, "Picture tuning", "Turns the settings below on, here and in the game's System menu (PC Graphics, PC Effects, PC Colour)", "graphics_controls");
             IniToggle(SymbolRegular.CircleHalfFill24, "Vignette", null, "graphics_vignette", picture);
             IniSlider(SymbolRegular.DarkTheme24, "Ambient occlusion strength", 0, 2, "graphics_ao_strength", picture);
             IniSlider(SymbolRegular.WeatherSunny24, "Shadow resolution", 1, 3, "graphics_shadow_scale", picture);
             IniSlider(SymbolRegular.Lightbulb24, "Bloom", 0, 1, "graphics_bloom", picture);
             IniSlider(SymbolRegular.Color24, "Saturation", 0, 2, "graphics_saturation", picture);
+            IniSlider(SymbolRegular.BrightnessHigh24, "Brightness", 0.5, 1.5, "graphics_brightness", picture);
+            IniSlider(SymbolRegular.DarkTheme24, "Contrast", 0.95, 1.05, "graphics_contrast", picture, step: 0.01);
+            IniSlider(SymbolRegular.Color24, "Hue", -20, 20, "graphics_hue", picture, step: 1, fallback: 0);
+            IniSlider(SymbolRegular.WeatherFog24, "Fog", 0, 1, "graphics_fog", picture);
             Body.Children.Add(picture);
 
             Group("Camera");
@@ -96,8 +100,9 @@ namespace BloodborneLauncher.Views
             Ws.PortChanged += UpdateUpscaler;
         }
 
-        private void IniSlider(SymbolRegular icon, string title, double min, double max, string key, Panel? into = null) =>
-            SliderRow(icon, title, null, min, max, 0.05, () => ParseDouble(Ini.Get(key, "1.00"), 1.0), v => Ini.Set(key, Fmt(v)), into: into);
+        private void IniSlider(SymbolRegular icon, string title, double min, double max, string key, Panel? into = null,
+            double step = 0.05, double fallback = 1.0) =>
+            SliderRow(icon, title, null, min, max, step, () => ParseDouble(Ini.Get(key, Fmt(fallback)), fallback), v => Ini.Set(key, Fmt(v)), into: into);
 
         private static SymbolRegular EffectIcon(string key) => key switch
         {
