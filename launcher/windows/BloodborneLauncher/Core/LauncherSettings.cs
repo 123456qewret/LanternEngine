@@ -66,6 +66,7 @@ namespace BloodborneLauncher.Core
             ["exp_fast_draws"] = Updater.CurrentBeta > 0,
             ["exp_compile_skip"] = Updater.CurrentBeta > 0,
             ["audio_priority"] = false,
+            ["sound_output"] = "",
             ["occlusion_default_on"] = true,
             ["section_stats"] = false,
             ["trophy_notifications"] = true,

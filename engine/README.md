@@ -17,6 +17,7 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Shorter spin at the end of the game's sleeps | `BB_SLEEP_SPIN_US=600` off |
 | Audio threads (FMOD, PS4 priority 256-300) above the game's other threads on Windows | `BB_AUDIO_THREAD_PRIORITY=0` off |
 | Audio output follows the device's real rate (proportional correction, queue capped), so sound can't drift behind | |
+| Audio device thread watched (writes, rate, longest gap in the audio statistics) and raised when Windows leaves it at normal priority; DirectSound output with a larger buffer as an option | `BB_AUDIO_STATS`, `SDL_AUDIO_DRIVER=directsound`, `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` |
 | Pipelines created on compile threads (shorter hitches in new areas) | `BB_ASYNC_PIPELINES=0` off |
 | Occlusion culling: real occlusion query results, so the game skips hidden objects; a block reads hidden only after three empty results (no flicker) | `BB_OCCLUSION=0` off |
 | Cached texture, sampler and render target lookups kept across image (un)registration | `BB_MEMO_REVALIDATE=0`, `BB_SAMPLER_MEMO=0` off |

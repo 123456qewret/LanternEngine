@@ -144,6 +144,13 @@
             new("Precise", "2"),
         };
 
+        public static readonly Choice[] SoundOutput =
+        {
+            new("WASAPI", "", "Default"),
+            new("DirectSound", "directsound"),
+            new("DirectSound, larger buffer", "directsound_large"),
+        };
+
         public static readonly Choice[] LaunchMethods =
         {
             new("Bloodborne PC engine", "windows", "Prepares mods and patches, then starts the engine (out\\bb-probe.exe)"),

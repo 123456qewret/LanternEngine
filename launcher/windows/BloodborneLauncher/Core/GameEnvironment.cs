@@ -80,6 +80,11 @@ namespace BloodborneLauncher.Core
             }
             // Sound threads first (CPUs with many slower cores): off unless chosen.
             if (!s.Bool("audio_priority") || s.Bool("safe_mode_next")) env["BB_AUDIO_THREAD_PRIORITY"] = "0";
+            // Sound output: DirectSound writes further ahead than WASAPI, so a late sound thread
+            // doesn't leave a gap (SDL reads its driver and buffer size from the environment).
+            var output = s.Bool("safe_mode_next") ? "" : s.Str("sound_output");
+            if (output.StartsWith("directsound")) env["SDL_AUDIO_DRIVER"] = "directsound";
+            if (output == "directsound_large") env["SDL_AUDIO_DEVICE_SAMPLE_FRAMES"] = "2048";
             if (!s.Bool("exp_compile_skip"))
             {
                 env["BB_SKIP_UNCOMPILED"] = "0";
