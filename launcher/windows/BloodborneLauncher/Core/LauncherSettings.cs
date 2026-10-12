@@ -11,6 +11,7 @@ namespace BloodborneLauncher.Core
     public sealed class LauncherSettings
     {
         public const string OnlineCommunity = "https://thehuntersdream.com";
+        public const string Discord = "https://discord.gg/d3Uv3Cfr5x";
         public const string ShadnetServer = "srv.shadps4.net:31313";
 
         private JsonObject _data = new();
@@ -27,7 +28,6 @@ namespace BloodborneLauncher.Core
             ["patches_dir"] = "",
             ["language"] = "1",
             ["fullscreen"] = false,
-            ["hdr"] = false,
             ["present_mode"] = "Mailbox",
             ["fps_mode"] = "60",
             ["draw_pipe"] = "",
@@ -47,6 +47,7 @@ namespace BloodborneLauncher.Core
             ["save_backups"] = true,
             ["safe_mode_next"] = false,
             ["memory_check_off"] = false,
+            ["discord_hidden"] = false,
             ["hardware_offered"] = false,
             ["cheat_vials_amount"] = 20,
             ["cheat_bullets_amount"] = 20,

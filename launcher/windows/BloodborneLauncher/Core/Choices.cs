@@ -108,6 +108,23 @@
             new("Italian", "5"),
         };
 
+        public static readonly Choice[] HdrPaperWhite =
+        {
+            new("100 nits", "100"), new("150 nits", "150"), new("200 nits (default)", "200"),
+            new("250 nits", "250"), new("300 nits", "300"), new("400 nits", "400"),
+        };
+
+        public static readonly Choice[] HdrPeak =
+        {
+            new("400 nits", "400"), new("600 nits", "600"), new("800 nits", "800"), new("1000 nits (default)", "1000"),
+            new("1500 nits", "1500"), new("2000 nits", "2000"), new("4000 nits", "4000"),
+        };
+
+        public static readonly Choice[] HdrBoost =
+        {
+            new("Off", "0"), new("Low", "0.25"), new("Medium (default)", "0.5"), new("High", "1"),
+        };
+
         public static readonly Choice[] LiveResolution =
         {
             new("Auto (by GPU)", "auto"),

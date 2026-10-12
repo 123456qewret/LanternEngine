@@ -24,6 +24,7 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | No 12-second minimum loading time after death | `BB_RESPAWN_DELAY_FIX=0` off |
 | Crash fixes: oversized command data, empty recording chunk, out-of-order flip IRQ, SnormNz packed formats, failed allocations in audio decoding and the save list; swapchain recreation | |
 | Crash reports for host faults on game threads (Windows ended those without a trace); RAM in the log once a minute | |
+| HDR output: HDR10 or scRGB swapchain with paper white, peak and highlight boost | `hdr`, `hdr_paper_white`, `hdr_peak`, `hdr_boost` |
 | DLSS texture LOD bias | `BB_DLSS_MIP_BIAS=0` off |
 | Optional FSR 4 balanced model | `BB_FSR4_BALANCED=1` |
 | Cheats: Blood Vials and Quicksilver Bullets (infinite or a set amount), consumables, stamina, stealth, no weapon wear, firearm range, keep echoes, echo multiplier, add echoes/insight; live and revertible (in-game menu) | `cheat_*` |

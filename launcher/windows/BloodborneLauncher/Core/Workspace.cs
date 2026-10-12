@@ -83,6 +83,10 @@ namespace BloodborneLauncher.Core
                     code == 0 ? LogLevel.Good : LogLevel.Warn);
                 _pendingOutput.Enqueue($"— the game exited (code {code}) —");
                 FlushOutput();
+                if (_hdrBefore.Count > 0 && WindowsHdr.Restore(_hdrBefore) is > 0 and var restored)
+                    Log(restored == 1 ? "Windows HDR was switched off during the game; turned it back on."
+                                      : $"Windows HDR was switched off on {restored} displays during the game; turned it back on.", LogLevel.Info);
+                _hdrBefore = new();
                 var stopped = _stopping;
                 _stopping = false;
                 if (Session is { } session)
@@ -214,6 +218,9 @@ namespace BloodborneLauncher.Core
             }
         }
 
+        /// <summary>Windows' HDR state per display when the game started (restored after it exits).</summary>
+        private List<WindowsHdr.Display> _hdrBefore = new();
+
         public string? StartGame()
         {
             SaveNow();
@@ -233,6 +240,7 @@ namespace BloodborneLauncher.Core
             }
             var safeMode = Settings.Bool("safe_mode_next");
             Session = new SessionStats();
+            _hdrBefore = WindowsHdr.Displays();
             var error = Game.Start(Settings);
             if (error != null)
             {
@@ -240,6 +248,12 @@ namespace BloodborneLauncher.Core
                 return error;
             }
             Log(GameRunner.Custom(Settings) ? "Started the game with the custom command." : "Started Bloodborne.", LogLevel.Step);
+            if (Settings.Bool("section_stats"))
+            {
+                // Timing every render stage costs frame rate: one game only.
+                Settings.Set("section_stats", false);
+                SaveSoon();
+            }
             if (safeMode)
             {
                 // One run only: the next start uses the settings as chosen again.

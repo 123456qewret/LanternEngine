@@ -16,7 +16,7 @@ index 267b5c1..6ef1bf1 100644
            out/gpu/image-overlap-test.exe
            out/gpu/settings-test.exe
 diff --git a/build.sh b/build.sh
-index 7a41a21..8114a20 100644
+index 7a41a21..a1921e1 100644
 --- a/build.sh
 +++ b/build.sh
 @@ -38,11 +38,27 @@ fi
@@ -49,19 +49,43 @@ index 7a41a21..8114a20 100644
  # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
  # to FSR-Vulkan (gpu/patches/fsr-vulkan), applied to its working tree once.
  if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
-@@ -54,8 +70,8 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
+@@ -53,9 +69,18 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
+         git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
      fi
  done
- cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
+-cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
 -    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" >/dev/null
 -echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
-+    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" -DBB_MARCH="${BB_MARCH:-}" >/dev/null
++# Line tables only (not full debug info): crash offsets still resolve to function and
++# file:line with llvm-symbolizer, and compiling and linking take much less time.
++gpu_config=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" -DBB_LTO="${BB_LTO:-ON}"
++            -DBB_PGO_DIR="$PWD/pgo" -DBB_MARCH="${BB_MARCH:-}"
++            "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -gline-tables-only -DNDEBUG"
++            "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -gline-tables-only -DNDEBUG")
++# Configured once per set of options (ninja itself reruns CMake when a CMakeLists.txt changes).
++if [[ ! -f out/gpu/build.ninja || $(cat out/gpu/bb-configure.txt 2>/dev/null) != "${gpu_config[*]}" ]]; then
++    cmake -S gpu -B out/gpu "${gpu_config[@]}" >/dev/null
++    printf '%s' "${gpu_config[*]}" > out/gpu/bb-configure.txt
++fi
 +echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}, march ${BB_MARCH:-default}"
  # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
  if ! ninja -C out/gpu bbgpu bb-engine-assets > out/gpu-build.log 2>&1; then
      grep -v '^\[' out/gpu-build.log | tail -40 >&2
+@@ -72,7 +97,11 @@ if [[ -n $windows ]]; then
+     runtime+=(src/win32_*.c)
+     # The static library's link-time optimization (ThinLTO in lld) runs here; on Linux it runs in
+     # the .so link.
+-    link=(-Wl,--disable-dynamicbase,--disable-high-entropy-va -lwinmm -lws2_32 -lpsapi -flto=thin)
++    # The ThinLTO cache keeps each module's optimized code: a rebuild after a small change
++    # optimizes only the modules it touched (and what inlines from them), on every thread.
++    link=(-Wl,--disable-dynamicbase,--disable-high-entropy-va -lwinmm -lws2_32 -lpsapi -flto=thin
++          -Wl,--thinlto-cache-dir="$PWD/out/thinlto-cache" -Wl,--thinlto-jobs=all
++          -Wl,--thinlto-cache-policy=cache_size_bytes=6g:prune_after=1209600s)
+ fi
+ # Third-party decoders: compiled once, without this project's -Werror policy.
+ atrac9=(third_party/LibAtrac9/C/src/*.c)
 diff --git a/gpu/CMakeLists.txt b/gpu/CMakeLists.txt
-index f51df72..fdcf4ff 100644
+index f51df72..46928d5 100644
 --- a/gpu/CMakeLists.txt
 +++ b/gpu/CMakeLists.txt
 @@ -16,6 +16,14 @@ add_compile_options(-fno-omit-frame-pointer)
@@ -100,7 +124,15 @@ index f51df72..fdcf4ff 100644
  elseif (BB_PGO STREQUAL "use")
      # Partial training keeps unprofiled code optimized normally; counters from concurrent
      # threads can be slightly inconsistent (correction). Functions changed since the profile
-@@ -212,6 +231,11 @@ if (WIN32)
+@@ -139,6 +158,7 @@ add_host_shader(fs_tri.vert fs_tri_vert)
+ add_host_shader(fsr.comp fsr_easu_comp SAMPLE_EASU=1)
+ add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
+ add_host_shader(post_process.frag post_process_frag)
++add_host_shader(hdr_output.frag hdr_output_frag)
+ add_host_shader(camera_motion.comp camera_motion_comp)
+ add_host_shader(upscale_merge.comp upscale_merge_comp)
+ add_host_shader(upscale_reactive.comp upscale_reactive_comp)
+@@ -212,6 +232,11 @@ if (WIN32)
      # Windows headers: no min/max macros, no winsock 1 clash; Windows 10+ APIs (SetThreadDescription).
      target_compile_definitions(bbgpu PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
      target_link_libraries(bbgpu PUBLIC xbyak::xbyak)
@@ -112,7 +144,7 @@ index f51df72..fdcf4ff 100644
      # bb-probe.exe links libbbgpu.a with these (out/gpu/bbgpu_link.txt, one argument per line,
      # in link order): the static library's transitive dependencies.
      include(cmake/LinkClosure.cmake)
-@@ -242,6 +266,9 @@ target_link_libraries(pipeline-archive-test PRIVATE fmt::fmt)
+@@ -242,6 +267,9 @@ target_link_libraries(pipeline-archive-test PRIVATE fmt::fmt)
  add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
  target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(motion-history-test PRIVATE ..)
@@ -122,7 +154,7 @@ index f51df72..fdcf4ff 100644
  add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
  target_compile_options(motion-shader-test PRIVATE -UNDEBUG)
  target_include_directories(motion-shader-test PRIVATE shim shadps4 third_party/gcn/include)
-@@ -252,7 +279,8 @@ endif()
+@@ -252,7 +280,8 @@ endif()
  add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
  target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(ui-composition-test PRIVATE ..)
@@ -132,7 +164,7 @@ index f51df72..fdcf4ff 100644
  target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(settings-test PRIVATE .. shim)
  
-@@ -280,7 +308,7 @@ add_dependencies(camera-motion-test host_shaders)
+@@ -280,7 +309,7 @@ add_dependencies(camera-motion-test host_shaders)
  
  # bbport: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
  add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
@@ -141,7 +173,7 @@ index f51df72..fdcf4ff 100644
  target_include_directories(upscaler-support-test PRIVATE shim)
  target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
  
-@@ -315,6 +343,7 @@ target_include_directories(pc-input-test PRIVATE shim)
+@@ -315,6 +344,7 @@ target_include_directories(pc-input-test PRIVATE shim)
  target_link_libraries(pc-input-test PRIVATE PkgConfig::SDL3)
  target_compile_options(pc-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  add_executable(widescreen-test EXCLUDE_FROM_ALL ../tests/test_widescreen.cpp
@@ -1024,7 +1056,7 @@ index 87381c5..0470c03 100644
  template <typename Attribute, typename Binding>
  void GraphicsPipeline::GetVertexInputs(
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
-index 23d52b9..46b414c 100644
+index 23d52b9..bee2120 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 @@ -13,6 +13,7 @@
@@ -1035,7 +1067,36 @@ index 23d52b9..46b414c 100644
  #include "video_core/renderer_vulkan/vk_platform.h"
  
  #include <vk_mem_alloc.h>
-@@ -469,6 +470,8 @@ bool Instance::CreateDevice() {
+@@ -238,7 +239,7 @@ bool Instance::CreateDevice() {
+         return false;
+     }
+ 
+-    boost::container::static_vector<const char*, 48> enabled_extensions;
++    boost::container::static_vector<const char*, 64> enabled_extensions;
+     const auto add_extension = [&](std::string_view extension) -> bool {
+         const auto result =
+             std::find_if(available_extensions.begin(), available_extensions.end(),
+@@ -392,6 +393,19 @@ bool Instance::CreateDevice() {
+     }
+     const bool calibrated_timestamps =
+         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
++    // bbport: HDR output (vk_swapchain.cpp): the display's luminance for the HDR swapchain.
++    hdr_metadata = add_extension(VK_EXT_HDR_METADATA_EXTENSION_NAME);
++    // bbport (Windows): BB_EXCLUSIVE_FULLSCREEN=0 keeps the swapchain from ever becoming
++    // exclusive fullscreen (vk_swapchain.cpp), so a driver cannot switch Windows HDR off for an
++    // SDR image. Off by default: the driver's exclusive mode has the lowest latency and keeps
++    // G-SYNC "fullscreen only" working, HDR output keeps HDR on by itself, and the launcher turns
++    // Windows HDR back on after the game.
++    const char* exclusive = std::getenv("BB_EXCLUSIVE_FULLSCREEN");
++    if (const char* fse = FullScreenExclusiveExtensionName();
++        fse && exclusive && exclusive[0] == '0' &&
++        IsInstanceExtensionEnabled(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
++        full_screen_exclusive = add_extension(fse);
++    }
+ 
+     const auto family_properties = physical_device.getQueueFamilyProperties();
+     if (family_properties.empty()) {
+@@ -469,6 +483,8 @@ bool Instance::CreateDevice() {
                  .wideLines = features.wideLines,
                  .multiViewport = features.multiViewport,
                  .samplerAnisotropy = features.samplerAnisotropy,
@@ -1045,7 +1106,7 @@ index 23d52b9..46b414c 100644
                  .fragmentStoresAndAtomics = features.fragmentStoresAndAtomics,
                  .shaderImageGatherExtended = features.shaderImageGatherExtended,
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
-index f1f48b6..5e3a228 100644
+index f1f48b6..198095d 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 @@ -112,6 +112,16 @@ public:
@@ -1065,6 +1126,33 @@ index f1f48b6..5e3a228 100644
      /// Returns true if depth bounds testing is supported
      bool IsDepthBoundsSupported() const {
          return features.depthBounds;
+@@ -329,6 +339,17 @@ public:
+         return shader_clock && shader_clock_features.shaderSubgroupClock;
+     }
+ 
++    /// bbport: VK_EXT_full_screen_exclusive (Windows) is enabled, with the instance's
++    /// VK_KHR_get_surface_capabilities2: swapchains are created with exclusive mode disallowed.
++    bool IsFullScreenExclusiveEnabled() const {
++        return full_screen_exclusive;
++    }
++
++    /// bbport: VK_EXT_hdr_metadata is enabled (HDR output).
++    bool IsHdrMetadataEnabled() const {
++        return hdr_metadata;
++    }
++
+     /// Returns the vendor ID of the physical device
+     u32 GetVendorID() const {
+         return properties.vendorID;
+@@ -604,6 +625,8 @@ private:
+     bool compute_shader_derivatives{};
+     bool mixed_float_dot_product{}; // bbport: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
+     bool dlss_extensions{};         // bbport: VK_NVX_binary_import + VK_NVX_image_view_handle
++    bool full_screen_exclusive{};   // bbport: VK_EXT_full_screen_exclusive (Windows)
++    bool hdr_metadata{};            // bbport: VK_EXT_hdr_metadata
+     bool cooperative_matrix{};      // bbport: VK_KHR_cooperative_matrix (FSR 4.1.1 FP8 variant)
+     bool shader_float8{};           // bbport: VK_EXT_shader_float8 with FP8 matrices (RDNA4)
+     bool supports_memory_budget{};
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
 index 52778fb..4fdc47a 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
@@ -1173,6 +1261,453 @@ index ff89b44..3bc4a14 100644
      const Instance& instance;
      Scheduler& scheduler;
      DescriptorHeap& desc_heap;
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_platform.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_platform.cpp
+index 6b8f6b1..ba9f9e1 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_platform.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_platform.cpp
+@@ -13,6 +13,8 @@
+ #define VK_USE_PLATFORM_XLIB_KHR
+ #endif
+ 
++#include <algorithm>
++#include <string>
+ #include <vector>
+ #include <fmt/ranges.h>
+ 
+@@ -32,6 +34,15 @@ namespace Vulkan {
+ static const char* const VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
+ static const char* const CRASH_DIAGNOSTIC_LAYER_NAME = "VK_LAYER_LUNARG_crash_diagnostic";
+ 
++/// bbport: the extensions of the last instance CreateInstance made (IsInstanceExtensionEnabled).
++static std::vector<std::string> enabled_instance_extensions;
++
++#if defined(VK_USE_PLATFORM_WIN32_KHR)
++static const vk::SurfaceFullScreenExclusiveInfoEXT full_screen_exclusive_disallowed{
++    .fullScreenExclusive = vk::FullScreenExclusiveEXT::eDisallowed,
++};
++#endif
++
+ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsCallback(
+     vk::DebugUtilsMessageSeverityFlagBitsEXT severity, vk::DebugUtilsMessageTypeFlagsEXT type,
+     const vk::DebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data) {
+@@ -194,10 +205,14 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
+ 
+     if (window_type != Frontend::WindowSystemType::Headless) {
+         extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+-    }
+-
+-    if (EmulatorSettings.IsHdrAllowed()) {
++        // bbport: HDR output (hdr in bbport.ini): the surface lists its HDR formats only with
++        // this extension. Enabled whenever available; the SDR swapchain still picks
++        // SRGB_NONLINEAR (vk_swapchain.cpp).
+         extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
++#if defined(VK_USE_PLATFORM_WIN32_KHR)
++        // bbport: needed by VK_EXT_full_screen_exclusive (device), and the *2 surface queries.
++        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
++#endif
+     }
+ 
+     if (enable_debug_utils) {
+@@ -287,6 +302,7 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
+ 
+     const auto layers = GetInstanceLayers(enable_validation, enable_crash_diagnostic);
+     const auto extensions = GetLayerExtensions(GetInstanceExtensions(window_type, true), layers);
++    enabled_instance_extensions.assign(extensions.begin(), extensions.end());
+ 
+     const vk::ApplicationInfo application_info = {
+         .pApplicationName = "shadPS4",
+@@ -439,4 +455,61 @@ vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance) {
+     return std::move(messenger);
+ }
+ 
++bool IsInstanceExtensionEnabled(std::string_view name) {
++    return std::ranges::find(enabled_instance_extensions, name) !=
++           enabled_instance_extensions.end();
++}
++
++const char* FullScreenExclusiveExtensionName() {
++#if defined(VK_USE_PLATFORM_WIN32_KHR)
++    return VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME;
++#else
++    return nullptr;
++#endif
++}
++
++const void* FullScreenExclusiveDisallowed(bool enabled) {
++#if defined(VK_USE_PLATFORM_WIN32_KHR)
++    return enabled ? &full_screen_exclusive_disallowed : nullptr;
++#else
++    return nullptr;
++#endif
++}
++
++vk::ResultValue<std::vector<vk::PresentModeKHR>> GetSurfacePresentModes(
++    vk::Instance instance, vk::PhysicalDevice physical, vk::SurfaceKHR surface,
++    bool full_screen_exclusive) {
++#if defined(VK_USE_PLATFORM_WIN32_KHR)
++    // Loaded here: the dispatcher's Win32 entries are only filled in this translation unit.
++    const auto get_modes = full_screen_exclusive
++        ? reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModes2EXT>(
++              VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
++                  static_cast<VkInstance>(instance), "vkGetPhysicalDeviceSurfacePresentModes2EXT"))
++        : nullptr;
++    if (get_modes) {
++        const VkPhysicalDeviceSurfaceInfo2KHR info{
++            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
++            .pNext = &full_screen_exclusive_disallowed,
++            .surface = static_cast<VkSurfaceKHR>(surface),
++        };
++        const VkPhysicalDevice device = static_cast<VkPhysicalDevice>(physical);
++        u32 count = 0;
++        VkResult result = get_modes(device, &info, &count, nullptr);
++        std::vector<vk::PresentModeKHR> modes;
++        if (result == VK_SUCCESS) {
++            modes.resize(count);
++            result = get_modes(device, &info, &count,
++                               reinterpret_cast<VkPresentModeKHR*>(modes.data()));
++            modes.resize(count);
++        }
++        if (result == VK_SUCCESS || result == VK_INCOMPLETE) {
++            return {vk::Result::eSuccess, std::move(modes)};
++        }
++        LOG_WARNING(Render_Vulkan, "vkGetPhysicalDeviceSurfacePresentModes2EXT failed: {}",
++                    vk::to_string(vk::Result{result}));
++    }
++#endif
++    return physical.getSurfacePresentModesKHR(surface);
++}
++
+ } // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_platform.h b/gpu/shadps4/video_core/renderer_vulkan/vk_platform.h
+index c171d07..cb211e2 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_platform.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_platform.h
+@@ -3,6 +3,8 @@
+ 
+ #pragma once
+ 
++#include <string_view>
++#include <vector>
+ #include <fmt/format.h>
+ 
+ #include "common/assert.h"
+@@ -28,6 +30,25 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
+ 
+ vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance);
+ 
++/// bbport: whether CreateInstance enabled this instance extension (the last instance created).
++bool IsInstanceExtensionEnabled(std::string_view name);
++
++/// bbport: VK_EXT_full_screen_exclusive on Windows (the swapchain stays a normal window
++/// swapchain: drivers otherwise switch a screen-covering window to exclusive fullscreen, which
++/// turned Windows HDR off); nullptr on the other platforms.
++const char* FullScreenExclusiveExtensionName();
++
++/// bbport: a VkSurfaceFullScreenExclusiveInfoEXT {DISALLOWED} (its pNext null) for the pNext of
++/// the swapchain's creation and of the *2 surface queries; nullptr when `enabled` is false or
++/// on the other platforms.
++const void* FullScreenExclusiveDisallowed(bool enabled);
++
++/// bbport: the surface's present modes; with `full_screen_exclusive`, as reported for the
++/// FullScreenExclusiveDisallowed chain (vkGetPhysicalDeviceSurfacePresentModes2EXT).
++vk::ResultValue<std::vector<vk::PresentModeKHR>> GetSurfacePresentModes(
++    vk::Instance instance, vk::PhysicalDevice physical, vk::SurfaceKHR surface,
++    bool full_screen_exclusive);
++
+ template <typename T>
+ concept VulkanHandleType = vk::isVulkanHandleType<T>::value;
+ 
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
+index 602cb30..9480479 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -13,6 +13,7 @@
+ #include "video_core/renderdoc.h"
+ #include "video_core/renderer_vulkan/vk_platform.h"
+ #include "bbport_overlay.h"
++#include "bbport_settings.h"
+ #include "bbport_timeline.h"
+ #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
+ #include "video_core/renderer_vulkan/vk_presenter.h"
+@@ -154,6 +155,12 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
+     fsr_pass.Create(device, instance.GetAllocator(), num_images);
+     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+     BbOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
++    // bbport: HDR output (hdr in bbport.ini): frames, passes and the menu stay SDR; the encode
++    // pass writes the HDR swapchain format chosen at start.
++    if (const vk::Format hdr_format = swapchain.GetHdrFormat().format;
++        hdr_format != vk::Format::eUndefined) {
++        hdr_pass.Create(device, hdr_format);
++    }
+ 
+ }
+ 
+@@ -172,6 +179,192 @@ Presenter::~Presenter() {
+         device.destroyImageView(frame.image_view);
+         device.destroyFence(frame.present_done);
+     }
++    DestroyHdrTarget(hdr_game);
++    DestroyHdrTarget(hdr_overlay);
++}
++
++void Presenter::CreateHdrTarget(HdrTarget& target, vk::Extent2D extent, const char* name) {
++    const vk::Device device = instance.GetDevice();
++    // The SDR format: the blit's and the menu pipeline's (BbOverlay::Init); sRGB encoded values,
++    // decoded by the encode pass. Format support is checked by Swapchain::FindPresentFormat.
++    const vk::ImageCreateInfo image_info = {
++        .imageType = vk::ImageType::e2D,
++        .format = swapchain.GetSurfaceFormat().format,
++        .extent = {extent.width, extent.height, 1},
++        .mipLevels = 1,
++        .arrayLayers = 1,
++        .samples = vk::SampleCountFlagBits::e1,
++        .tiling = vk::ImageTiling::eOptimal,
++        .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst |
++                 vk::ImageUsageFlagBits::eSampled,
++        .initialLayout = vk::ImageLayout::eUndefined,
++    };
++    const VmaAllocationCreateInfo alloc_info = {
++        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
++    };
++    VkImage image{};
++    const VkImageCreateInfo unsafe_image_info = static_cast<VkImageCreateInfo>(image_info);
++    const VkResult result = vmaCreateImage(instance.GetAllocator(), &unsafe_image_info,
++                                           &alloc_info, &image, &target.allocation, nullptr);
++    if (result != VK_SUCCESS) [[unlikely]] {
++        LOG_CRITICAL(Render_Vulkan, "Failed allocating the HDR output image with error {}",
++                     vk::to_string(vk::Result{result}));
++        UNREACHABLE();
++    }
++    target.image = vk::Image{image};
++    SetObjectName(device, target.image, "HDR output {}", name);
++    target.view = Check<"create HDR output image view">(device.createImageView({
++        .image = target.image,
++        .viewType = vk::ImageViewType::e2D,
++        .format = image_info.format,
++        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
++    }));
++}
++
++void Presenter::DestroyHdrTarget(const HdrTarget& target) {
++    if (target.view) {
++        instance.GetDevice().destroyImageView(target.view);
++    }
++    if (target.image) {
++        vmaDestroyImage(instance.GetAllocator(), target.image, target.allocation);
++    }
++}
++
++void Presenter::EnsureHdrTargets(vk::Extent2D extent) {
++    if (hdr_game.image && hdr_extent == extent) {
++        return;
++    }
++    if (hdr_game.image) {
++        // Presents still in flight may read the old size's images: they go once the GPU has
++        // finished this present's submission (later than every earlier one, same queue).
++        present_scheduler.DeferOperation(
++            [this, game = hdr_game, overlay = hdr_overlay] {
++                DestroyHdrTarget(game);
++                DestroyHdrTarget(overlay);
++            });
++    }
++    CreateHdrTarget(hdr_game, extent, "composite");
++    CreateHdrTarget(hdr_overlay, extent, "menu layer");
++    hdr_extent = extent;
++}
++
++void Presenter::PresentHdr(vk::CommandBuffer cmdbuf, Frame* frame, vk::Extent2D extent) {
++    EnsureHdrTargets(extent);
++    const vk::Image swapchain_image = swapchain.Image();
++    const bool overlay = BbOverlay::Visible();
++    const vk::ImageSubresourceRange color_range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
++    const auto barrier = [&](vk::Image image, vk::ImageLayout old_layout,
++                             vk::ImageLayout new_layout, vk::PipelineStageFlags2 src_stage,
++                             vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst_stage,
++                             vk::AccessFlags2 dst_access) {
++        return vk::ImageMemoryBarrier2{
++            .srcStageMask = src_stage,
++            .srcAccessMask = src_access,
++            .dstStageMask = dst_stage,
++            .dstAccessMask = dst_access,
++            .oldLayout = old_layout,
++            .newLayout = new_layout,
++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .image = image,
++            .subresourceRange = color_range,
++        };
++    };
++    const auto barriers = [&](std::span<const vk::ImageMemoryBarrier2> image_barriers) {
++        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
++            .imageMemoryBarrierCount = static_cast<u32>(image_barriers.size()),
++            .pImageMemoryBarriers = image_barriers.data(),
++        });
++    };
++    using Stage = vk::PipelineStageFlagBits2;
++    using Access = vk::AccessFlagBits2;
++    using Layout = vk::ImageLayout;
++
++    // The composite and the menu layer are rewritten whole: their old contents (read by the
++    // previous present's encode, same queue: the all-commands source scope orders it) go.
++    // The frame as in the SDR path: General -> transfer source -> General.
++    std::array<vk::ImageMemoryBarrier2, 3> pre{
++        barrier(hdr_game.image, Layout::eUndefined, Layout::eTransferDstOptimal,
++                Stage::eAllCommands, Access::eNone, Stage::eTransfer, Access::eTransferWrite),
++        barrier(frame->image, Layout::eGeneral, Layout::eTransferSrcOptimal, Stage::eAllCommands,
++                Access::eColorAttachmentWrite, Stage::eTransfer, Access::eTransferRead),
++        barrier(hdr_overlay.image, Layout::eUndefined, Layout::eTransferDstOptimal,
++                Stage::eAllCommands, Access::eNone, Stage::eTransfer, Access::eTransferWrite),
++    };
++    barriers(std::span{pre.data(), overlay ? 3u : 2u});
++    const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
++    cmdbuf.clearColorImage(hdr_game.image, Layout::eTransferDstOptimal, black, color_range);
++    if (overlay) {
++        const vk::ClearColorValue transparent{std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}};
++        cmdbuf.clearColorImage(hdr_overlay.image, Layout::eTransferDstOptimal, transparent,
++                               color_range);
++    }
++    const vk::MemoryBarrier2 clear_done{
++        .srcStageMask = Stage::eTransfer,
++        .srcAccessMask = Access::eTransferWrite,
++        .dstStageMask = Stage::eTransfer,
++        .dstAccessMask = Access::eTransferWrite,
++    };
++    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
++        .memoryBarrierCount = 1,
++        .pMemoryBarriers = &clear_done,
++    });
++    cmdbuf.blitImage(frame->image, Layout::eTransferSrcOptimal, hdr_game.image,
++                     Layout::eTransferDstOptimal,
++                     MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
++                     vk::Filter::eLinear);
++
++    std::array<vk::ImageMemoryBarrier2, 4> post{
++        barrier(hdr_game.image, Layout::eTransferDstOptimal, Layout::eShaderReadOnlyOptimal,
++                Stage::eTransfer, Access::eTransferWrite, Stage::eFragmentShader,
++                Access::eShaderSampledRead),
++        barrier(frame->image, Layout::eTransferSrcOptimal, Layout::eGeneral, Stage::eTransfer,
++                Access::eTransferRead, Stage::eAllCommands, Access::eColorAttachmentWrite),
++        // The acquire semaphore is waited on at all commands: this transition comes after it.
++        barrier(swapchain_image, Layout::eUndefined, Layout::eColorAttachmentOptimal,
++                Stage::eColorAttachmentOutput, Access::eNone, Stage::eColorAttachmentOutput,
++                Access::eColorAttachmentWrite),
++        barrier(hdr_overlay.image, Layout::eTransferDstOptimal, Layout::eColorAttachmentOptimal,
++                Stage::eTransfer, Access::eTransferWrite, Stage::eColorAttachmentOutput,
++                Access::eColorAttachmentRead | Access::eColorAttachmentWrite),
++    };
++    barriers(std::span{post.data(), overlay ? 4u : 3u});
++
++    // bbport: the settings menu / FPS counter, at display resolution, into its own layer: the
++    // encode shows it at paper white over the (possibly expanded) frame.
++    if (overlay) {
++        BbOverlay::Render(cmdbuf, hdr_overlay.view, extent);
++        const std::array menu_done{
++            barrier(hdr_overlay.image, Layout::eColorAttachmentOptimal,
++                    Layout::eShaderReadOnlyOptimal, Stage::eColorAttachmentOutput,
++                    Access::eColorAttachmentWrite, Stage::eFragmentShader,
++                    Access::eShaderSampledRead),
++        };
++        barriers(menu_done);
++    }
++
++    const auto& settings = BbSettings::Get();
++    const bool scrgb =
++        swapchain.GetHdrFormat().colorSpace == vk::ColorSpaceKHR::eExtendedSrgbLinearEXT;
++    const HostPasses::HdrOutputPass::Settings hdr{
++        .paper_white = std::clamp(settings.hdr_paper_white.load(), BbSettings::HdrPaperWhiteMin,
++                                  BbSettings::HdrPaperWhiteMax),
++        .peak = std::clamp(settings.hdr_peak.load(), BbSettings::HdrPeakMin,
++                           BbSettings::HdrPeakMax),
++        .boost = std::clamp(settings.hdr_boost.load(), 0.0f, 1.0f),
++        .flags = (scrgb ? HostPasses::HdrOutputPass::FlagScRgb : 0u) |
++                 (overlay ? HostPasses::HdrOutputPass::FlagOverlay : 0u),
++    };
++    swapchain.SetHdrMetadata(hdr.peak, hdr.paper_white);
++    hdr_pass.Render(cmdbuf, hdr_game.view, overlay ? hdr_overlay.view : hdr_game.view,
++                    swapchain.ImageView(), extent, hdr);
++
++    const std::array to_present{
++        barrier(swapchain_image, Layout::eColorAttachmentOptimal, Layout::ePresentSrcKHR,
++                Stage::eColorAttachmentOutput, Access::eColorAttachmentWrite,
++                Stage::eBottomOfPipe, Access::eNone),
++    };
++    barriers(to_present);
+ }
+ 
+ bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
+@@ -601,7 +794,19 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
+         });
+     }
+ 
+-    {
++    // bbport: HDR output (hdr in bbport.ini) while the swapchain has the HDR format.
++    const bool hdr_output = swapchain.IsHdrOutput() && hdr_pass.IsCreated();
++    BbSettings::Get().hdr_output.store(
++        !hdr_output ? BbSettings::HdrOutputOff
++        : swapchain.GetHdrFormat().colorSpace == vk::ColorSpaceKHR::eExtendedSrgbLinearEXT
++            ? BbSettings::HdrOutputScRgb
++            : BbSettings::HdrOutputHdr10,
++        std::memory_order_relaxed);
++    if (hdr_output) {
++        const vk::Extent2D extent = swapchain.GetExtent();
++        SetExpectedGameSize(s32(extent.width), s32(extent.height));
++        PresentHdr(cmdbuf, frame, extent);
++    } else {
+         const vk::Extent2D extent = swapchain.GetExtent();
+         SetExpectedGameSize(s32(extent.width), s32(extent.height));
+         const vk::ImageSubresourceRange color_range{
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.h b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.h
+index 0b3dc78..a636b6e 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.h
+@@ -10,6 +10,7 @@
+ 
+ #include "core/libraries/videoout/buffer.h"
+ #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
++#include "video_core/renderer_vulkan/host_passes/hdr_pass.h"
+ #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_runtime.h"
+@@ -74,6 +75,8 @@ public:
+         return swapchain.HasHDR();
+     }
+ 
++    /// The game's own HDR request (VideoOut, every flip). bbport: off (Swapchain::HasHDR is
++    /// false), so it leaves the HDR output (hdr in bbport.ini, PresentHdr) and pp_settings alone.
+     void SetHDR(bool enable) {
+         if (!IsHDRSupported()) {
+             return;
+@@ -109,6 +112,20 @@ private:
+ 
+     void SetExpectedGameSize(s32 width, s32 height);
+ 
++    /// bbport: HDR output. A swapchain-sized image of the SDR format (the frame letterboxed into
++    /// it, or the menu layer drawn into it), sampled by the HDR encode pass.
++    struct HdrTarget {
++        vk::Image image{};
++        VmaAllocation allocation{};
++        vk::ImageView view{};
++    };
++    void CreateHdrTarget(HdrTarget& target, vk::Extent2D extent, const char* name);
++    void DestroyHdrTarget(const HdrTarget& target);
++    /// The targets at the swapchain's size; the old ones go once the GPU is past them.
++    void EnsureHdrTargets(vk::Extent2D extent);
++    /// Records the frame (letterboxed), the menu and the HDR encode into the swapchain image.
++    void PresentHdr(vk::CommandBuffer cmdbuf, Frame* frame, vk::Extent2D extent);
++
+ private:
+     float expected_ratio{1920.0 / 1080.0f};
+     u32 expected_frame_width{1920};
+@@ -120,6 +137,9 @@ private:
+     HostPasses::FsrPass::Settings fsr_settings{};
+     HostPasses::PostProcessingPass::Settings pp_settings{};
+     HostPasses::PostProcessingPass pp_pass;
++    HostPasses::HdrOutputPass hdr_pass; ///< bbport: HDR output encode (present thread)
++    HdrTarget hdr_game{}, hdr_overlay{}; ///< bbport: HDR output's SDR composite and menu layer
++    vk::Extent2D hdr_extent{};
+     std::mutex passes_mutex; ///< bbport: the passes are recorded on the recording threads
+     AmdGpu::Liverpool* liverpool;
+     Scheduler draw_scheduler;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 index 5fd360b..ac6e1ad 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
@@ -1665,19 +2200,144 @@ index a0c6485..7297871 100644
          }
      }
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-index ed0b5ca..56a81e7 100644
+index ed0b5ca..ed8092f 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-@@ -85,6 +85,8 @@ void Swapchain::Create(u32 width_, u32 height_) {
+@@ -2,13 +2,17 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <array>
++#include <cstdio>
+ #include <limits>
++#include "bbport_settings.h"
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ #include "core/emulator_settings.h"
+ #include "imgui/renderer/imgui_core.h"
+ #include "sdl_window.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_platform.h"
+ #include "video_core/renderer_vulkan/vk_swapchain.h"
+ 
+ namespace Vulkan {
+@@ -18,8 +22,24 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
+     .colorSpace = vk::ColorSpaceKHR::eHdr10St2084EXT,
+ };
+ 
++/// bbport: HDR output formats, in order of preference: HDR10 (BT.2020 primaries, PQ), then
++/// scRGB (linear BT.709 in FP16, 1.0 = 80 nits).
++static constexpr std::array HDR_OUTPUT_FORMATS = {
++    SURFACE_FORMAT_HDR,
++    vk::SurfaceFormatKHR{
++        .format = vk::Format::eR16G16B16A16Sfloat,
++        .colorSpace = vk::ColorSpaceKHR::eExtendedSrgbLinearEXT,
++    },
++};
++
+ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
+     : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
++    // bbport: the swapchain never becomes exclusive fullscreen. A borderless window covering
++    // the screen was promoted to it by the driver, and Windows HDR switched off with it.
++    full_screen_exclusive = instance.IsFullScreenExclusiveEnabled();
++    if (full_screen_exclusive) {
++        std::printf("Display: exclusive fullscreen disallowed (VK_EXT_full_screen_exclusive)\n");
++    }
+     FindPresentFormat();
+     FindPresentMode();
+ 
+@@ -58,8 +78,22 @@ void Swapchain::Create(u32 width_, u32 height_) {
+     const u32 queue_family_indices_count = exclusive ? 1u : 2u;
+     const vk::SharingMode sharing_mode =
+         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
+-    const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
++    // bbport: HDR output while the display still offers the HDR format chosen at start
++    // (switching Windows HDR off removes it; the swapchain is SDR until it is back).
++    hdr_output = false;
++    if (!needs_hdr && hdr_format.format != vk::Format::eUndefined) {
++        const auto formats = QuerySurfaceFormats();
++        hdr_output = std::ranges::find(formats, hdr_format) != formats.end();
++        if (!hdr_output && !hdr_unavailable_logged) {
++            std::printf("HDR output: the display offers no HDR format now (is Windows HDR on?); "
++                        "SDR until it does\n");
++        }
++        hdr_unavailable_logged = !hdr_output;
++    }
++    const auto format = needs_hdr ? SURFACE_FORMAT_HDR : hdr_output ? hdr_format : surface_format;
++    view_format = format.format;
+     const vk::SwapchainCreateInfoKHR swapchain_info = {
++        .pNext = FullScreenExclusiveDisallowed(full_screen_exclusive),
+         .surface = surface,
+         .minImageCount = image_count,
+         .imageFormat = format.format,
+@@ -85,6 +119,66 @@ void Swapchain::Create(u32 width_, u32 height_) {
  
      SetupImages();
      RefreshSemaphores();
 +    // The new chain may have fewer images (AwesomeObserver b3164c1): start the indices over.
 +    frame_index = image_index = 0;
++    ApplyHdrMetadata();
++}
++
++void Swapchain::SetHdrMetadata(float max_nits, float frame_average_nits) {
++    if (max_nits == hdr_max_nits && frame_average_nits == hdr_average_nits) {
++        return;
++    }
++    hdr_max_nits = max_nits;
++    hdr_average_nits = frame_average_nits;
++    ApplyHdrMetadata();
++}
++
++void Swapchain::ApplyHdrMetadata() {
++    if (!hdr_output || !swapchain || hdr_max_nits <= 0.0f || !instance.IsHdrMetadataEnabled() ||
++        !VULKAN_HPP_DEFAULT_DISPATCHER.vkSetHdrMetadataEXT) {
++        return;
++    }
++    // The picture is the SDR frame: BT.709 primaries, D65 white, up to the peak set.
++    const vk::HdrMetadataEXT metadata{
++        .displayPrimaryRed = {0.640f, 0.330f},
++        .displayPrimaryGreen = {0.300f, 0.600f},
++        .displayPrimaryBlue = {0.150f, 0.060f},
++        .whitePoint = {0.3127f, 0.3290f},
++        .maxLuminance = hdr_max_nits,
++        .minLuminance = 0.0f,
++        .maxContentLightLevel = hdr_max_nits,
++        .maxFrameAverageLightLevel = hdr_average_nits,
++    };
++    instance.GetDevice().setHdrMetadataEXT(1, &swapchain, &metadata);
++}
++
++std::vector<vk::SurfaceFormatKHR> Swapchain::QuerySurfaceFormats() const {
++    const vk::PhysicalDevice physical = instance.GetPhysicalDevice();
++    if (full_screen_exclusive) {
++        // The same chain as the swapchain's creation (VK_EXT_full_screen_exclusive).
++        const vk::PhysicalDeviceSurfaceInfo2KHR surface_info{
++            .pNext = FullScreenExclusiveDisallowed(true),
++            .surface = surface,
++        };
++        auto [formats2_result, formats2] = physical.getSurfaceFormats2KHR(surface_info);
++        if (formats2_result == vk::Result::eSuccess) {
++            std::vector<vk::SurfaceFormatKHR> formats;
++            formats.reserve(formats2.size());
++            for (const auto& format2 : formats2) {
++                formats.push_back(format2.surfaceFormat);
++            }
++            return formats;
++        }
++        LOG_WARNING(Render_Vulkan, "Failed to query surface formats (2): {}",
++                    vk::to_string(formats2_result));
++    }
++    auto [formats_result, formats] = physical.getSurfaceFormatsKHR(surface);
++    if (formats_result != vk::Result::eSuccess) {
++        LOG_ERROR(Render_Vulkan, "Failed to query surface formats: {}",
++                  vk::to_string(formats_result));
++        return {};
++    }
++    return std::move(formats);
  }
  
  void Swapchain::Recreate(u32 width_, u32 height_) {
-@@ -120,6 +122,11 @@ bool Swapchain::AcquireNextImage() {
+@@ -120,6 +214,11 @@ bool Swapchain::AcquireNextImage() {
      case vk::Result::eSuccess:
          break;
      case vk::Result::eSuboptimalKHR:
@@ -1689,6 +2349,195 @@ index ed0b5ca..56a81e7 100644
      case vk::Result::eErrorSurfaceLostKHR:
      case vk::Result::eErrorOutOfDateKHR:
      case vk::Result::eErrorUnknown:
+@@ -158,20 +257,13 @@ bool Swapchain::Present() {
+ }
+ 
+ void Swapchain::FindPresentFormat() {
+-    const auto [formats_result, formats] =
+-        instance.GetPhysicalDevice().getSurfaceFormatsKHR(surface);
+-    ASSERT_MSG(formats_result == vk::Result::eSuccess, "Failed to query surface formats: {}",
+-               vk::to_string(formats_result));
+-
+-    // Check if the device supports HDR formats. Here we care of Rec.2020 PQ only as it is expected
+-    // game output. Other variants as e.g. linear Rec.2020 will require additional color space
+-    // rotation
+-    supports_hdr =
+-        std::find_if(formats.begin(), formats.end(), [](const vk::SurfaceFormatKHR& format) {
+-            return format == SURFACE_FORMAT_HDR;
+-        }) != formats.end();
+-    // Also make sure that user allowed us to use HDR
+-    supports_hdr &= EmulatorSettings.IsHdrAllowed();
++    const auto formats = QuerySurfaceFormats();
++    ASSERT_MSG(!formats.empty(), "Failed to query surface formats");
++
++    // bbport: the game's own HDR request (sceVideoOutConfigureOutputMode with BT.2020 PQ, which
++    // Bloodborne never makes) stays off: HDR output is the presenter's encode of the SDR
++    // picture (hdr in bbport.ini, below), and the per-flip SetHDR(false) must not touch it.
++    supports_hdr = false;
+ 
+     // If there is a single undefined surface format, the device doesn't care, so we'll just use
+     // RGBA sRGB.
+@@ -181,24 +273,62 @@ void Swapchain::FindPresentFormat() {
+         return;
+     }
+ 
+-    // Try to find a suitable format.
+-    for (const vk::SurfaceFormatKHR& sformat : formats) {
+-        vk::Format format = sformat.format;
+-        if (format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eB8G8R8A8Unorm) {
+-            continue;
+-        }
++    // Try to find a suitable format. bbport: VK_EXT_swapchain_colorspace is always enabled now,
++    // so the same formats can be listed with other color spaces too: SRGB_NONLINEAR first.
++    const auto is_sdr_format = [](const vk::SurfaceFormatKHR& sformat) {
++        return sformat.format == vk::Format::eR8G8B8A8Unorm ||
++               sformat.format == vk::Format::eB8G8R8A8Unorm;
++    };
++    auto found = std::ranges::find_if(formats, [&](const vk::SurfaceFormatKHR& sformat) {
++        return is_sdr_format(sformat) && sformat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear;
++    });
++    if (found == formats.end()) {
++        found = std::ranges::find_if(formats, is_sdr_format);
++    }
++    if (found == formats.end()) {
++        UNREACHABLE_MSG("Unable to find required swapchain format!");
++    }
++    surface_format.format = found->format;
++    surface_format.colorSpace = found->colorSpace;
+ 
+-        surface_format.format = format;
+-        surface_format.colorSpace = sformat.colorSpace;
++    // bbport: HDR output (hdr in bbport.ini, BB_HDR), chosen once.
++    const auto& settings = BbSettings::Get();
++    if (!settings.startup_hdr) {
+         return;
+     }
+-
+-    UNREACHABLE_MSG("Unable to find required swapchain format!");
++    for (const vk::SurfaceFormatKHR& candidate : HDR_OUTPUT_FORMATS) {
++        if (std::ranges::find(formats, candidate) != formats.end()) {
++            hdr_format = candidate;
++            break;
++        }
++    }
++    if (hdr_format.format == vk::Format::eUndefined) {
++        std::printf("HDR output: the display offers no HDR format (is Windows HDR on?)\n");
++        return;
++    }
++    // The presenter letterboxes the frame into an SDR image of the swapchain's size, draws the
++    // menu over it, and samples it in the encode pass.
++    constexpr vk::FormatFeatureFlags composite_features =
++        vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eColorAttachment |
++        vk::FormatFeatureFlagBits::eColorAttachmentBlend | vk::FormatFeatureFlagBits::eBlitDst |
++        vk::FormatFeatureFlagBits::eTransferDst;
++    const vk::FormatFeatureFlags features =
++        instance.GetPhysicalDevice().getFormatProperties(surface_format.format).optimalTilingFeatures;
++    if ((features & composite_features) != composite_features) {
++        std::printf("HDR output: %s cannot hold the SDR picture for the encode; staying SDR\n",
++                    vk::to_string(surface_format.format).c_str());
++        hdr_format = {};
++        return;
++    }
++    std::printf("HDR output: %s, paper white %.0f nits, peak %.0f nits, highlight boost %.2f\n",
++                hdr_format == SURFACE_FORMAT_HDR ? "HDR10 PQ (BT.2020)" : "scRGB (FP16, linear BT.709)",
++                settings.hdr_paper_white.load(), settings.hdr_peak.load(),
++                settings.hdr_boost.load());
+ }
+ 
+ void Swapchain::FindPresentMode() {
+-    const auto [modes_result, modes] =
+-        instance.GetPhysicalDevice().getSurfacePresentModesKHR(surface);
++    const auto [modes_result, modes] = GetSurfacePresentModes(
++        instance.GetInstance(), instance.GetPhysicalDevice(), surface, full_screen_exclusive);
+     if (modes_result != vk::Result::eSuccess) {
+         LOG_ERROR(Render, "Failed to query available present modes, falling back to Fifo as "
+                           "guaranteed supported option.");
+@@ -229,10 +359,25 @@ void Swapchain::FindPresentMode() {
+ }
+ 
+ void Swapchain::SetSurfaceProperties() {
+-    const auto [capabilities_result, capabilities] =
+-        instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
+-    ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
+-               "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
++    vk::SurfaceCapabilitiesKHR capabilities{};
++    if (full_screen_exclusive) {
++        // The same chain as the swapchain's creation (VK_EXT_full_screen_exclusive).
++        const vk::PhysicalDeviceSurfaceInfo2KHR surface_info{
++            .pNext = FullScreenExclusiveDisallowed(true),
++            .surface = surface,
++        };
++        const auto [capabilities_result, capabilities2] =
++            instance.GetPhysicalDevice().getSurfaceCapabilities2KHR(surface_info);
++        ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
++                   "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
++        capabilities = capabilities2.surfaceCapabilities;
++    } else {
++        const auto [capabilities_result, capabilities1] =
++            instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
++        ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
++                   "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
++        capabilities = capabilities1;
++    }
+ 
+     extent = capabilities.currentExtent;
+     if (capabilities.currentExtent.width == std::numeric_limits<u32>::max()) {
+@@ -329,7 +474,7 @@ void Swapchain::SetupImages() {
+         auto [im_view_result, im_view] = device.createImageView(vk::ImageViewCreateInfo{
+             .image = images[i],
+             .viewType = vk::ImageViewType::e2D,
+-            .format = needs_hdr ? SURFACE_FORMAT_HDR.format : surface_format.format,
++            .format = view_format, // bbport: the format Create chose (SDR, game HDR, HDR output)
+             .subresourceRange =
+                 {
+                     .aspectMask = vk::ImageAspectFlagBits::eColor,
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h
+index d310098..79701aa 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h
+@@ -97,7 +97,29 @@ public:
+         return needs_hdr;
+     }
+ 
++    /// bbport: HDR output (hdr in bbport.ini): the HDR format chosen at start (format
++    /// eUndefined: none, SDR only). The frame images, passes and overlay keep the SDR format
++    /// (GetSurfaceFormat); the presenter encodes into this one.
++    vk::SurfaceFormatKHR GetHdrFormat() const {
++        return hdr_format;
++    }
++
++    /// bbport: the current swapchain has the HDR format (it falls back to SDR while the
++    /// display offers no HDR format, e.g. Windows HDR switched off).
++    bool IsHdrOutput() const {
++        return hdr_output;
++    }
++
++    /// bbport: VK_EXT_hdr_metadata for the HDR swapchain (kept for the swapchains created later).
++    void SetHdrMetadata(float max_nits, float frame_average_nits);
++
+ private:
++    /// bbport: the surface's formats, queried with the full-screen-exclusive chain when enabled.
++    std::vector<vk::SurfaceFormatKHR> QuerySurfaceFormats() const;
++
++    /// bbport: applies the HDR metadata to the current swapchain.
++    void ApplyHdrMetadata();
++
+     /// Selects the best available swapchain image format
+     void FindPresentFormat();
+ 
+@@ -140,6 +162,12 @@ private:
+     bool zero_extent = false; ///< bbport: the surface was 0x0 (minimised) at the last Create
+     bool needs_hdr = false;    // The game requested HDR swapchain
+     bool supports_hdr = false; // SC supports HDR output
++    // bbport: HDR output (GetHdrFormat, IsHdrOutput).
++    vk::SurfaceFormatKHR hdr_format{vk::Format::eUndefined, vk::ColorSpaceKHR::eSrgbNonlinear};
++    bool hdr_output = false;
++    bool hdr_unavailable_logged = false;
++    bool full_screen_exclusive = false; ///< VK_EXT_full_screen_exclusive: DISALLOWED chained
++    float hdr_max_nits = 0.0f, hdr_average_nits = 0.0f; ///< SetHdrMetadata; 0: not set
+ };
+ 
+ } // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 index a3240be..ed8f364 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
@@ -2328,7 +3177,7 @@ index 36d0505..0de4773 100644
                                                const ImageInfo& info);
  
 diff --git a/gpu/shim/bbgpu.cpp b/gpu/shim/bbgpu.cpp
-index f38aea7..4a7aa7e 100644
+index f38aea7..b4f2a29 100644
 --- a/gpu/shim/bbgpu.cpp
 +++ b/gpu/shim/bbgpu.cpp
 @@ -274,8 +274,29 @@ bool g_window_ready;
@@ -2372,6 +3221,27 @@ index f38aea7..4a7aa7e 100644
              std::printf("PGO: profile written\n");
          }
      }).detach();
+@@ -322,6 +343,20 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
+         // _Exit skips renderer destructors. Snapshot completed pipeline work and drain its
+         // asynchronous cache writes before terminating; no gameplay queue waits are added.
+         Vulkan::PipelineCache::SaveAllForShutdown();
++        // bbport: give the display back before terminating (_Exit skips SDL's cleanup): leave
++        // fullscreen and hide the window, on this thread, which owns it. It is not destroyed:
++        // the present thread may still be presenting to its Vulkan surface, and a window
++        // destroyed under a live swapchain fails the next present or recreate (an assert,
++        // exit 23). A window call that blocks cannot hold the exit up: the watchdog ends it.
++        std::thread([] {
++            std::this_thread::sleep_for(std::chrono::seconds(2));
++            std::fflush(stdout);
++            std::_Exit(0);
++        }).detach();
++        if (SDL_Window* sdl_window = window->GetSDLWindow()) {
++            SDL_SetWindowFullscreen(sdl_window, false);
++            SDL_HideWindow(sdl_window);
++        }
+         std::fflush(stdout);
+         std::_Exit(0);
+     });
 diff --git a/gpu/shim/bbport_copy.cpp b/gpu/shim/bbport_copy.cpp
 index f9d2884..caf3e6c 100644
 --- a/gpu/shim/bbport_copy.cpp
@@ -2387,7 +3257,7 @@ index f9d2884..caf3e6c 100644
          std::unique_lock lk{mutex};
          while (true) {
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..0d54c45 100644
+index 83e5538..091ca18 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -12,12 +12,14 @@
@@ -2406,7 +3276,16 @@ index 83e5538..0d54c45 100644
  #ifdef _WIN32
  // PE/COFF assemblers have no .hidden/.previous: the compiler embeds the file (#embed, a GCC
  // extension in C++).
-@@ -162,6 +164,38 @@ void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
+@@ -156,12 +158,45 @@ void Checkbox(const char* label, std::atomic<bool>& value) {
+     Store(value, v, changed);
+ }
+ 
+-void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
++void Slider(const char* label, std::atomic<float>& value, float lo, float hi,
++            const char* format = "%.2f", ImGuiSliderFlags flags = ImGuiSliderFlags_None) {
+     float v = value;
+-    const bool changed = ImGui::SliderFloat(label, &v, lo, hi, "%.2f");
++    const bool changed = ImGui::SliderFloat(label, &v, lo, hi, format, flags);
      Store(value, v, changed);
  }
  
@@ -2445,7 +3324,7 @@ index 83e5538..0d54c45 100644
  void Hint(const char* text) {
      ImGui::SameLine();
      ImGui::TextDisabled("(?)");
-@@ -173,6 +207,67 @@ void Hint(const char* text) {
+@@ -173,6 +208,118 @@ void Hint(const char* text) {
      }
  }
  
@@ -2510,10 +3389,61 @@ index 83e5538..0d54c45 100644
 +    CheatUnavailable(BbEngine::Cheats::Echoes);
 +}
 +
++// HDR output (bbport.ini hdr*): on/off on restart; paper white, peak and boost live.
++void HdrSection() {
++    auto& s = BbSettings::Get();
++    ImGui::SeparatorText(BbSettings::MenuText("HDR output", "Вывод HDR"));
++    Checkbox(BbSettings::MenuText("HDR output (restart required)", "Вывод HDR (после перезапуска)"),
++             s.hdr);
++    Hint(BbSettings::MenuText(
++        "Shows the game's SDR picture on an HDR display without washed-out colors, with optional "
++        "highlight expansion. Windows HDR must be on (Settings > Display > Use HDR). Turning it "
++        "on or off applies after restarting the game.",
++        "Показывает SDR-картинку игры на HDR-дисплее без блёклых цветов, с необязательным "
++        "расширением светлых участков. В Windows должен быть включён HDR (Параметры > Дисплей > "
++        "Использовать HDR). Включение и выключение применяются после перезапуска игры."));
++    const int output = s.hdr_output.load();
++    if (output == BbSettings::HdrOutputOff) {
++        if (s.startup_hdr) {
++            ImGui::PushTextWrapPos();
++            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s",
++                               BbSettings::MenuText(
++                                   "Not active: the display offers no HDR format (is Windows HDR on?)",
++                                   "Не активен: дисплей не предлагает HDR-формат (включён ли HDR "
++                                   "в Windows?)"));
++            ImGui::PopTextWrapPos();
++        }
++        return;
++    }
++    ImGui::TextDisabled("%s", output == BbSettings::HdrOutputScRgb
++                                  ? BbSettings::MenuText("Active: scRGB (FP16)", "Активен: scRGB (FP16)")
++                                  : BbSettings::MenuText("Active: HDR10 (PQ, BT.2020)",
++                                                         "Активен: HDR10 (PQ, BT.2020)"));
++    Slider(BbSettings::MenuText("Paper white (nits)", "Белый SDR (нит)"), s.hdr_paper_white,
++           BbSettings::HdrPaperWhiteMin, BbSettings::HdrPaperWhiteMax, "%.0f",
++           ImGuiSliderFlags_AlwaysClamp);
++    Slider(BbSettings::MenuText("Peak brightness (nits)", "Пиковая яркость (нит)"), s.hdr_peak,
++           BbSettings::HdrPeakMin, BbSettings::HdrPeakMax, "%.0f",
++           ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
++    Slider(BbSettings::MenuText("Highlight boost", "Усиление светлых участков"), s.hdr_boost, 0.0f,
++           1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
++    Hint(BbSettings::MenuText(
++        "Paper white: how bright the game's white (and this menu) is; about 200 suits a dim room. "
++        "Peak: your display's peak brightness (its HDR specs, or the Windows HDR Calibration app). "
++        "Highlight boost: 0 shows the SDR picture as it is; higher values let the brightest parts "
++        "(lamps, fire, the moon) rise towards the peak. Changes apply live. "
++        "Ctrl+click a slider to type an exact value.",
++        "Белый SDR: яркость белого в игре (и этого меню); около 200 подходит для неяркой комнаты. "
++        "Пиковая яркость: максимум вашего дисплея (в его характеристиках HDR или в приложении "
++        "«Калибровка HDR» Windows). Усиление светлых участков: 0 — SDR-картинка как есть; больше — "
++        "самые яркие места (лампы, огонь, луна) поднимаются к пику. Меняются сразу. "
++        "Ctrl+клик по ползунку — ввести точное значение."));
++}
++
  void Menu() {
      auto& s = BbSettings::Get();
      const ImGuiViewport* viewport = ImGui::GetMainViewport();
-@@ -206,12 +301,15 @@ void Menu() {
+@@ -206,12 +353,15 @@ void Menu() {
              dirty = true;
          }
      }
@@ -2534,7 +3464,25 @@ index 83e5538..0d54c45 100644
          BbSettings::Save();
      }
      ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-@@ -499,6 +597,81 @@ void Menu() {
+@@ -439,6 +589,7 @@ void Menu() {
+         "остаётся в 1080p — на Steam Deck и старых видеокартах это заметно медленнее. "
+         "Выключена: всё рисуется в разрешении пресета, смена — через перезапуск. Авто включает "
+         "её на мощных дискретных видеокартах. Применяется после перезапуска игры."));
++    HdrSection();
+     ImGui::SeparatorText(BbSettings::MenuText("Game effects (restart required)",
+                                               "Эффекты игры (после перезапуска)"));
+     const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
+@@ -478,7 +629,8 @@ void Menu() {
+ 
+     bool restart =
+         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
+-        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
++        s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
++        BbSettings::ResolutionNeedsRestart();
+     for (int e = 0; e < BbSettings::EffectCount; ++e) {
+         restart |= s.effects[e] != s.startup_effects[e];
+     }
+@@ -499,6 +651,81 @@ void Menu() {
      Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
      Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
  
@@ -2616,7 +3564,7 @@ index 83e5538..0d54c45 100644
      ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
      Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
  
-@@ -587,6 +760,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -587,6 +814,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -2732,7 +3680,7 @@ index 2a1ad78..cd531da 100644
      rusage usage{};
      if (getrusage(thread ? RUSAGE_THREAD : RUSAGE_SELF, &usage) != 0) {
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..1d2903c 100644
+index cf4fbd8..10a12e7 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -2813,8 +3761,19 @@ index cf4fbd8..1d2903c 100644
      } else if (key == "upscaler") {
          for (int u = 0; u < UpscalerCount; ++u) {
              if (value == UpscalerName(u)) {
-@@ -123,6 +174,24 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -121,8 +172,35 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+         v.model_lod = std::clamp(i, -2, 2);
+     } else if (key == "fullscreen") {
          v.fullscreen = i != 0;
++    } else if (key == "hdr") {
++        v.hdr = i != 0;
++    } else if (key == "hdr_paper_white") {
++        v.hdr_paper_white = Clamp(std::isfinite(f) ? f : HdrPaperWhiteDefault, HdrPaperWhiteMin,
++                                  HdrPaperWhiteMax);
++    } else if (key == "hdr_peak") {
++        v.hdr_peak = Clamp(std::isfinite(f) ? f : HdrPeakDefault, HdrPeakMin, HdrPeakMax);
++    } else if (key == "hdr_boost") {
++        v.hdr_boost = Clamp(std::isfinite(f) ? f : HdrBoostDefault, 0.0f, 1.0f);
      } else if (key == "live_resolution") {
          v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
 +    } else if (key == "cheat_vials") {
@@ -2838,7 +3797,7 @@ index cf4fbd8..1d2903c 100644
      } else if (key == "output_res") {
          for (int r = 0; r < OutputCount; ++r) {
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
-@@ -138,6 +207,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -138,6 +216,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -2866,7 +3825,7 @@ index cf4fbd8..1d2903c 100644
  } // namespace
  
  Values& Get() {
-@@ -146,7 +236,11 @@ Values& Get() {
+@@ -146,7 +245,11 @@ Values& Get() {
  }
  
  const char* MenuText(const char* english, const char* russian) {
@@ -2879,7 +3838,7 @@ index cf4fbd8..1d2903c 100644
  }
  
  void Load() {
-@@ -166,9 +260,7 @@ void Load() {
+@@ -166,9 +269,7 @@ void Load() {
                  }
              }
          }
@@ -2890,7 +3849,24 @@ index cf4fbd8..1d2903c 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -264,7 +356,7 @@ void Save() {
+@@ -196,6 +297,8 @@ void Load() {
+         {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
+         {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
+         {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
++        {"BB_HDR", "hdr"},                          {"BB_HDR_PAPER_WHITE", "hdr_paper_white"},
++        {"BB_HDR_PEAK", "hdr_peak"},                {"BB_HDR_BOOST", "hdr_boost"},
+     };
+     for (const auto& [env, key] : env_keys) {
+         if (const char* value = std::getenv(env)) {
+@@ -211,6 +314,7 @@ void Load() {
+     v.startup_model_lod = v.model_lod;
+     v.startup_output_res = v.output_res;
+     v.startup_live_resolution = v.live_resolution;
++    v.startup_hdr = v.hdr;
+ }
+ 
+ void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
+@@ -264,7 +368,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -2899,7 +3875,18 @@ index cf4fbd8..1d2903c 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -305,6 +397,15 @@ void Save() {
+@@ -284,6 +388,10 @@ void Save() {
+         put(Effects[e].key, flag(v.effects[e]));
+     }
+     put("fullscreen", flag(v.fullscreen));
++    put("hdr", flag(v.hdr));
++    put("hdr_paper_white", fixed(v.hdr_paper_white, 0));
++    put("hdr_peak", fixed(v.hdr_peak, 0));
++    put("hdr_boost", fixed(v.hdr_boost, 2));
+     put("graphics_controls",flag(v.graphics_controls));
+     put("graphics_vignette",flag(v.graphics_vignette));
+     put("graphics_ao_strength",fixed(v.graphics_ao_strength,2));
+@@ -305,6 +413,15 @@ void Save() {
      put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
      put("camera_height_scale", fixed(v.camera_height_scale, 2));
      put("model_lod", std::to_string(v.model_lod.load()));
@@ -2916,7 +3903,7 @@ index cf4fbd8..1d2903c 100644
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..fd0c917 100644
+index c0e8a94..2c8d777 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -2935,7 +3922,7 @@ index c0e8a94..fd0c917 100644
  
  /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
  /// menu label, default (the game's own behaviour).
-@@ -50,6 +57,13 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
+@@ -50,6 +57,19 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
  inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
  inline constexpr int OutputCount = 10;
  inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
@@ -2946,10 +3933,16 @@ index c0e8a94..fd0c917 100644
 +inline constexpr int CheatGunRanges[] = {0, 150, 200, 300};
 +/// cheat_echo_multiplier: Blood Echoes from kills times this (1: the game's own).
 +inline constexpr int CheatEchoMultipliers[] = {1, 2, 5, 10};
++/// HDR output (hdr_paper_white / hdr_peak in nits, hdr_boost 0..1): defaults and ranges.
++inline constexpr float HdrPaperWhiteDefault = 200.0f, HdrPaperWhiteMin = 80.0f, HdrPaperWhiteMax = 500.0f;
++inline constexpr float HdrPeakDefault = 1000.0f, HdrPeakMin = 400.0f, HdrPeakMax = 10000.0f;
++inline constexpr float HdrBoostDefault = 0.5f;
++/// The swapchain's HDR signal (Values::hdr_output).
++enum HdrOutput : int { HdrOutputOff = 0, HdrOutputHdr10 = 1, HdrOutputScRgb = 2 };
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -83,6 +97,13 @@ struct Values {
+@@ -83,8 +103,25 @@ struct Values {
      std::atomic<float> camera_fov_scale{1.0f}, camera_distance_scale{1.0f}, camera_height_scale{1.0f};
      std::atomic<int> model_lod{0}; ///< -2 highest .. 2 lowest, 0 the game's
      std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
@@ -2962,8 +3955,24 @@ index c0e8a94..fd0c917 100644
 +    std::atomic<int> cheat_gun_range{0}, cheat_echo_multiplier{1};
      /// Borderless fullscreen window at the desktop size (F11 toggles; BB_FULLSCREEN overrides).
      std::atomic<bool> fullscreen{false};
++    /// HDR output (hdr, BB_HDR): the game's SDR picture shown in an HDR swapchain when the
++    /// display offers one (Windows HDR on). Applied at start (startup_hdr).
++    std::atomic<bool> hdr{false};
++    /// Nits of the SDR picture's white, the display's peak, and the highlight expansion (0: SDR
++    /// white stays at paper white, 1: up to the peak); live (BB_HDR_PAPER_WHITE, BB_HDR_PEAK,
++    /// BB_HDR_BOOST).
++    std::atomic<float> hdr_paper_white{HdrPaperWhiteDefault}, hdr_peak{HdrPeakDefault},
++        hdr_boost{HdrBoostDefault};
++    /// Set by the renderer: the HDR output in use (HdrOutput).
++    std::atomic<int> hdr_output{HdrOutputOff};
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
-@@ -103,7 +124,8 @@ struct Values {
+     /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
+     std::atomic<int> live_resolution{0};
+@@ -100,10 +137,12 @@ struct Values {
+     int startup_model_lod = 0;
+     int startup_output_res = OutputDefault;
+     int startup_live_resolution = 0;
++    bool startup_hdr = false;
  };
  
  Values& Get();
@@ -2998,7 +4007,7 @@ index 50d0422..8336b8d 100644
  inline unsigned Available() {
      cpu_set_t set;
 diff --git a/gpu/shim/core/emulator_settings.h b/gpu/shim/core/emulator_settings.h
-index f176cc1..bcf4185 100644
+index f176cc1..cee7291 100644
 --- a/gpu/shim/core/emulator_settings.h
 +++ b/gpu/shim/core/emulator_settings.h
 @@ -36,12 +36,8 @@ public:
@@ -3045,6 +4054,14 @@ index f176cc1..bcf4185 100644
          }();
          return value;
      }
+@@ -74,7 +63,6 @@ public:
+     bool IsDirectMemoryAccessEnabled() { static const auto value = Flag("BB_DIRECT_MEMORY_ACCESS", false); return value; }
+     bool IsDumpShaders() { static const auto value = Flag("BB_DUMP_SHADERS", false); return value; }
+     bool IsFsrEnabled() { static const auto value = Flag("BB_FSR1", false); return value; }
+-    bool IsHdrAllowed() { static const auto value = Flag("BB_HDR", false); return value; }
+     bool IsNullGPU() { static const auto value = Flag("BB_NULL_GPU", false); return value; }
+     bool IsPatchShaders() { return false; }
+     bool IsPipelineCacheArchived() { return false; }
 diff --git a/gpu/shim/engine/change_appearance.cpp b/gpu/shim/engine/change_appearance.cpp
 index eff8103..c663792 100644
 --- a/gpu/shim/engine/change_appearance.cpp
@@ -3239,6 +4256,51 @@ index f475c39..8b574fb 100644
          if (BbOverlay::HandleEvent(event)) {
              continue;
          }
+diff --git a/scripts/online.py b/scripts/online.py
+index fdbf8c4..6c56f77 100644
+--- a/scripts/online.py
++++ b/scripts/online.py
+@@ -6,6 +6,9 @@ from pathlib import Path
+ from urllib.parse import urlsplit
+ 
+ GAME_STATUS_ORIGIN = 'https://ss4.scej-network.jp:20443'
++# Messages, bloodstains and ghosts: Bloodborne's own game server. shadNet servers only sign in and
++# match players (co-op); the public one has no game server, so The Hunter's Dream is the default.
++HUNTERS_DREAM = 'https://thehuntersdream.com'
+ ONLINE_ENV = ('BB_ONLINE', 'BB_SHADNET_SERVER', 'BB_SHADNET_WEBAPI', 'BB_SHADNET_NPID',
+               'BB_SHADNET_PASSWORD', 'BB_SHADNET_TOKEN', 'BB_UPNP', 'SHADPS4_P2P_PORT', 'SHADPS4_HTTP_HOST_OVERRIDES_JSON')
+ 
+@@ -19,6 +22,19 @@ def read_settings(path):
+             settings[key.strip()] = value.strip()
+     return settings
+ 
++def game_server(text):
++    """The game server as typed: empty is The Hunter's Dream, a bare name gets https://. A
++    server without a port keeps the game's own (20443)."""
++    text = (text or '').strip()
++    if not text:
++        return HUNTERS_DREAM
++    if '://' not in text:
++        text = 'https://' + text
++    # Earlier versions defaulted to the shadNet Web API, which has no game server.
++    if urlsplit(text).hostname == 'srv.shadps4.net':
++        return HUNTERS_DREAM
++    return text
++
+ def http_base(text):
+     if not text or any(ord(c) < 32 for c in text):
+         raise ValueError('Online requires an explicit WebAPI / game API URL')
+@@ -41,8 +57,8 @@ def configure_online(settings, data, env):
+     port = int(settings.get('online_port', ''))
+     if not 1 <= port <= 65535:
+         raise ValueError('shadNet TCP port must be between 1 and 65535')
+-    webapi = http_base(settings.get('online_webapi', ''))
+-    game_api = http_base(settings.get('online_game_api', '') or webapi)
++    webapi = http_base(settings.get('online_webapi', '').strip() or f'http://{host}:31315')
++    game_api = http_base(game_server(settings.get('online_game_api', '')))
+     if urlsplit(webapi).path not in ('', '/') or urlsplit(game_api).path not in ('', '/'):
+         raise ValueError('WebAPI and game API require a server origin without an extra path')
+     username = settings.get('online_username', '')
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
 index ea6daf1..3991891 100644
 --- a/scripts/run_windows.py
@@ -3714,11 +4776,152 @@ index 50e085f..8ce55a5 100644
 -    std::puts("PASS: guest ABI arguments, XMM preservation, return slot, byte/range guards and staged hook installation");
 +    std::puts("PASS: guest ABI arguments (seven with a stack argument), XMM preservation, return slot, byte/range guards and staged hook installation");
  }
+diff --git a/tests/test_online.py b/tests/test_online.py
+index bf0d998..86cde4b 100644
+--- a/tests/test_online.py
++++ b/tests/test_online.py
+@@ -6,7 +6,7 @@ import tempfile
+ import unittest
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+-from online import configure_online, http_base, ONLINE_ENV, GAME_STATUS_ORIGIN
++from online import configure_online, game_server, http_base, ONLINE_ENV, GAME_STATUS_ORIGIN, HUNTERS_DREAM
+ 
+ 
+ class OnlineProfileTests(unittest.TestCase):
+@@ -41,17 +41,27 @@ class OnlineProfileTests(unittest.TestCase):
+         self.assertNotIn('synthetic-test-password', path.read_text())
+         self.assertFalse(path.with_suffix('.json.tmp').exists())
+ 
+-    def test_same_api_fallback_and_automatic_port(self):
++    def test_game_server_defaults_and_automatic_port(self):
+         self.env['SHADPS4_P2P_PORT'] = 'inherited'
+         path = configure_online(self.settings, self.data, self.env)
+-        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:self.settings['online_webapi']})
++        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:HUNTERS_DREAM})
+         self.assertNotIn('SHADPS4_P2P_PORT', self.env)
+ 
++    def test_game_server_bare_name_and_old_shadnet_default(self):
++        self.assertEqual(game_server('thehuntersdream.com'), 'https://thehuntersdream.com')
++        self.assertEqual(game_server('http://srv.shadps4.net:31315'), HUNTERS_DREAM)
++        self.assertEqual(game_server('http://game.example:8080'), 'http://game.example:8080')
++
++    def test_empty_webapi_uses_server_port_31315(self):
++        self.settings['online_webapi'] = ''
++        configure_online(self.settings, self.data, self.env)
++        self.assertEqual(self.env['BB_SHADNET_WEBAPI'], 'http://server.example:31315')
++
+     def test_invalid_profile_fails_before_writing_cache(self):
+         for key, values in {
+             'online_host':['', 'http://server.example', 'foo bar', '::1'],
+             'online_port':['0','65536','not-a-port'],
+-            'online_webapi':['','ftp://server.example','http://user:pass@server.example','http://server.example:0','http://server.example/api'],
++            'online_webapi':['ftp://server.example','http://user:pass@server.example','http://server.example:0','http://server.example/api'],
+             'online_username':['','has space','x'*17,'é'*9],
+             'online_p2p_port':['0','65536','bad']}.items():
+             for value in values:
 diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
-index 593fed4..0d3fee4 100644
+index 593fed4..6d91598 100644
 --- a/tests/test_settings.cpp
 +++ b/tests/test_settings.cpp
-@@ -84,6 +84,66 @@ int main() {
+@@ -1,58 +1,58 @@
+-// SPDX-License-Identifier: GPL-2.0-or-later
+-// bbport_settings.cpp: the menu saves its keys into bbport.ini and keeps the launcher's (controls).
+-#include <cassert>
+-#include <cstdio>
+-#include <cstdlib>
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport_settings.cpp: the menu saves its keys into bbport.ini and keeps the launcher's (controls).
++#include <cassert>
++#include <cstdio>
++#include <cstdlib>
+ #include <fstream>
+ #include <filesystem>
+ #include <chrono>
+-#include <sstream>
+-#include <string>
+-#include "gpu/shim/bbport_settings.h"
+-
+-static std::string Read(const char* path) {
+-    std::ifstream file(path);
+-    std::stringstream text;
+-    text << file.rdbuf();
+-    return text.str();
+-}
+-
+-int main() {
++#include <sstream>
++#include <string>
++#include "gpu/shim/bbport_settings.h"
++
++static std::string Read(const char* path) {
++    std::ifstream file(path);
++    std::stringstream text;
++    text << file.rdbuf();
++    return text.str();
++}
++
++int main() {
+     const auto temporary = std::filesystem::temp_directory_path() /
+         ("bbport-settings-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+     const std::string filename = temporary.string();
+     const char* path = filename.c_str();
+-    const char ini[] = "# launcher\nupscaler=fsr3\nkey.cross=X, Space\npad.circle=a\nshow_fps=0\n"
+-                       "fullscreen_hint=1\n";
++    const char ini[] = "# launcher\nupscaler=fsr3\nkey.cross=X, Space\npad.circle=a\nshow_fps=0\n"
++                       "fullscreen_hint=1\n";
+     { std::ofstream file(path); file << ini; assert(file.good()); }
+ #ifdef _WIN32
+     _putenv_s("BB_CONFIG", path);
+ #else
+     setenv("BB_CONFIG", path, 1);
+ #endif
+-
+-    BbSettings::Load();
+-    auto& s = BbSettings::Get();
+-    assert(s.upscaler == BbSettings::UpscalerFsr3 && !s.show_fps && s.menu_x < 0.0f);
+-    s.show_fps = true;
+-    s.upscaler = BbSettings::UpscalerFsr411;
+-    s.menu_x = 0.625f;
++
++    BbSettings::Load();
++    auto& s = BbSettings::Get();
++    assert(s.upscaler == BbSettings::UpscalerFsr3 && !s.show_fps && s.menu_x < 0.0f);
++    s.show_fps = true;
++    s.upscaler = BbSettings::UpscalerFsr411;
++    s.menu_x = 0.625f;
+     s.menu_y = 0.125f;
+     s.fullscreen = true;
+-    BbSettings::Save();
+-
+-    const std::string saved = Read(path);
+-    // The launcher's controls, its other keys and comments stay; the menu's keys are replaced
+-    // in place, new ones appended.
+-    assert(saved.find("# launcher\nupscaler=fsr411\nkey.cross=X, Space\npad.circle=a\nshow_fps=1\n"
+-                      "fullscreen_hint=1\n") == 0);
+-    assert(saved.find("menu_pos=0.6250,0.1250\n") != std::string::npos);
++    BbSettings::Save();
++
++    const std::string saved = Read(path);
++    // The launcher's controls, its other keys and comments stay; the menu's keys are replaced
++    // in place, new ones appended.
++    assert(saved.find("# launcher\nupscaler=fsr411\nkey.cross=X, Space\npad.circle=a\nshow_fps=1\n"
++                      "fullscreen_hint=1\n") == 0);
++    assert(saved.find("menu_pos=0.6250,0.1250\n") != std::string::npos);
+     assert(saved.find("upscaler=fsr3") == std::string::npos);
+     assert(saved.find("fullscreen=1\n") != std::string::npos);
+-
+-    s.menu_x = -1.0f;
+-    s.menu_y = -1.0f;
+-    BbSettings::Load();
++
++    s.menu_x = -1.0f;
++    s.menu_y = -1.0f;
++    BbSettings::Load();
+     assert(s.menu_x == 0.625f && s.menu_y == 0.125f && s.upscaler == BbSettings::UpscalerFsr411);
+     // Replacing an existing file works on Windows too, and must not erase key bindings.
+     s.upscaler = BbSettings::UpscalerDlss;
+@@ -84,6 +84,101 @@ int main() {
      { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
      BbSettings::Load();
      assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
@@ -3782,9 +4985,415 @@ index 593fed4..0d3fee4 100644
 +    BbSettings::Save();
 +    assert(Read(path).find("cheat_gun_range=off\n") != std::string::npos);
 +    assert(Read(path).find("cheat_echo_multiplier=1\n") != std::string::npos);
++    // HDR output: hdr 0/1 (applied at start), paper white 80-500 and peak 400-10000 nits, boost
++    // 0-1; written back as read; anything else clamped or the default.
++    assert(Read(path).find("hdr=0\n") != std::string::npos);
++    assert(Read(path).find("hdr_paper_white=200\n") != std::string::npos);
++    assert(Read(path).find("hdr_peak=1000\n") != std::string::npos);
++    assert(Read(path).find("hdr_boost=0.50\n") != std::string::npos);
++    { std::ofstream file(path); file << "hdr=1\nhdr_paper_white=250\nhdr_peak=20000\nhdr_boost=0.75\n"; }
++    BbSettings::Load();
++    assert(s.hdr && s.startup_hdr && s.hdr_paper_white == 250.0f && s.hdr_peak == 10000.0f &&
++           s.hdr_boost == 0.75f);
++    BbSettings::Save();
++    for (const char* line : {"hdr=1\n", "hdr_paper_white=250\n", "hdr_peak=10000\n", "hdr_boost=0.75\n"}) {
++        assert(Read(path).find(line) != std::string::npos);
++    }
++    { std::ofstream file(path); file << "hdr=0\nhdr_paper_white=10\nhdr_peak=nan\nhdr_boost=-1\n"; }
++    BbSettings::Load();
++    assert(!s.hdr && !s.startup_hdr && s.hdr_paper_white == 80.0f && s.hdr_peak == 1000.0f &&
++           s.hdr_boost == 0.0f);
++    // BB_HDR* override the file.
++#ifdef _WIN32
++    _putenv_s("BB_HDR", "1");
++    _putenv_s("BB_HDR_PEAK", "600");
++#else
++    setenv("BB_HDR", "1", 1);
++    setenv("BB_HDR_PEAK", "600", 1);
++#endif
++    BbSettings::Load();
++    assert(s.hdr && s.startup_hdr && s.hdr_peak == 600.0f && s.hdr_paper_white == 80.0f);
++#ifdef _WIN32
++    _putenv_s("BB_HDR", "");
++    _putenv_s("BB_HDR_PEAK", "");
++#else
++    unsetenv("BB_HDR");
++    unsetenv("BB_HDR_PEAK");
++#endif
      std::filesystem::remove(temporary);
-     std::puts("PASS: settings save keeps other keys, menu position");
- }
+-    std::puts("PASS: settings save keeps other keys, menu position");
+-}
++    std::puts("PASS: settings save keeps other keys, menu position");
++}
+diff --git a/gpu/shadps4/video_core/host_shaders/hdr_output.frag b/gpu/shadps4/video_core/host_shaders/hdr_output.frag
+new file mode 100644
+index 0000000..655f19a
+--- /dev/null
++++ b/gpu/shadps4/video_core/host_shaders/hdr_output.frag
+@@ -0,0 +1,81 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: HDR output. The game's SDR picture (letterboxed into a swapchain-sized sRGB-encoded
++// image) and the settings menu's layer (premultiplied alpha, sRGB encoded) become the HDR
++// swapchain's signal: HDR10 (BT.2020 primaries, PQ) or scRGB (linear BT.709, 1.0 = 80 nits).
++// SDR white is shown at paper_white; boost expands the game's highlights towards the peak.
++
++#version 450
++
++layout (location = 0) out vec4 color;
++
++layout (binding = 0) uniform sampler2D game;    // the letterboxed SDR frame, swapchain-sized
++layout (binding = 1) uniform sampler2D overlay; // the menu layer (FLAG_OVERLAY)
++
++layout (push_constant) uniform HdrSettings {
++    float paper_white; // nits of SDR white
++    float peak;        // nits the display reaches
++    float boost;       // 0: SDR white at paper white .. 1: SDR white at the peak
++    uint flags;
++} hdr;
++
++const uint FLAG_SCRGB = 1u;   // scRGB output, else HDR10
++const uint FLAG_OVERLAY = 2u; // the menu layer has something drawn
++
++// Linear brightness (SDR white = 1) above which the highlights are expanded.
++const float KNEE = 0.65;
++
++// BT.709 -> BT.2020 primaries (columns).
++const mat3 BT709_TO_BT2020 = mat3(
++    0.6274, 0.0691, 0.0164,
++    0.3293, 0.9195, 0.0880,
++    0.0433, 0.0114, 0.8956);
++
++// The sRGB EOTF, as Windows shows SDR content in HDR.
++vec3 SrgbToLinear(vec3 c) {
++    return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
++}
++
++// SMPTE ST 2084 inverse EOTF; y: luminance / 10000 nits.
++vec3 PqEncode(vec3 y) {
++    const float m1 = 0.1593017578125;
++    const float m2 = 78.84375;
++    const float c1 = 0.8359375;
++    const float c2 = 18.8515625;
++    const float c3 = 18.6875;
++    vec3 ym = pow(clamp(y, 0.0, 1.0), vec3(m1));
++    return pow((c1 + c2 * ym) / (1.0 + c3 * ym), vec3(m2));
++}
++
++// Inverse tone map of the brightest channel (hue and saturation kept): unchanged up to KNEE,
++// then a curve with the same slope there that reaches `white` at SDR white.
++vec3 ExpandHighlights(vec3 rgb, float white) {
++    float m = max(rgb.r, max(rgb.g, rgb.b));
++    if (white <= 1.0 || m <= KNEE) {
++        return rgb;
++    }
++    float t = (m - KNEE) / (1.0 - KNEE);
++    float expanded = m + (white - 1.0) * t * t;
++    return rgb * (expanded / m);
++}
++
++void main() {
++    ivec2 pixel = ivec2(gl_FragCoord.xy);
++    vec3 game_srgb = texelFetch(game, pixel, 0).rgb;
++    float white = max(mix(1.0, hdr.peak / hdr.paper_white, clamp(hdr.boost, 0.0, 1.0)), 1.0);
++    vec3 linear = ExpandHighlights(SrgbToLinear(game_srgb), white);
++    if ((hdr.flags & FLAG_OVERLAY) != 0u) {
++        // The menu over the frame as the SDR path draws it (blended in sRGB), at paper white:
++        // the menu is not expanded.
++        vec4 menu = texelFetch(overlay, pixel, 0);
++        if (menu.a > 0.0) {
++            vec3 sdr = SrgbToLinear(clamp(menu.rgb + game_srgb * (1.0 - menu.a), 0.0, 1.0));
++            linear = mix(linear, sdr, clamp(menu.a * 4.0, 0.0, 1.0));
++        }
++    }
++    if ((hdr.flags & FLAG_SCRGB) != 0u) {
++        color = vec4(linear * (hdr.paper_white / 80.0), 1.0);
++    } else {
++        vec3 nits = max(BT709_TO_BT2020 * linear, vec3(0.0)) * hdr.paper_white;
++        color = vec4(PqEncode(nits / 10000.0), 1.0);
++    }
++}
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.cpp b/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.cpp
+new file mode 100644
+index 0000000..23d19db
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.cpp
+@@ -0,0 +1,227 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: HDR output encode pass (hdr_pass.h), modelled on the post-processing pass.
++
++#include "video_core/renderer_vulkan/host_passes/hdr_pass.h"
++
++#include "common/assert.h"
++#include "core/emulator_settings.h"
++#include "video_core/host_shaders/fs_tri_vert.h"
++#include "video_core/host_shaders/hdr_output_frag.h"
++#include "video_core/renderer_vulkan/vk_platform.h"
++#include "video_core/renderer_vulkan/vk_shader_util.h"
++
++#include <array>
++
++namespace Vulkan::HostPasses {
++
++void HdrOutputPass::Create(vk::Device device, vk::Format output_format) {
++    const std::array bindings{
++        vk::DescriptorSetLayoutBinding{
++            .binding = 0,
++            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
++            .descriptorCount = 1,
++            .stageFlags = vk::ShaderStageFlagBits::eFragment,
++        },
++        vk::DescriptorSetLayoutBinding{
++            .binding = 1,
++            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
++            .descriptorCount = 1,
++            .stageFlags = vk::ShaderStageFlagBits::eFragment,
++        },
++    };
++    desc_set_layout = Check<"create HDR output descriptor set layout">(
++        device.createDescriptorSetLayoutUnique(vk::DescriptorSetLayoutCreateInfo{
++            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
++            .bindingCount = static_cast<u32>(bindings.size()),
++            .pBindings = bindings.data(),
++        }));
++
++    const vk::PushConstantRange push_constants{
++        .stageFlags = vk::ShaderStageFlagBits::eFragment,
++        .offset = 0,
++        .size = sizeof(Settings),
++    };
++    pipeline_layout = Check<"create HDR output pipeline layout">(
++        device.createPipelineLayoutUnique(vk::PipelineLayoutCreateInfo{
++            .setLayoutCount = 1U,
++            .pSetLayouts = &*desc_set_layout,
++            .pushConstantRangeCount = 1,
++            .pPushConstantRanges = &push_constants,
++        }));
++
++    const auto vs_module = CompileSPV(FS_TRI_VERT, device);
++    ASSERT(vs_module);
++    SetObjectName(device, vs_module, "fs_tri.vert");
++    const auto fs_module = CompileSPV(HDR_OUTPUT_FRAG, device);
++    ASSERT(fs_module);
++    SetObjectName(device, fs_module, "hdr_output.frag");
++
++    const std::array shaders_ci{
++        vk::PipelineShaderStageCreateInfo{
++            .stage = vk::ShaderStageFlagBits::eVertex,
++            .module = vs_module,
++            .pName = "main",
++        },
++        vk::PipelineShaderStageCreateInfo{
++            .stage = vk::ShaderStageFlagBits::eFragment,
++            .module = fs_module,
++            .pName = "main",
++        },
++    };
++
++    const vk::PipelineRenderingCreateInfo pipeline_rendering_ci{
++        .colorAttachmentCount = 1,
++        .pColorAttachmentFormats = &output_format,
++    };
++    const vk::PipelineVertexInputStateCreateInfo vertex_input_info{};
++    const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
++        .topology = vk::PrimitiveTopology::eTriangleList,
++    };
++    const vk::Viewport viewport{
++        .width = 1.0f,
++        .height = 1.0f,
++        .minDepth = 0.0f,
++        .maxDepth = 1.0f,
++    };
++    const vk::Rect2D scissor{.extent = {1, 1}};
++    const vk::PipelineViewportStateCreateInfo viewport_info{
++        .viewportCount = 1,
++        .pViewports = &viewport,
++        .scissorCount = 1,
++        .pScissors = &scissor,
++    };
++    const vk::PipelineRasterizationStateCreateInfo raster_state{
++        .depthClampEnable = false,
++        .rasterizerDiscardEnable = false,
++        .polygonMode = vk::PolygonMode::eFill,
++        .cullMode = vk::CullModeFlagBits::eNone,
++        .frontFace = vk::FrontFace::eClockwise,
++        .depthBiasEnable = false,
++        .lineWidth = 1.0f,
++    };
++    const vk::PipelineMultisampleStateCreateInfo multisampling{
++        .rasterizationSamples = vk::SampleCountFlagBits::e1,
++    };
++    const vk::PipelineColorBlendAttachmentState attachment{
++        .blendEnable = false,
++        .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
++                          vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA,
++    };
++    const vk::PipelineColorBlendStateCreateInfo color_blending{
++        .logicOpEnable = false,
++        .logicOp = vk::LogicOp::eCopy,
++        .attachmentCount = 1,
++        .pAttachments = &attachment,
++    };
++    const std::array dynamic_states{
++        vk::DynamicState::eViewport,
++        vk::DynamicState::eScissor,
++    };
++    const vk::PipelineDynamicStateCreateInfo dynamic_info{
++        .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
++        .pDynamicStates = dynamic_states.data(),
++    };
++    const vk::GraphicsPipelineCreateInfo pipeline_info{
++        .pNext = &pipeline_rendering_ci,
++        .stageCount = static_cast<u32>(shaders_ci.size()),
++        .pStages = shaders_ci.data(),
++        .pVertexInputState = &vertex_input_info,
++        .pInputAssemblyState = &input_assembly,
++        .pViewportState = &viewport_info,
++        .pRasterizationState = &raster_state,
++        .pMultisampleState = &multisampling,
++        .pColorBlendState = &color_blending,
++        .pDynamicState = &dynamic_info,
++        .layout = *pipeline_layout,
++    };
++    pipeline = Check<"create HDR output pipeline">(
++        device.createGraphicsPipelineUnique(/*pipeline_cache*/ {}, pipeline_info));
++
++    device.destroyShaderModule(vs_module);
++    device.destroyShaderModule(fs_module);
++
++    // The shader reads texels (texelFetch); a combined image sampler still needs a sampler.
++    sampler = Check<"create HDR output sampler">(device.createSamplerUnique(vk::SamplerCreateInfo{
++        .magFilter = vk::Filter::eNearest,
++        .minFilter = vk::Filter::eNearest,
++        .mipmapMode = vk::SamplerMipmapMode::eNearest,
++        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
++        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
++        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
++    }));
++}
++
++void HdrOutputPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView game, vk::ImageView overlay,
++                           vk::ImageView output, vk::Extent2D extent, const Settings& settings) {
++    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
++        cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
++            .pLabelName = "Host/HDR output",
++        });
++    }
++
++    const std::array image_infos{
++        vk::DescriptorImageInfo{
++            .sampler = *sampler,
++            .imageView = game,
++            .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
++        },
++        vk::DescriptorImageInfo{
++            .sampler = *sampler,
++            .imageView = overlay,
++            .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
++        },
++    };
++    const std::array set_writes{
++        vk::WriteDescriptorSet{
++            .dstSet = VK_NULL_HANDLE,
++            .dstBinding = 0,
++            .dstArrayElement = 0,
++            .descriptorCount = 1,
++            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
++            .pImageInfo = &image_infos[0],
++        },
++        vk::WriteDescriptorSet{
++            .dstSet = VK_NULL_HANDLE,
++            .dstBinding = 1,
++            .dstArrayElement = 0,
++            .descriptorCount = 1,
++            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
++            .pImageInfo = &image_infos[1],
++        },
++    };
++
++    const vk::RenderingAttachmentInfo attachment{
++        .imageView = output,
++        .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
++        // Every pixel is written by the full-screen triangle.
++        .loadOp = vk::AttachmentLoadOp::eDontCare,
++        .storeOp = vk::AttachmentStoreOp::eStore,
++    };
++    const vk::RenderingInfo rendering_info{
++        .renderArea = {.extent = extent},
++        .layerCount = 1,
++        .colorAttachmentCount = 1,
++        .pColorAttachments = &attachment,
++    };
++
++    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
++    cmdbuf.setViewport(0, vk::Viewport{
++                              .width = static_cast<float>(extent.width),
++                              .height = static_cast<float>(extent.height),
++                              .minDepth = 0.0f,
++                              .maxDepth = 1.0f,
++                          });
++    cmdbuf.setScissor(0, vk::Rect2D{.extent = extent});
++    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0, set_writes);
++    cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0,
++                         sizeof(Settings), &settings);
++    cmdbuf.beginRendering(rendering_info);
++    cmdbuf.draw(3, 1, 0, 0);
++    cmdbuf.endRendering();
++
++    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
++        cmdbuf.endDebugUtilsLabelEXT();
++    }
++}
++
++} // namespace Vulkan::HostPasses
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.h b/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.h
+new file mode 100644
+index 0000000..740a58a
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.h
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: HDR output (hdr in bbport.ini). Encodes the swapchain-sized SDR composite (the game's
++// frame letterboxed, plus the menu layer) into the HDR swapchain image: HDR10 PQ or scRGB.
++
++#pragma once
++
++#include "common/types.h"
++#include "video_core/renderer_vulkan/vk_common.h"
++
++namespace Vulkan::HostPasses {
++
++class HdrOutputPass {
++public:
++    /// Push constants of hdr_output.frag.
++    struct Settings {
++        float paper_white = 200.0f; ///< nits of SDR white
++        float peak = 1000.0f;       ///< nits the display reaches
++        float boost = 0.5f;         ///< highlight expansion, 0..1
++        u32 flags = 0;              ///< FlagScRgb | FlagOverlay
++    };
++    static constexpr u32 FlagScRgb = 1;   ///< scRGB (linear BT.709) output, else HDR10 PQ
++    static constexpr u32 FlagOverlay = 2; ///< the menu layer is drawn
++
++    /// `output_format`: the HDR swapchain's format.
++    void Create(vk::Device device, vk::Format output_format);
++
++    bool IsCreated() const {
++        return static_cast<bool>(pipeline);
++    }
++
++    /// Draws into `output` (layout ColorAttachmentOptimal) of `extent`; `game` and `overlay`
++    /// (both ShaderReadOnlyOptimal, `extent` big) are read texel for texel.
++    void Render(vk::CommandBuffer cmdbuf, vk::ImageView game, vk::ImageView overlay,
++                vk::ImageView output, vk::Extent2D extent, const Settings& settings);
++
++private:
++    vk::UniquePipeline pipeline{};
++    vk::UniquePipelineLayout pipeline_layout{};
++    vk::UniqueDescriptorSetLayout desc_set_layout{};
++    vk::UniqueSampler sampler{};
++};
++
++} // namespace Vulkan::HostPasses
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
 new file mode 100644
 index 0000000..6d3784d

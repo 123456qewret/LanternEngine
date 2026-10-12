@@ -70,7 +70,7 @@ namespace BloodborneLauncher.Views
             SettingToggle(SymbolRegular.TextBulletListSquare24, "Frame statistics in the log", "BB_FRAME_STATS", "frame_stats");
             SettingToggle(SymbolRegular.DeveloperBoard24, "FSR 4 profile in the log", "BB_FSR4_PROFILE", "fsr_profile");
             SettingToggle(SymbolRegular.Speaker224, "Audio statistics in the log", "BB_AUDIO_STATS", "audio_stats");
-            SettingToggle(SymbolRegular.Timer24, "Render stage timings in the log", "BB_SECTIONS: where each frame's CPU time goes (with frame statistics)", "section_stats");
+            SettingToggle(SymbolRegular.Timer24, "Render stage timings in the log", "BB_SECTIONS: where each frame's CPU time goes (with frame statistics). It costs FPS, so it applies to the next game only", "section_stats");
             TextRow(SymbolRegular.Code24, "Extra variables", "NAME=value pairs separated by spaces, passed to the game", "BB_EXAMPLE=1",
                 () => S.Str("extra_env"), v => S.Set("extra_env", v.Trim()), width: 300);
 
@@ -79,6 +79,11 @@ namespace BloodborneLauncher.Views
                 IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(Paths.ConfigDir)), out _));
             Add(Card(SymbolRegular.DocumentSettings20, "Port settings (bbport.ini)", Paths.IniPath,
                 IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(Path.GetDirectoryName(Paths.IniPath)!)), out _));
+
+            Group("Community");
+            Add(Card(SymbolRegular.PeopleCommunity24, "Discord", "Help, news, co-op partners and beta feedback",
+                SmallButton("Join", SymbolRegular.Open24, (_, _) =>
+                    Process.Start(new ProcessStartInfo(LauncherSettings.Discord) { UseShellExecute = true })), out _));
 
             Group("Updates");
             _updateNow = SmallButton("Update now", SymbolRegular.ArrowDownload24, async (_, _) => await MainWindow.Instance!.InstallUpdateAsync(),
