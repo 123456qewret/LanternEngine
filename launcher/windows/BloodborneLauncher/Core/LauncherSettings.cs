@@ -156,6 +156,11 @@ namespace BloodborneLauncher.Core
         }
 
         public void Set(string key, string value) => _data[key] = value;
+
+        /// <summary>Every setting as stored (shared settings).</summary>
+        public IEnumerable<KeyValuePair<string, JsonNode?>> All => _data;
+
+        public void SetNode(string key, JsonNode value) => _data[key] = value.DeepClone();
         public void Set(string key, bool value) => _data[key] = value;
         public void Set(string key, int value) => _data[key] = value;
     }

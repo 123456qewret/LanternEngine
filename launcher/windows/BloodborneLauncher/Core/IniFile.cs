@@ -93,5 +93,9 @@ namespace BloodborneLauncher.Core
         public bool Flag(string key) => Get(key) == "1";
 
         public void Set(string key, string? value) => _values[key] = value;
+
+        /// <summary>Every key with a value (shared settings).</summary>
+        public IEnumerable<KeyValuePair<string, string>> Values =>
+            _values.Where(kv => kv.Value != null).Select(kv => new KeyValuePair<string, string>(kv.Key, kv.Value!));
     }
 }

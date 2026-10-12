@@ -80,6 +80,16 @@ namespace BloodborneLauncher.Views
             Add(Card(SymbolRegular.DocumentSettings20, "Port settings (bbport.ini)", Paths.IniPath,
                 IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(Path.GetDirectoryName(Paths.IniPath)!)), out _));
 
+            Group("Share settings");
+            Add(Card(SymbolRegular.Share24, "Share your settings",
+                "Graphics, effects, camera, controls, cheats and engine options, as a code to paste in Discord or a file. " +
+                "Not included: display and HDR, the online account, folders and languages",
+                Row(SmallButton("Copy code", SymbolRegular.Copy24, (_, _) => CopySettingsCode()),
+                    SmallButton("Save as file", SymbolRegular.Save24, (_, _) => SaveSettingsFile())), out _));
+            Add(Card(SymbolRegular.ArrowImport24, "Import settings", "Someone's code or file. You see what changes before anything is applied",
+                Row(SmallButton("Paste code", SymbolRegular.ClipboardPaste24, (_, _) => ImportSettingsCode()),
+                    SmallButton("Open file", SymbolRegular.FolderOpen24, (_, _) => ImportSettingsFile())), out _));
+
             Group("Community");
             Add(Card(SymbolRegular.PeopleCommunity24, "Discord", "Help, news, co-op partners and beta feedback",
                 SmallButton("Join", SymbolRegular.Open24, (_, _) =>
@@ -153,11 +163,139 @@ namespace BloodborneLauncher.Views
         private static bool RestartForLayout()
         {
             if (!Prompt.Confirm("Switch layout", "The launcher restarts to change its layout.", "Restart now")) return false;
+            Restart();
+            return true;
+        }
+
+        private static void Restart()
+        {
             Ws.SaveNow();
             if (Environment.ProcessPath is { } self)
                 Process.Start(new ProcessStartInfo(self) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(self)! });
             Application.Current.Shutdown();
-            return true;
+        }
+
+        // ---------------------------------------------------------------- shared settings
+
+        private void CopySettingsCode()
+        {
+            Clipboard.SetText(SharedSettings.ToCode(SharedSettings.Take(Ini, S)));
+            Ws.Log("Settings code copied. Paste it in Discord; others import it in Settings › Share settings.", LogLevel.Good);
+            Prompt.Tell("Settings code copied", "Paste it in Discord or anywhere else. Others use Import settings › Paste code.");
+        }
+
+        private void SaveSettingsFile()
+        {
+            var dialog = new Microsoft.Win32.SaveFileDialog { Title = "Save settings", FileName = "Bloodborne PC settings.json", Filter = "Settings|*.json" };
+            if (dialog.ShowDialog() != true) return;
+            try
+            {
+                File.WriteAllText(dialog.FileName, SharedSettings.ToJson(SharedSettings.Take(Ini, S)));
+                Ws.Log("Settings saved: " + dialog.FileName, LogLevel.Good);
+            }
+            catch (Exception e)
+            {
+                Ws.Log("Could not save the settings: " + e.Message, LogLevel.Bad);
+            }
+        }
+
+        private void ImportSettingsCode()
+        {
+            var clipboard = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+            var values = Prompt.Ask("Import settings", $"Paste the code someone shared (it starts with {SharedSettings.CodePrefix}).",
+                new Prompt.Field("Code", clipboard.Contains(SharedSettings.CodePrefix, StringComparison.OrdinalIgnoreCase) ? clipboard.Trim() : "",
+                    SharedSettings.CodePrefix + "…", Multiline: true));
+            if (values == null || values[0].Trim().Length == 0) return;
+            OfferSettings(values[0]);
+        }
+
+        private void ImportSettingsFile()
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog { Title = "Import settings", Filter = "Settings|*.json;*.txt|All files|*.*" };
+            if (dialog.ShowDialog() != true) return;
+            try
+            {
+                if (new FileInfo(dialog.FileName).Length > 256 * 1024)
+                    throw new FormatException("That file is far too large to be shared settings.");
+                OfferSettings(File.ReadAllText(dialog.FileName));
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or FormatException)
+            {
+                Prompt.Tell("Could not import", e.Message);
+            }
+        }
+
+        /// <summary>Shows what imported settings change and, if accepted, applies them (the previous ones are
+        /// kept in a file) and restarts the launcher so every page shows them.</summary>
+        private void OfferSettings(string text)
+        {
+            if (Ws.Game.Running)
+            {
+                Prompt.Tell("Close the game first", "The game changes these settings too while it runs.");
+                return;
+            }
+            SharedSettings.Snapshot shared;
+            try
+            {
+                shared = SharedSettings.Parse(text);
+            }
+            catch (FormatException e)
+            {
+                Prompt.Tell("Could not import", e.Message);
+                return;
+            }
+
+            var everything = new HashSet<SharedSettings.Part> { SharedSettings.Part.Settings, SharedSettings.Part.Controls, SharedSettings.Part.Cheats };
+            var changes = SharedSettings.Changes(shared, Ini, S, everything);
+            if (changes.Count == 0)
+            {
+                Prompt.Tell("Nothing to change", "These settings are the same as yours.");
+                return;
+            }
+            var settings = changes.Count(c => c.Part == SharedSettings.Part.Settings);
+            var controls = changes.Count(c => c.Part == SharedSettings.Part.Controls);
+            var cheats = changes.Count(c => c.Part == SharedSettings.Part.Cheats);
+            var counts = string.Join(", ", new[]
+            {
+                settings > 0 ? $"{settings} graphics and engine" : null,
+                controls > 0 ? $"{controls} controls" : null,
+                cheats > 0 ? $"{cheats} cheats" : null,
+            }.Where(p => p != null));
+            const int shown = 12;
+            var list = string.Join("\n", changes.Take(shown).Select(SharedSettings.Describe)) +
+                       (changes.Count > shown ? $"\n…and {changes.Count - shown} more" : "");
+            var message = $"From {shared.From}: {changes.Count} changes ({counts}).\n\n{list}\n\n" +
+                          "Your current settings are saved first. The launcher restarts to show the new ones.";
+
+            HashSet<SharedSettings.Part> parts;
+            if (settings > 0 && controls + cheats > 0)
+            {
+                var choice = Prompt.Choose("Import settings", message, "Cancel", "Keep my controls and cheats", "Import all");
+                if (choice <= 0) return;
+                parts = choice == 2 ? everything : new() { SharedSettings.Part.Settings };
+            }
+            else if (!Prompt.Confirm("Import settings", message, "Import"))
+            {
+                return;
+            }
+            else
+            {
+                parts = everything;
+            }
+
+            try
+            {
+                var backup = Path.Combine(Paths.ConfigDir, "settings-before-import.json");
+                File.WriteAllText(backup, SharedSettings.ToJson(SharedSettings.Take(Ini, S)));
+                SharedSettings.Apply(shared, Ini, S, parts);
+                Ws.Log($"Imported settings from {shared.From}. Your previous ones: {backup} (Import settings › Open file).", LogLevel.Good);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                Prompt.Tell("Could not import", e.Message);
+                return;
+            }
+            Restart();
         }
 
         private void ShowMethod() =>
