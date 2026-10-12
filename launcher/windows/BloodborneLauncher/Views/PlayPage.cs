@@ -16,7 +16,8 @@ namespace BloodborneLauncher.Views
         private readonly InfoBar _problem;
         private readonly SettingRow _engineCard;
         private readonly Button _profileButton;
-        private readonly TextBlock _profileHint;
+        private readonly TextBlock _profileHint, _backupHint;
+        private readonly Button _restoreButton;
         private readonly TextBlock _gameHint, _userHint, _statGame, _statUpscaler, _statResolution, _statFps, _statVia;
         private readonly SymbolIcon _gameIcon;
         private readonly Button _play, _resetUser;
@@ -110,6 +111,25 @@ namespace BloodborneLauncher.Views
                 IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(GameEnvironment.SavesRoot(S))),
                 _resetUser), out _userHint));
 
+            // Save backups: made before each start when the saves changed (Workspace.StartGame).
+            _restoreButton = SmallButton("Restore…", SymbolRegular.History24, (_, _) => ShowBackupMenu());
+            var backupToggle = new ToggleSwitch { IsChecked = S.Bool("save_backups"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
+            backupToggle.Click += (_, _) =>
+            {
+                S.Set("save_backups", backupToggle.IsChecked == true);
+                Ws.SaveSoon();
+                RefreshBackups();
+            };
+            Add(Card(SymbolRegular.ArrowSync24, "Save backups",
+                $"Before every start, when this profile's saves changed. The newest {SaveBackups.Keep} are kept", Row(
+                _restoreButton,
+                IconButton(SymbolRegular.Open24, "Open the backups folder", (_, _) =>
+                {
+                    Directory.CreateDirectory(SaveBackups.Folder(S));
+                    Paths.OpenFolder(SaveBackups.Folder(S));
+                }),
+                backupToggle), out _backupHint));
+
             ComboRow(SymbolRegular.LocalLanguage24, "In-game menu language", "The port's settings menu (Insert or L3 + R3)",
                 Choices.MenuLanguages, () => Ini.Get("menu_language", "en"), v => Ini.Set("menu_language", v));
 
@@ -117,6 +137,7 @@ namespace BloodborneLauncher.Views
             _clock.Tick += (_, _) => UpdateRunning();
 
             Ws.PortChanged += Refresh;
+            Ws.GameStateChanged += () => { RefreshProfile(); RefreshBackups(); };
             Ws.Saved += RefreshSummary;
             Ws.TrophiesChanged += RefreshSummary;
         }
@@ -156,6 +177,7 @@ namespace BloodborneLauncher.Views
             SetHint(_userHint, (custom ? root : $"Default: {root}") + "  ·  every profile's saves live here");
             _resetUser.IsEnabled = custom;
             RefreshProfile();
+            RefreshBackups();
 
             _engineCard.Visibility = Updater.EngineOutdated ? Visibility.Visible : Visibility.Collapsed;
             _statGame.Text = status.Health == Health.Bad ? "Not found" : $"{status.TitleId} {status.Version}".Trim();
@@ -192,7 +214,9 @@ namespace BloodborneLauncher.Views
                 _clock.Stop();
                 _playStatus.Text = GameCheck.Inspect(GameEnvironment.GameDir(S)).Health == Health.Bad
                     ? "Choose the game folder first"
-                    : "Settings are saved as you change them";
+                    : Ws.Session is { Length.TotalSeconds: > 10 } last
+                        ? "Last session: " + last.Summary
+                        : "Settings are saved as you change them";
             }
         }
 
@@ -217,8 +241,64 @@ namespace BloodborneLauncher.Views
             var dir = GameEnvironment.UserDir(S);
             var saves = Path.Combine(dir, "savedata");
             var found = Directory.Exists(saves) && Directory.EnumerateFileSystemEntries(saves).Any();
+            var played = SessionStats.Playtime(S, profile);
             SetHint(_profileHint, dir + (found ? "  ·  saves found" : "  ·  no saves yet; the game creates them here") +
-                                  $"  ·  {Ws.Trophies.Count} / {TrophyTracker.All.Length} trophies");
+                                  $"  ·  {Ws.Trophies.Count} / {TrophyTracker.All.Length} trophies" +
+                                  (played.TotalMinutes >= 1 ? $"  ·  {SessionStats.Duration(played)} played" : ""));
+        }
+
+        // ---------------------------------------------------------------- save backups
+
+        private void RefreshBackups()
+        {
+            List<SaveBackups.Backup> list;
+            try { list = SaveBackups.List(S); }
+            catch { list = new(); }
+            _restoreButton.IsEnabled = list.Count > 0;
+            SetHint(_backupHint, !S.Bool("save_backups") ? "Off: no backups are made"
+                : list.Count == 0 ? "None yet: the first is made when you next press Play"
+                : $"{list.Count} for {PlayerProfiles.Current(S)}  ·  newest {list[0].When:d MMM, HH:mm}");
+        }
+
+        private void ShowBackupMenu()
+        {
+            var menu = new ContextMenu { PlacementTarget = _restoreButton, Placement = PlacementMode.Bottom };
+            foreach (var backup in SaveBackups.List(S))
+            {
+                var item = new System.Windows.Controls.MenuItem
+                {
+                    Header = $"{backup.When:d MMM yyyy, HH:mm}  ·  {backup.Bytes / 1048576.0:0.0} MB" +
+                             (backup.MadeBeforeRestore ? "  ·  before a restore" : ""),
+                };
+                var chosen = backup;
+                item.Click += (_, _) => RestoreBackup(chosen);
+                menu.Items.Add(item);
+            }
+            menu.IsOpen = true;
+        }
+
+        private void RestoreBackup(SaveBackups.Backup backup)
+        {
+            if (Ws.Game.Running)
+            {
+                Prompt.Tell("Restore saves", "Close the game first: it has the saves open.");
+                return;
+            }
+            if (!Prompt.Confirm("Restore saves",
+                    $"{PlayerProfiles.Current(S)}'s saves go back to {backup.When:d MMM yyyy, HH:mm}. " +
+                    "What is there now is backed up first, so you can undo this from the same list.", "Restore"))
+                return;
+            try
+            {
+                SaveBackups.Restore(S, backup);
+                Ws.Log($"Saves restored from {backup.When:d MMM yyyy, HH:mm}.", LogLevel.Good);
+            }
+            catch (Exception e)
+            {
+                Ws.Log("Could not restore the saves: " + e.Message, LogLevel.Bad);
+                Prompt.Tell("Restore saves", "Could not restore: " + e.Message);
+            }
+            Refresh();
         }
 
         private void ShowProfileMenu()

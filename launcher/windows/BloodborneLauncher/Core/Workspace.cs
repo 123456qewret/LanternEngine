@@ -43,6 +43,12 @@ namespace BloodborneLauncher.Core
         private DispatcherTimer? _saveTimer;
         private bool _iniWarned;
 
+        /// <summary>The session being played, then the last one played (null before the first).</summary>
+        public SessionStats? Session { get; private set; }
+        /// <summary>The game ended by itself with an error (not stopped from here): exit code and session.</summary>
+        public event Action<int, SessionStats>? GameCrashed;
+        private bool _stopping;
+
         public void Initialise()
         {
             Settings.Load();
@@ -77,6 +83,20 @@ namespace BloodborneLauncher.Core
                     code == 0 ? LogLevel.Good : LogLevel.Warn);
                 _pendingOutput.Enqueue($"— the game exited (code {code}) —");
                 FlushOutput();
+                var stopped = _stopping;
+                _stopping = false;
+                if (Session is { } session)
+                {
+                    session.Finish();
+                    if (session.Length > TimeSpan.FromSeconds(10))
+                    {
+                        SessionStats.AddPlaytime(Settings, PlayerProfiles.Current(Settings), session.Length);
+                        SaveSoon();
+                        Log("Session: " + session.Summary, LogLevel.Info);
+                    }
+                    if (code != 0 && !stopped)
+                        GameCrashed?.Invoke(code, session);
+                }
                 GameStateChanged?.Invoke();
             });
         }
@@ -199,6 +219,20 @@ namespace BloodborneLauncher.Core
             SaveNow();
             OutputLines.Clear();
             OutputCleared?.Invoke();
+            if (Settings.Bool("save_backups"))
+            {
+                try
+                {
+                    if (SaveBackups.Create(Settings) != null)
+                        Log($"Saves backed up before playing (the newest {SaveBackups.Keep} are kept).", LogLevel.Step);
+                }
+                catch (Exception e)
+                {
+                    Log("Could not back up the saves: " + e.Message, LogLevel.Warn);
+                }
+            }
+            var safeMode = Settings.Bool("safe_mode_next");
+            Session = new SessionStats();
             var error = Game.Start(Settings);
             if (error != null)
             {
@@ -206,6 +240,13 @@ namespace BloodborneLauncher.Core
                 return error;
             }
             Log(GameRunner.Custom(Settings) ? "Started the game with the custom command." : "Started Bloodborne.", LogLevel.Step);
+            if (safeMode)
+            {
+                // One run only: the next start uses the settings as chosen again.
+                Settings.Set("safe_mode_next", false);
+                SaveSoon();
+                Log("Safe mode for this run: experimental engine options and mods are off.", LogLevel.Step);
+            }
             GameStateChanged?.Invoke();
             return null;
         }
@@ -213,6 +254,7 @@ namespace BloodborneLauncher.Core
         public async Task StopGameAsync()
         {
             Log("Stopping the game…", LogLevel.Step);
+            _stopping = true;
             await Game.StopAsync();
             GameStateChanged?.Invoke();
         }
@@ -232,7 +274,10 @@ namespace BloodborneLauncher.Core
             var batch = new List<string>();
             while (_pendingOutput.TryDequeue(out var line)) batch.Add(line);
             foreach (var line in batch)
+            {
                 Announce(Trophies.Observe(line));
+                Session?.Observe(line);
+            }
             OutputLines.AddRange(batch);
             if (OutputLines.Count > MaxOutputLines)
                 OutputLines.RemoveRange(0, OutputLines.Count - MaxOutputLines);

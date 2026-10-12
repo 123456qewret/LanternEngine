@@ -21,14 +21,15 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | Controller: the pad in use takes over; swap sticks, invert camera, dead zone | `pad_swap_sticks`, `pad_invert_look_x/y`, `pad_deadzone` |
 | Controller: Cross/Circle in the name entry, held buttons ignored after menus | |
 | No 12-second minimum loading time after death | `BB_RESPAWN_DELAY_FIX=0` off |
-| Crash fixes: oversized command data, empty recording chunk; swapchain recreation | |
+| Crash fixes: oversized command data, empty recording chunk, out-of-order flip IRQ; swapchain recreation | |
 | DLSS texture LOD bias | `BB_DLSS_MIP_BIAS=0` off |
 | Optional FSR 4 balanced model | `BB_FSR4_BALANCED=1` |
+| Cheats: infinite or a set amount of Blood Vials and Quicksilver Bullets, live and revertible (in-game menu) | `cheat_vials`, `cheat_bullets` |
 
 Parts are adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR),
 [AwesomeObserver/bloodborne_pc](https://github.com/AwesomeObserver/bloodborne_pc),
 [Supermedo's Windows port](https://github.com/Supermedo/bloodborne_pc) and
-[deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (all GPL-2.0-or-later); the authors are
+[deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (all GPL-2.0-or-later) and [droogie/bbhost](https://github.com/droogie/bbhost) (GPL-3.0); the authors are
 credited in the code.
 
 ## Build

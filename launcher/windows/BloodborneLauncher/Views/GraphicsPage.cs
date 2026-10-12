@@ -15,6 +15,9 @@ namespace BloodborneLauncher.Views
         public GraphicsPage() : base("Graphics",
             "Stored in bbport.ini; the upscaler can also be changed in game (Insert or L3 + R3).")
         {
+            Add(Card(SymbolRegular.Gauge24, "Best settings for this PC", Hardware.Detect().Summary,
+                SmallButton("Recommend…", SymbolRegular.Sparkle24, (_, _) => MainWindow.Instance!.OfferBestSettings(firstRun: false)), out _));
+
             Group("Upscaler");
             IniCombo(SymbolRegular.Sparkle24, "Upscaler", null, Choices.Upscalers, "upscaler", changed: UpdateUpscaler);
             _upscalerHint = (TextBlock)((SettingRow)Body.Children[^1]).Tag;

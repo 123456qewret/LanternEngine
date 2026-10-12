@@ -70,6 +70,18 @@ namespace BloodborneLauncher.Core
             if (!s.Bool("exp_sleep_spin")) env["BB_SLEEP_SPIN_US"] = "600";
             if (!s.Bool("exp_async_pipelines")) env["BB_ASYNC_PIPELINES"] = "0";
             if (s.Bool("section_stats")) env["BB_SECTIONS"] = "1";
+            if (s.Bool("safe_mode_next"))
+            {
+                // Safe mode (after a crash, one run): every experimental engine option and the mods off.
+                env["BB_PRECISE_PACING"] = "0";
+                env["BB_IMAGE_WRITEBACK_GC"] = "0";
+                env["BB_GC_PRESSURE_PERCENT"] = "0";
+                env["BB_GC_PRESSURE_SECONDS"] = "0";
+                env["BB_GPU_THREAD_PRIORITY"] = "0";
+                env["BB_SLEEP_SPIN_US"] = "600";
+                env["BB_ASYNC_PIPELINES"] = "0";
+                env["BB_MODS_ENABLED"] = "0";
+            }
             // The account password never goes to bbport.ini; the engine takes it from here.
             if (s.Str("online_password").Length > 0) env["BB_SHADNET_PASSWORD"] = s.Str("online_password");
 

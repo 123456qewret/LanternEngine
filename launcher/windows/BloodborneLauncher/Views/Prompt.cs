@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -20,7 +20,10 @@ namespace BloodborneLauncher.Views
 
         private readonly List<TextBox> _boxes = new();
 
-        private Prompt(string title, string? message, IReadOnlyList<Field> fields, string ok, bool showCancel)
+        /// <summary>Choose: the index of the button pressed; -1 when closed with Escape.</summary>
+        private int _chosen = -1;
+
+        private Prompt(string title, string? message, IReadOnlyList<Field> fields, string ok, bool showCancel, string[]? choices = null)
         {
             var owner = Application.Current.MainWindow is { IsLoaded: true } main && main.WindowState != WindowState.Minimized ? main : null;
             Owner = owner;
@@ -61,15 +64,38 @@ namespace BloodborneLauncher.Views
 
             // Two equal-width buttons along the bottom, the action on the right.
             var buttons = new UniformGrid { Rows = 1, Margin = new Thickness(0, 22, 0, 0), HorizontalAlignment = HorizontalAlignment.Right };
-            if (showCancel)
+            if (choices != null)
+            {
+                // Several actions: equal widths, the last one the main action.
+                buttons.HorizontalAlignment = HorizontalAlignment.Stretch;
+                for (var i = 0; i < choices.Length; i++)
+                {
+                    var index = i;
+                    var last = i == choices.Length - 1;
+                    var button = new Button
+                    {
+                        Content = choices[i],
+                        Margin = new Thickness(0, 0, last ? 0 : 8, 0),
+                        HorizontalAlignment = HorizontalAlignment.Stretch,
+                        Appearance = last ? ControlAppearance.Primary : ControlAppearance.Secondary,
+                        IsDefault = last,
+                    };
+                    button.Click += (_, _) => { _chosen = index; DialogResult = true; };
+                    buttons.Children.Add(button);
+                }
+            }
+            else if (showCancel)
             {
                 var cancel = new Button { Content = "Cancel", Margin = new Thickness(0, 0, 8, 0), IsCancel = true, MinWidth = 110, HorizontalAlignment = HorizontalAlignment.Stretch };
                 cancel.Click += (_, _) => DialogResult = false;
                 buttons.Children.Add(cancel);
             }
-            var accept = new Button { Content = ok, Appearance = ControlAppearance.Primary, IsDefault = true, MinWidth = 110, HorizontalAlignment = HorizontalAlignment.Stretch };
-            accept.Click += (_, _) => DialogResult = true;
-            buttons.Children.Add(accept);
+            if (choices == null)
+            {
+                var accept = new Button { Content = ok, Appearance = ControlAppearance.Primary, IsDefault = true, MinWidth = 110, HorizontalAlignment = HorizontalAlignment.Stretch };
+                accept.Click += (_, _) => DialogResult = true;
+                buttons.Children.Add(accept);
+            }
             stack.Children.Add(buttons);
 
             var card = new Border
@@ -176,6 +202,14 @@ namespace BloodborneLauncher.Views
 
         public static bool Confirm(string title, string message, string ok) =>
             new Prompt(title, message, Array.Empty<Field>(), ok, showCancel: true).ShowDialog() == true;
+
+        /// <summary>One of several actions (the last is the main one): its index, or -1 if dismissed.</summary>
+        public static int Choose(string title, string message, params string[] choices)
+        {
+            var dialog = new Prompt(title, message, Array.Empty<Field>(), "", showCancel: false, choices);
+            dialog.ShowDialog();
+            return dialog._chosen;
+        }
 
         public static void Tell(string title, string message) =>
             new Prompt(title, message, Array.Empty<Field>(), "OK", showCancel: false).ShowDialog();

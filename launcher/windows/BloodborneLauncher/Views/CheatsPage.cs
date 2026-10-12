@@ -15,7 +15,7 @@ namespace BloodborneLauncher.Views
         private static readonly Choice[] Modes =
         {
             new("Off", "off"),
-            new("Infinite", "infinite", "Using one never lowers the count"),
+            new("Infinite", "infinite", "Kept full at the normal carry limit, even if you have none. Items put into storage while it is on come back"),
             new("Custom amount", "custom", "Refilled to the amount below whenever it drops"),
         };
 
@@ -26,7 +26,7 @@ namespace BloodborneLauncher.Views
         private readonly InfoBar _engine;
 
         public CheatsPage() : base("Cheats",
-            "Applied live while you play; also in the in-game menu (Insert or L3 + R3). Turning a cheat off puts the game's values back. Items you already have stay.")
+            "Set here for the next start. While playing, change them in the in-game menu (Insert or L3 + R3): they apply live. Turning a cheat off puts the game's values back; items you already have stay.")
         {
             _engine = new InfoBar
             {

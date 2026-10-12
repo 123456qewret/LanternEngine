@@ -29,6 +29,7 @@ namespace BloodborneLauncher
             ws.Logged += OnLogged;
             ws.Saved += () => SavedText.Text = $"Saved {DateTime.Now:HH:mm:ss}";
             ws.GameStateChanged += UpdatePlayButton;
+            ws.GameCrashed += OnGameCrashed;
             ws.Initialise();
 
             // Layout, read once at start (Settings › Layout restarts the launcher to switch).
@@ -61,6 +62,12 @@ namespace BloodborneLauncher
             Loaded += async (_, _) =>
             {
                 Updater.CleanUp();
+                // Running a beta means choosing beta: kept after updating to a stable release.
+                if (Updater.CurrentBeta > 0 && ws.Settings.Str("update_channel").Length == 0)
+                {
+                    ws.Settings.Set("update_channel", "beta");
+                    ws.SaveSoon();
+                }
                 if (ws.Settings.Bool("check_updates"))
                     _ = ws.CheckForUpdatesAsync(quiet: true);
                 await Task.Yield();
@@ -77,8 +84,74 @@ namespace BloodborneLauncher
                         ? $"Bloodborne Launcher ready. Engine: {Paths.PortDir}"
                         : "Bloodborne Launcher ready. Choose the engine folder in Settings.",
                     Paths.IsPortDir(Paths.PortDir) ? LogLevel.Good : LogLevel.Warn);
+                // Once: the settings that suit this PC, shown before anything changes.
+                if (!ws.Settings.Bool("hardware_offered") && Prompt.SnapshotPath == null && Paths.IsPortDir(Paths.PortDir))
+                    _ = Dispatcher.BeginInvoke(() => OfferBestSettings(firstRun: true), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             };
             Closing += OnClosing;
+        }
+
+        /// <summary>Shows what would change to suit this PC, and applies it on Apply.</summary>
+        public void OfferBestSettings(bool firstRun)
+        {
+            var ws = Workspace.Current;
+            ws.Settings.Set("hardware_offered", true);
+            ws.SaveSoon();
+            var hw = Hardware.Detect();
+            var changes = hw.Recommend(ws.Settings, ws.Ini);
+            if (changes.Count == 0)
+            {
+                if (!firstRun) Prompt.Tell("Best settings for this PC", $"{hw.Summary}\n\nYour settings already suit this PC.");
+                return;
+            }
+            var list = string.Join("\n", changes.Select(c => $"{c.Label}: {c.From} → {c.To}"));
+            if (!Prompt.Confirm(firstRun ? "Settings for this PC" : "Best settings for this PC",
+                    $"{hw.Summary}\n\n{list}\n\nYou can change any of them later.", "Apply"))
+                return;
+            foreach (var change in changes) change.Apply();
+            ws.SaveSoon();
+            ws.Log("Settings for this PC applied: " + string.Join(", ", changes.Select(c => $"{c.Label.ToLowerInvariant()} {c.To}")) + ".", LogLevel.Good);
+            ReloadPages();
+        }
+
+        /// <summary>Builds the pages again after settings changed underneath them, staying on the current one.</summary>
+        public void ReloadPages()
+        {
+            var current = PageFrame.Content as LauncherPage;
+            _pages.Clear();
+            if (current == null) return;
+            var page = _pages[current.GetType()] = (LauncherPage)Activator.CreateInstance(current.GetType())!;
+            PageFrame.Navigate(page);
+            page.OnShown();
+        }
+
+        /// <summary>The game ended with an error by itself: what happened, safe mode, a report to copy.</summary>
+        private void OnGameCrashed(int code, SessionStats session)
+        {
+            var ws = Workspace.Current;
+            var choice = Prompt.Choose("The game crashed",
+                $"{CrashReport.Explain(code)} It ran for {SessionStats.Duration(session.Length)}.\n\n" +
+                "Safe mode starts the next run with the experimental engine options and mods off. " +
+                "Copy report puts the details and the end of the log on the clipboard, for a bug report.",
+                "Close", "Copy report", "Use safe mode");
+            if (choice == 1)
+            {
+                try
+                {
+                    Clipboard.SetText(CrashReport.Build(ws.Settings, ws.Ini, code));
+                    ws.Log("Crash report copied to the clipboard.", LogLevel.Good);
+                }
+                catch (Exception e)
+                {
+                    ws.Log("Could not copy the report: " + e.Message, LogLevel.Warn);
+                }
+            }
+            else if (choice == 2)
+            {
+                ws.Settings.Set("safe_mode_next", true);
+                ws.SaveSoon();
+                ws.Log("The next start uses safe mode (once).", LogLevel.Step);
+            }
         }
 
         /// <summary>

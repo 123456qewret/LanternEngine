@@ -437,6 +437,51 @@ index 30de04f..25e0c0f 100644
  
          if (!immediate_flips || main_port.flip_rate != 0) {
              timer.End();
+diff --git a/gpu/shadps4/core/libraries/videoout/video_out.cpp b/gpu/shadps4/core/libraries/videoout/video_out.cpp
+index 1cf6d2a..43f2e98 100644
+--- a/gpu/shadps4/core/libraries/videoout/video_out.cpp
++++ b/gpu/shadps4/core/libraries/videoout/video_out.cpp
+@@ -1,6 +1,11 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <thread>
++
+ #include "common/assert.h"
+ #include "common/elf_info.h"
+ #include "common/logging/log.h"
+@@ -351,7 +356,27 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
+     Platform::IrqC::Instance()->RegisterOnce(
+         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
+             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
+-            ASSERT_MSG(port->buffer_labels[buf_id] == 1, "Out of order flip IRQ");
++            // bbport: the label write and this IRQ can arrive out of order (the write may still
++            // be on its way from the draw recording thread; timing changes such as precise frame
++            // pacing make it likelier). This used to stop the game ("Out of order flip IRQ", exit
++            // 23). Wait briefly for the label, bounded since the writer may be this very thread;
++            // then flip anyway: at worst a frame is shown twice, and the game still gets its flip
++            // event (skipping it could leave the game waiting for that buffer forever).
++            if (port->buffer_labels[buf_id] != 1) {
++                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
++                while (reinterpret_cast<volatile u64&>(port->buffer_labels[buf_id]) != 1 &&
++                       std::chrono::steady_clock::now() < deadline) {
++                    std::this_thread::yield();
++                }
++                if (port->buffer_labels[buf_id] != 1) {
++                    static std::atomic<u32> reported{0};
++                    if (reported.fetch_add(1, std::memory_order_relaxed) < 5) {
++                        std::printf("VideoOut: flip IRQ for buffer %u before its label was set; "
++                                    "flipping anyway\n",
++                                    buf_id);
++                    }
++                }
++            }
+             const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
+             ASSERT_MSG(result, "EOP flip submission failed");
+         });
 diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.cpp b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 index fa7e146..ee3859e 100644
 --- a/gpu/shadps4/video_core/amdgpu/liverpool.cpp
@@ -1871,10 +1916,16 @@ index f9d2884..35a5357 100644
          std::unique_lock lk{mutex};
          while (true) {
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..d4b93b1 100644
+index 83e5538..a3c20fd 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
-@@ -17,7 +17,8 @@
+@@ -12,12 +12,14 @@
+ 
+ #include <SDL3/SDL.h>
+ #include "bbport_settings.h"
++#include "engine/cheats.h"
+ #include "imgui.h"
+ #include "imgui_impl_vulkan.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
  #include "video_core/renderer_vulkan/vk_scheduler.h"
  
@@ -1884,7 +1935,46 @@ index 83e5538..d4b93b1 100644
  #ifdef _WIN32
  // PE/COFF assemblers have no .hidden/.previous: the compiler embeds the file (#embed, a GCC
  // extension in C++).
-@@ -206,12 +207,15 @@ void Menu() {
+@@ -162,6 +164,38 @@ void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
+     Store(value, v, changed);
+ }
+ 
++// The amounts Custom starts from (the last one chosen in this session).
++int custom_vials = 20, custom_bullets = 20;
++
++// A cheat (engine/cheats.cpp): Off / Infinite / Custom, and the amount for Custom; live.
++void Cheat(const char* label, std::atomic<int>& value, BbEngine::Cheats::Which which, int& custom) {
++    ImGui::PushID(label);
++    const char* modes[] = {BbSettings::MenuText("Off", "Выкл."),
++                           BbSettings::MenuText("Infinite", "Бесконечно"),
++                           BbSettings::MenuText("Custom", "Своё количество")};
++    const int current = value;
++    int mode = current == BbSettings::CheatOff ? 0 : current == BbSettings::CheatInfinite ? 1 : 2;
++    if (current > 0) {
++        custom = current;
++    }
++    if (ImGui::Combo(label, &mode, modes, 3)) {
++        Store(value, mode == 0 ? BbSettings::CheatOff : mode == 1 ? BbSettings::CheatInfinite : custom, true);
++    }
++    if (mode == 2) {
++        int amount = std::clamp(custom, 1, BbSettings::CheatMaxAmount);
++        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Amount", "Количество"), &amount, 1,
++                                              BbSettings::CheatMaxAmount, "%d", ImGuiSliderFlags_AlwaysClamp);
++        if (changed) {
++            custom = std::clamp(amount, 1, BbSettings::CheatMaxAmount);
++            Store(value, custom, true);
++        }
++    }
++    if (const char* why = BbEngine::Cheats::Unavailable(which)) {
++        ImGui::TextDisabled("%s: %s", BbSettings::MenuText("Unavailable", "Недоступно"), why);
++    }
++    ImGui::PopID();
++}
++
+ void Hint(const char* text) {
+     ImGui::SameLine();
+     ImGui::TextDisabled("(?)");
+@@ -206,12 +240,15 @@ void Menu() {
              dirty = true;
          }
      }
@@ -1905,7 +1995,29 @@ index 83e5538..d4b93b1 100644
          BbSettings::Save();
      }
      ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-@@ -587,6 +591,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -499,6 +536,21 @@ void Menu() {
+     Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
+     Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
+ 
++    ImGui::SeparatorText(BbSettings::MenuText("Cheats", "Читы"));
++    Cheat(BbSettings::MenuText("Blood Vials", "Флаконы крови"), s.cheat_vials, BbEngine::Cheats::Vials,
++          custom_vials);
++    Cheat(BbSettings::MenuText("Quicksilver Bullets", "Ртутные пули"), s.cheat_bullets,
++          BbEngine::Cheats::Bullets, custom_bullets);
++    Hint(BbSettings::MenuText(
++        "Changes apply live. Infinite: kept full at the normal carry limit, even from none. Custom: the count is "
++        "refilled to the amount and never lowered. Off restores the game's item data and keeps the "
++        "counts you have. While a cheat is on, the counts it gives are saved with your character. "
++        "Do not play online with cheats on.",
++        "Применяются сразу. Бесконечно: запас всегда полный, даже если предметов не было. Своё "
++        "количество: запас пополняется до него и никогда не уменьшается. Выкл. возвращает данные "
++        "предметов игры, а имеющееся количество остаётся. Пока чит включён, полученные предметы "
++        "сохраняются вместе с персонажем. Не играйте по сети с включёнными читами."));
++
+     ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
+     Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
+ 
+@@ -587,6 +639,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -1949,7 +2061,7 @@ index 8f2e888..b7cd129 100644
  } // namespace BbThreads
  #endif
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..fc787ce 100644
+index cf4fbd8..8bba4d1 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -1964,7 +2076,35 @@ index cf4fbd8..fc787ce 100644
  #include <cstdio>
  #include <cmath>
  #include <cstdlib>
-@@ -35,9 +37,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -31,13 +33,46 @@ float Clamp(float v, float lo, float hi) {
+     return std::clamp(v, lo, hi);
+ }
+ 
++// cheat_vials / cheat_bullets: off, infinite or an amount 1..CheatMaxAmount; anything else is off.
++int CheatValue(const std::string& key, const std::string& value) {
++    if (value == "off" || value == "0") {
++        return CheatOff;
++    }
++    if (value == "infinite") {
++        return CheatInfinite;
++    }
++    char* end = nullptr;
++    const long amount = std::strtol(value.c_str(), &end, 10);
++    if (!value.empty() && end && *end == '\0' && amount >= 1 && amount <= CheatMaxAmount) {
++        return int(amount);
++    }
++    std::printf("Settings: unknown %s '%s' (expected off, infinite or 1-%d); off\n", key.c_str(),
++                value.c_str(), CheatMaxAmount);
++    return CheatOff;
++}
++
++std::string CheatText(int value) {
++    return value == CheatInfinite ? "infinite"
++           : value >= 1 && value <= CheatMaxAmount ? std::to_string(value)
++                                                   : "off";
++}
++
+ void Set(Values& v, const std::string& key, const std::string& value) {
      const float f = float(std::atof(value.c_str()));
      const int i = std::atoi(value.c_str());
      if (key == "menu_language") {
@@ -1986,7 +2126,18 @@ index cf4fbd8..fc787ce 100644
      } else if (key == "upscaler") {
          for (int u = 0; u < UpscalerCount; ++u) {
              if (value == UpscalerName(u)) {
-@@ -138,6 +149,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -123,6 +158,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+         v.fullscreen = i != 0;
+     } else if (key == "live_resolution") {
+         v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
++    } else if (key == "cheat_vials") {
++        v.cheat_vials = CheatValue(key, value);
++    } else if (key == "cheat_bullets") {
++        v.cheat_bullets = CheatValue(key, value);
+     } else if (key == "output_res") {
+         for (int r = 0; r < OutputCount; ++r) {
+             if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
+@@ -138,6 +177,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -2014,7 +2165,7 @@ index cf4fbd8..fc787ce 100644
  } // namespace
  
  Values& Get() {
-@@ -146,7 +178,11 @@ Values& Get() {
+@@ -146,7 +206,11 @@ Values& Get() {
  }
  
  const char* MenuText(const char* english, const char* russian) {
@@ -2027,7 +2178,7 @@ index cf4fbd8..fc787ce 100644
  }
  
  void Load() {
-@@ -166,9 +202,7 @@ void Load() {
+@@ -166,9 +230,7 @@ void Load() {
                  }
              }
          }
@@ -2038,7 +2189,7 @@ index cf4fbd8..fc787ce 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -264,7 +298,7 @@ void Save() {
+@@ -264,7 +326,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -2047,8 +2198,17 @@ index cf4fbd8..fc787ce 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
+@@ -305,6 +367,8 @@ void Save() {
+     put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
+     put("camera_height_scale", fixed(v.camera_height_scale, 2));
+     put("model_lod", std::to_string(v.model_lod.load()));
++    put("cheat_vials", CheatText(v.cheat_vials));
++    put("cheat_bullets", CheatText(v.cheat_bullets));
+     put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
+                           std::to_string(OutputHeights[v.output_res]));
+     // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..10c0f80 100644
+index c0e8a94..6dbe7a7 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -2067,7 +2227,26 @@ index c0e8a94..10c0f80 100644
  
  /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
  /// menu label, default (the game's own behaviour).
-@@ -103,7 +110,8 @@ struct Values {
+@@ -50,6 +57,9 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
+ inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
+ inline constexpr int OutputCount = 10;
+ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
++/// Live cheats (engine/cheats.cpp): cheat_vials / cheat_bullets in bbport.ini are "off",
++/// "infinite" or an amount kept in the inventory, 1..CheatMaxAmount.
++inline constexpr int CheatOff = 0, CheatInfinite = -1, CheatMaxAmount = 99;
+ 
+ struct Values {
+     std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
+@@ -83,6 +93,8 @@ struct Values {
+     std::atomic<float> camera_fov_scale{1.0f}, camera_distance_scale{1.0f}, camera_height_scale{1.0f};
+     std::atomic<int> model_lod{0}; ///< -2 highest .. 2 lowest, 0 the game's
+     std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
++    /// CheatOff, CheatInfinite or the amount to keep (1..CheatMaxAmount); live.
++    std::atomic<int> cheat_vials{CheatOff}, cheat_bullets{CheatOff};
+     /// Borderless fullscreen window at the desktop size (F11 toggles; BB_FULLSCREEN overrides).
+     std::atomic<bool> fullscreen{false};
+     /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
+@@ -103,7 +115,8 @@ struct Values {
  };
  
  Values& Get();
@@ -2142,6 +2321,168 @@ index f176cc1..bcf4185 100644
          }();
          return value;
      }
+diff --git a/gpu/shim/engine/change_appearance.cpp b/gpu/shim/engine/change_appearance.cpp
+index eff8103..c663792 100644
+--- a/gpu/shim/engine/change_appearance.cpp
++++ b/gpu/shim/engine/change_appearance.cpp
+@@ -9,6 +9,7 @@
+ #include "rebirth.h"
+ #include "menu_memory.h"
+ #include "graphics.h"
++#include "cheats.h"
+ #include "bbport_settings.h"
+ #include "bbport_platform.h"
+ #include <atomic>
+@@ -159,6 +160,7 @@ std::int64_t __attribute__((sysv_abi)) FrameHook(std::uint64_t, const std::uint6
+     BbInput::Tick();
+     Camera::Tick();
+     Widescreen::Tick();
++    Cheats::Tick();
+     return 0; // The established FPS++ implementation still runs, byte for byte.
+ }
+ } // namespace
+@@ -168,7 +170,9 @@ void Install(std::uint8_t* image, std::size_t size) {
+     const char* identity = std::getenv("BB_ENGINE_IMAGE_SHA256");
+     const bool mirror = asset && *asset;
+     const bool respec=std::getenv("BB_REBIRTH_ASSET");
+-    if (!mirror && !respec && !BbSettings::Get().camera_controls && !BbSettings::Get().graphics_controls && !BbSettings::Get().pc_controls && !BbSettings::Get().widescreen) return;
++    // Cheats (cheats.cpp) are switched live from the overlay, so a verified executable always
++    // gets the frame hook; run_windows.py verifies it for any engine feature or cheat.
++    if (!identity && !mirror && !respec && !BbSettings::Get().camera_controls && !BbSettings::Get().graphics_controls && !BbSettings::Get().pc_controls && !BbSettings::Get().widescreen) return;
+     if (!identity || std::strcmp(identity, "071df19c8880086d97182dbc057bc8cb37badaca57d9112683836b24a0444c0a")) {
+         Log("mirror disabled: executable identity was not verified"); return;
+     }
+@@ -180,7 +184,6 @@ void Install(std::uint8_t* image, std::size_t size) {
+         !std::filesystem::equivalent(resolved, std::filesystem::path(original) / "dvdroot_ps4/map/mapstudio/m21_00_00_00.msb.dcx", error))) {
+         Log("mirror disabled: a user mod owns the Dream layout");
+         asset = nullptr;
+-        if (!respec && !BbSettings::Get().camera_controls && !BbSettings::Get().graphics_controls && !BbSettings::Get().pc_controls && !BbSettings::Get().widescreen) return;
+     }
+     Hook hooks[2];
+     if (!Prepare(hooks[0], image, size, 0x1c1cce0, kStepPrologue, StepHook) ||
+@@ -204,7 +207,8 @@ void Install(std::uint8_t* image, std::size_t size) {
+         Log("mirror disabled: native editor memory budget differs");
+     }
+     const bool rebirth=menus && Rebirth::Install(image,size);
+-    if (!g_frame_on && !camera && !rebirth && !menus && !graphics && !wide && !input) {
++    const bool cheats=Cheats::Install(image,size);
++    if (!g_frame_on && !camera && !rebirth && !menus && !graphics && !wide && !input && !cheats) {
+         for (auto& hook : hooks) Discard(hook);
+         Log("engine enhancements disabled: no compatible feature could be prepared"); return;
+     }
+diff --git a/gpu/shim/engine/engine_hooks.h b/gpu/shim/engine/engine_hooks.h
+index a88772c..9e394a7 100644
+--- a/gpu/shim/engine/engine_hooks.h
++++ b/gpu/shim/engine/engine_hooks.h
+@@ -27,11 +27,19 @@ template <typename T> std::int64_t Argument(T value) {
+     else return static_cast<std::int64_t>(value);
+ }
+ template <typename... A> std::int64_t Call(std::uint64_t fn, A... args) {
+-    static_assert(sizeof...(A) <= 6);
+-    using GuestFn = std::int64_t (__attribute__((sysv_abi)) *)(std::int64_t, std::int64_t,
+-        std::int64_t, std::int64_t, std::int64_t, std::int64_t);
+-    std::int64_t values[7] = {0, Argument(args)...};
+-    return reinterpret_cast<GuestFn>(fn)(values[1], values[2], values[3], values[4], values[5], values[6]);
++    static_assert(sizeof...(A) <= 7);
++    std::int64_t values[8] = {0, Argument(args)...};
++    if constexpr (sizeof...(A) <= 6) {
++        using GuestFn = std::int64_t (__attribute__((sysv_abi)) *)(std::int64_t, std::int64_t,
++            std::int64_t, std::int64_t, std::int64_t, std::int64_t);
++        return reinterpret_cast<GuestFn>(fn)(values[1], values[2], values[3], values[4], values[5], values[6]);
++    } else {
++        // The seventh argument goes on the stack ([rsp] at the call, [rbp+0x10] in the callee).
++        using GuestFn7 = std::int64_t (__attribute__((sysv_abi)) *)(std::int64_t, std::int64_t,
++            std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t);
++        return reinterpret_cast<GuestFn7>(fn)(values[1], values[2], values[3], values[4], values[5], values[6],
++                                              values[7]);
++    }
+ }
+ void Install(std::uint8_t* image, std::size_t size);
+ } // namespace BbEngine
+diff --git a/gpu/shim/engine/engine_state.cpp b/gpu/shim/engine/engine_state.cpp
+index 090e05d..132de88 100644
+--- a/gpu/shim/engine/engine_state.cpp
++++ b/gpu/shim/engine/engine_state.cpp
+@@ -23,6 +23,7 @@ struct Safe { template<typename T> bool operator()(std::uint64_t at,T* out) cons
+ bool host_read_safe(const void* p,void* out,std::size_t n) { return p && BbPlatform::ReadProcessMemory(p,out,n); }
+ void host_log(const char* format,...) { std::fputs("Engine: ",stdout);va_list a;va_start(a,format);std::vprintf(format,a);va_end(a);std::putchar('\n'); }
+ void StateInitialize(std::uint64_t image) { slide=image; }
++std::uint64_t player_record() { return Record(); }
+ bool player_stat_get(const char* name,std::int64_t* value) {
+     auto record=Record(); if (!record) return false;
+     for (const auto& s:stats) if (!std::strcmp(name,s.name)) { std::int32_t v=0;if (!Read(record+s.offset,&v)) return false;*value=v;return true; }
+@@ -86,6 +87,44 @@ void* params_row(const char* wanted,std::uint32_t id,std::size_t* size) {
+     }
+     return nullptr;
+ }
++// The same walk as params_row, keeping the first table of that name for row-by-row access.
++bool params_table(const char* wanted,ParamTable* out) {
++    const auto repo=Pointer(Slot(0x5940340)); if (!repo || !wanted || !out) return false;
++    for (unsigned s=0;s<63;++s) {
++        const auto entry=repo+0x70+s*0x48;std::int32_t n=0;if (!Read(entry,&n) || n<=0) continue;
++        for (unsigned k=0;k<static_cast<unsigned>(n) && k<8;++k) {
++            const auto cap=Pointer(entry+8+8*k);std::uint64_t capacity=0;if (!cap || !Read(cap+0x30,&capacity)) continue;
++            const auto name=capacity<8?cap+0x18:Pointer(cap+0x18);
++            bool same=true; unsigned c=0;
++            for (;c<64;++c) { char16_t ch=0;if (!Read(name+2*c,&ch) || ch!=static_cast<unsigned char>(wanted[c])) { same=false;break; }if (!ch) break; }
++            if (!same || c==64) continue;
++            ParamTable t;t.cap=cap;t.file=params_table_file(cap);
++            if (!t.file || !Read(t.file+0xa,&t.rows) || !t.rows || !Read(t.file+0x2d,&t.format) || !Read(t.file+0x2e,&t.flags)) continue;
++            *out=t;return true;
++        }
++    }
++    return false;
++}
++std::uint64_t params_table_file(std::uint64_t cap) { const auto holder=cap?Pointer(cap+0x70):0;return holder?Pointer(holder+0x70):0; }
++// Every record in one read (the records params_row reads one at a time): id and row address.
++bool params_records(const ParamTable& t,std::vector<ParamRecord>* out) {
++    if (!t.file || !t.rows || !out) return false;
++    const bool wide=t.format>3 && (t.flags&2);
++    const std::size_t stride=wide?0x18:0xc;
++    std::vector<std::uint8_t> bytes(stride*t.rows);
++    if (!host_read_safe(reinterpret_cast<const void*>(t.file+(t.format==2?0x34:0x40)),bytes.data(),bytes.size())) return false;
++    out->clear();out->reserve(t.rows);
++    for (std::size_t i=0;i<t.rows;++i) {
++        const std::uint8_t* r=bytes.data()+stride*i;
++        std::uint32_t id=0,off32=0;std::uint64_t offset=0;
++        std::memcpy(&id,r,4);
++        if (wide) std::memcpy(&offset,r+8,8);
++        else { std::memcpy(&off32,r+4,4);offset=off32; }
++        if (offset<0x34 || offset>64*1024*1024) return false;
++        out->push_back({id,t.file+offset});
++    }
++    return true;
++}
+ int menu_steps_watch(std::uint64_t type,const char16_t* name) {
+     if (count>=8 || !name) return -1;const int w=count++;watches[w].type=type;watches[w].name=name;return w;
+ }
+diff --git a/gpu/shim/engine/engine_state.h b/gpu/shim/engine/engine_state.h
+index a2bc45d..ad7e742 100644
+--- a/gpu/shim/engine/engine_state.h
++++ b/gpu/shim/engine/engine_state.h
+@@ -4,12 +4,22 @@
+ #pragma once
+ #include "engine_hooks.h"
+ #include "bbport_platform.h"
++#include <vector>
+ namespace BbEngine {
+ constexpr std::uint64_t kPreferredGuestSlide=0x400000;
+ bool host_read_safe(const void* p,void* out,std::size_t n);
+ void host_log(const char*,...);
+ void StateInitialize(std::uint64_t image);
+ void* params_row(const char* table,std::uint32_t id,std::size_t* size);
++// A loaded param table (the repository's ResCap and its file) and its records, for walking every
++// row. The file changes if the game reloads the table: params_table_file(cap) reads it again.
++struct ParamTable { std::uint64_t cap=0,file=0;std::uint16_t rows=0;std::uint8_t format=0,flags=0; };
++bool params_table(const char* table,ParamTable* out);
++std::uint64_t params_table_file(std::uint64_t cap);
++struct ParamRecord { std::uint32_t id;std::uint64_t data; };
++bool params_records(const ParamTable& table,std::vector<ParamRecord>* out);
++// GameDataMan's local player record (PlayerGameData), or 0 while there is none.
++std::uint64_t player_record();
+ bool player_stat_get(const char* name,std::int64_t* value);
+ bool player_stat_set(const char* name,std::int64_t value);
+ bool player_origin(int* origin);
 diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
 index f475c39..8b574fb 100644
 --- a/gpu/shim/window.cpp
@@ -2165,6 +2506,22 @@ index f475c39..8b574fb 100644
          if (BbOverlay::HandleEvent(event)) {
              continue;
          }
+diff --git a/scripts/run_windows.py b/scripts/run_windows.py
+index ea6daf1..20948b6 100644
+--- a/scripts/run_windows.py
++++ b/scripts/run_windows.py
+@@ -148,8 +148,10 @@ def main():
+         # Engine features are prepared locally and only mounted after runtime byte checks.
+         for key in ('BB_DREAM_MIRROR_ASSET', 'BB_ENGINE_IMAGE_SHA256', 'BB_PC_MENU_ASSETS', 'BB_REBIRTH_ASSET'):
+             os.environ.pop(key, None)
++        # Cheats (cheat_vials / cheat_bullets) run from the engine's frame hook: a verified executable.
+         if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
+-            or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
++            or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))
++            or any(settings_value(config, key) not in (None, '', '0', 'off') for key in ('cheat_vials', 'cheat_bullets'))):
+             try:
+                 from engine_assets import prepare_mirror, verify_executable
+                 os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
 diff --git a/src/probe.c b/src/probe.c
 index b0e7c32..b926998 100644
 --- a/src/probe.c
@@ -2416,11 +2773,33 @@ index 5f31782..97d2b4f 100644
      return 0;
  }
  static ABI int32_t ime_status(void) {
+diff --git a/tests/test_engine_hooks.cpp b/tests/test_engine_hooks.cpp
+index 50e085f..8ce55a5 100644
+--- a/tests/test_engine_hooks.cpp
++++ b/tests/test_engine_hooks.cpp
+@@ -67,10 +67,16 @@ int main() {
+     assert(reinterpret_cast<Floating>(image)(1.5,2.5) == 4.0);
+     assert(floats[0] == 1.5 && floats[1] == 2.5);
+     BbEngine::Discard(hook);
++
++    // A seventh argument on the stack, read as the game reads it ([rbp+0x10]):
++    // push rbp; mov rbp,rsp; mov rax,[rbp+0x10]; add rax,r9; pop rbp; ret
++    const std::uint8_t seventh[] = {0x55,0x48,0x89,0xe5,0x48,0x8b,0x45,0x10,0x4c,0x01,0xc8,0x5d,0xc3};
++    std::memcpy(image + 0x100, seventh, sizeof seventh);
++    assert(BbEngine::Call(reinterpret_cast<std::uint64_t>(image + 0x100), 1,2,3,4,5,6,70) == 76);
+ #ifdef _WIN32
+     VirtualFree(image, 0, MEM_RELEASE);
+ #else
+     munmap(image, 4096);
+ #endif
+-    std::puts("PASS: guest ABI arguments, XMM preservation, return slot, byte/range guards and staged hook installation");
++    std::puts("PASS: guest ABI arguments (seven with a stack argument), XMM preservation, return slot, byte/range guards and staged hook installation");
+ }
 diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
-index 593fed4..6cf97cf 100644
+index 593fed4..5286449 100644
 --- a/tests/test_settings.cpp
 +++ b/tests/test_settings.cpp
-@@ -84,6 +84,19 @@ int main() {
+@@ -84,6 +84,31 @@ int main() {
      { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
      BbSettings::Load();
      assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
@@ -2437,6 +2816,18 @@ index 593fed4..6cf97cf 100644
 +    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Kapat");
 +    s.menu_language = BbSettings::MenuLanguage::Russian;
 +    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Закрыть");
++    // Cheats: off, infinite or an amount 1-99, written back as read; anything else is off.
++    { std::ofstream file(path); file << "cheat_vials=infinite\ncheat_bullets=50\n"; }
++    BbSettings::Load();
++    assert(s.cheat_vials == BbSettings::CheatInfinite && s.cheat_bullets == 50);
++    BbSettings::Save();
++    assert(Read(path).find("cheat_vials=infinite\n") != std::string::npos);
++    assert(Read(path).find("cheat_bullets=50\n") != std::string::npos);
++    { std::ofstream file(path); file << "cheat_vials=100\ncheat_bullets=lots\n"; }
++    BbSettings::Load();
++    assert(s.cheat_vials == BbSettings::CheatOff && s.cheat_bullets == BbSettings::CheatOff);
++    BbSettings::Save();
++    assert(Read(path).find("cheat_vials=off\n") != std::string::npos);
      std::filesystem::remove(temporary);
      std::puts("PASS: settings save keeps other keys, menu position");
  }
@@ -3612,3 +4003,445 @@ index 0000000..c73a186
 +}
 +
 +#endif
+diff --git a/gpu/shim/engine/cheats.cpp b/gpu/shim/engine/cheats.cpp
+new file mode 100644
+index 0000000..f72e238
+--- /dev/null
++++ b/gpu/shim/engine/cheats.cpp
+@@ -0,0 +1,414 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Live cheats: Blood Vials (goods 1000) and Quicksilver Bullets (goods 900), each off, infinite
++// or kept at an amount (bbport.ini cheat_vials / cheat_bullets, the overlay's Cheats section).
++//
++// The inventory helpers are the game's own, the ones its debug menu's "fill to the maximum"
++// (sub_18d3dc0) calls, as droogie/bbhost's boss_rush plugin found and used them
++// (plugins/boss_rush/boss_rush.cpp refill(), GPL-3.0); the param row layouts are bbhost's
++// include/bbhost/params.hpp (EQUIP_PARAM_GOODS_ST, EQUIP_PARAM_WEAPON_ST). Credit: droogie.
++// Every address and offset here was read back from our 1.09 image (071df19c...); Install checks
++// the code bytes that show them again before anything is enabled.
++//
++// Save data: a cheat changes param bytes in memory only, from a snapshot of their original values,
++// and writes those values back when it is turned off. The counts it raises are inventory, which
++// the game saves: cheats affect the save (the counts) only while they are on, and turning one off
++// leaves the counts as they are (above the normal carry cap, the game lowers them to the cap the
++// next time the count changes).
++#include "cheats.h"
++#include "engine_hooks.h"
++#include "engine_state.h"
++#include "bbport_settings.h"
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <span>
++#include <vector>
++
++namespace BbEngine::Cheats {
++namespace {
++using Clock = std::chrono::steady_clock;
++
++// Game functions (BN addresses: image base 0x400000).
++constexpr std::uint64_t kGoodsRow = 0x231e3d0;      // (&{id, pad, row}, goods id): the goods row
++constexpr std::uint64_t kGoodsCap = 0x231e7e0;      // (&{id, pad, row}): most one can carry
++constexpr std::uint64_t kInventorySlot = 0x18d9f60; // (EquipInventoryData*, &{0x40000000|id, 0, 0, 0})
++constexpr std::uint64_t kAddItem = 0x18cdfd0;       // (EquipGameData*, type, id, count, 1, 1, [stack] 0)
++constexpr std::uint32_t kGoods = 0x40000000;        // the item type of goods
++// PlayerGameData (GameDataMan 0x593b130 +0x08, engine_state player_record) + 0x1d0 is EquipGameData,
++// which holds EquipInventoryData at +0x158: the first *(+0x24) of its 16-byte entries at *(+0x58),
++// the rest at *(+0x48), the slot bound *(+0x88); an entry's item at +0, its quantity at +8.
++constexpr std::uint64_t kEquipGameData = 0x1d0, kInventory = 0x158;
++constexpr std::uint64_t kInvFirst = 0x24, kInvRest = 0x48, kInvHead = 0x58, kInvBound = 0x88;
++// EQUIP_PARAM_GOODS_ST: int16 maxNum at 0x36; bitfield bytes 0x42-0x47: isConsume (0x44 bit 7),
++// useBulletMaxNum (0x46 bit 6), useHpCureMaxNum (0x46 bit 7). With either use* bit the carry cap is
++// the live one (runes), else the row's maxNum (sub_231e7e0).
++constexpr std::size_t kGoodsRowSize = 0x6c, kMaxNum = 0x36, kConsumeByte = 0x44, kCapByte = 0x46;
++constexpr std::uint8_t kIsConsume = 0x80, kUseBulletMaxNum = 0x40, kUseHpCureMaxNum = 0x80;
++// EQUIP_PARAM_WEAPON_ST: int8 bulletConsumeNum at 0x13a, read from the row at each shot.
++constexpr std::size_t kWeaponRowSize = 0x13c, kBulletConsumeNum = 0x13a;
++constexpr std::uint32_t kBloodVial = 1000, kQuicksilverBullets = 900;
++constexpr auto kDebounce = std::chrono::milliseconds(400); // a slider being dragged applies once
++constexpr auto kInterval = std::chrono::milliseconds(250); // refills: at most four times a second
++constexpr auto kSettle = std::chrono::milliseconds(1500);  // in the world this long before acting
++
++// The code that shows the functions, their arguments and the layouts above (our image's bytes).
++constexpr std::uint8_t kSigRow[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x41,0x89,0xf4,
++    0x49,0x89,0xfe,0x31,0xc9,0x45,0x85,0xe4,0x0f,0x88,0xf2,0x00,0x00,0x00};
++constexpr std::uint8_t kSigCap[] = {0x55,0x48,0x89,0xe5,0x53,0x48,0x83,0xec,0x28,0x48,0x8b,0x1d,0xf0,0x53,
++    0x4c,0x03,0x48,0x8b,0x03,0x48,0x89,0x45,0xf0,0x48,0x8b,0x4f,0x08,0xb8,0x63,0x00,0x00,0x00,0x48,0x85,
++    0xc9,0x0f,0x84,0x8c,0x00,0x00,0x00,0x8b,0x51,0x42,0x0f,0xb7,0x41,0x46};
++constexpr std::uint8_t kSigCapMaxNum[] = {0x0f,0xbf,0x49,0x36,0x85,0xc9,0xb8,0x63,0x00,0x00,0x00,0x0f,0x4f,
++    0xc1};
++constexpr std::uint8_t kSigSlot[] = {0x8b,0x06,0x83,0xf8,0xff,0x0f,0x84,0xa6,0x00,0x00,0x00,0x89,0xc1,0x48,
++    0x69,0xc9,0x15,0x3f,0xef,0x03,0x48,0xc1,0xe9,0x20};
++constexpr std::uint8_t kSigAdd[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,
++    0x81,0xec,0x18,0x01,0x00,0x00,0x41,0x89,0xcd,0x41,0x89,0xd4,0x49,0x89,0xff,0x48,0x8b,0x1d,0xec,0x5b,
++    0xf1,0x03,0x48,0x8b,0x03,0x48,0x89,0x45,0xd0,0x41,0xc7,0x87,0x9c,0x02};
++// sub_18cdfd0, goods: the row (sub_231e3d0), then the inventory at EquipGameData + 0x158.
++constexpr std::uint8_t kSigAddInventory[] = {0xe8,0x22,0x02,0xa5,0x00,0x4d,0x8d,0xb7,0x58,0x01,0x00,0x00,
++    0xbe,0x00,0x00,0x00,0x40,0x4c,0x89,0xf7,0x44,0x89,0xe2,0xe8,0xbb,0xbc,0x00,0x00};
++// Using goods: the quantity changes only when the row's isConsume bit (0x42 dword, 0x800000) is set.
++constexpr std::uint8_t kSigConsume[] = {0xe8,0x0b,0xd6,0xa4,0x00,0x48,0x89,0xde,0x48,0x8b,0x45,0xa0,0x48,
++    0x85,0xc0,0x0f,0x84,0xc5,0x02,0x00,0x00,0x8b,0x40,0x42,0xa9,0x00,0x00,0x80,0x00,0x0f,0x84,0xb7,0x02,
++    0x00,0x00};
++// The fire check reads bulletConsumeNum (movsx r13d, byte [row+0x13a]) from the weapon row.
++constexpr std::uint8_t kSigBullets[] = {0xe8,0xcb,0xf8,0x62,0x00,0x48,0x8b,0x45,0x98,0x45,0x31,0xe4,0x41,
++    0xbd,0x00,0x00,0x00,0x00,0x48,0x85,0xc0,0x74,0x08,0x44,0x0f,0xbe,0xa8,0x3a,0x01,0x00,0x00};
++// A game call of sub_18cdfd0: rdi = *(*0x593b130 + 8) + 0x1d0.
++constexpr std::uint8_t kSigEquip[] = {0x48,0x8d,0x05,0x3a,0xab,0x22,0x04,0x48,0x8b,0x00,0x4c,0x8b,0x68,0x08,
++    0x49,0x8d,0xbd,0xd0,0x01,0x00,0x00};
++// The debug menu's fill: slot (sub_18d9f60), bound +0x88, first +0x24, +0x58 / +0x48, quantity +8.
++constexpr std::uint8_t kSigEntry[] = {0xe8,0x9d,0x5a,0x00,0x00,0xc7,0x85,0x34,0xfe,0xff,0xff,0x00,0x00,0x00,
++    0x00,0x85,0xc0,0x78,0x4f,0x41,0x8b,0x8c,0x24,0xe0,0x01,0x00,0x00,0xff,0xc1,0x39,0xc1,0x76,0x41,0x89,
++    0xc1,0x41,0x2b,0x8c,0x24,0x7c,0x01,0x00,0x00,0x73,0x10,0x89,0xc1,0x48,0xc1,0xe1,0x04,0x49,0x03,0x8c,
++    0x24,0xb0,0x01,0x00,0x00,0xeb,0x0c,0x48,0xc1,0xe1,0x04,0x49,0x03,0x8c,0x24,0xa0,0x01,0x00,0x00,0x83,
++    0x39,0x00,0x74,0x14,0x48,0x85,0xc9,0x74,0x0f,0x8b,0x41,0x08,0x89,0x85,0x34,0xfe,0xff,0xff};
++struct Signature { std::uint64_t bn; std::span<const std::uint8_t> bytes; };
++constexpr Signature kSignatures[] = {
++    {kGoodsRow, kSigRow}, {kGoodsCap, kSigCap}, {0x231e887, kSigCapMaxNum}, {kInventorySlot, kSigSlot},
++    {kAddItem, kSigAdd}, {0x18ce1a9, kSigAddInventory}, {0x18d0dc0, kSigConsume}, {0x1cfa1d0, kSigBullets},
++    {0x17105ef, kSigEquip}, {0x18d44be, kSigEntry},
++};
++
++std::uint64_t g_slide = 0;
++bool g_installed = false;
++// The hunter in the world for kSettle: same record and map block since then (checked every kInterval).
++std::uint64_t g_record = 0;
++std::uint32_t g_block = 0;
++Clock::time_point g_since{}, g_check{};
++bool g_present = false;
++std::uint64_t Slot(std::uint64_t bn) { return g_slide + (bn - kPreferredGuestSlide); }
++template <typename T> bool Read(std::uint64_t at, T* out) { return at && host_read_safe(reinterpret_cast<const void*>(at), out, sizeof(T)); }
++// Guest heap and data: above the null page, below 1 TiB (the guest-visible range), readable.
++bool Plausible(std::uint64_t p) { std::uint64_t v = 0; return p >= 0x10000 && p < (std::uint64_t(1) << 40) && Read(p, &v); }
++
++// A param byte a cheat may change: its original value (the snapshot) and what is there now.
++struct Byte { std::uint64_t at; std::uint8_t original, now; };
++struct Cheat {
++    const char* name;                  // the log's: "vials", "bullets"
++    std::uint32_t goods;
++    std::uint8_t cap_bit;              // useHpCureMaxNum / useBulletMaxNum
++    std::atomic<const char*> unavailable{"the engine's executable was not verified"};
++    bool disabled = false;
++    int active = BbSettings::CheatOff, pending = BbSettings::CheatOff;
++    Clock::time_point pending_since{};
++    // The snapshot: taken once from the original values, kept until the game reloads the table.
++    bool snapped = false, weapons = false;
++    std::uint64_t goods_cap = 0, goods_file = 0, weapon_cap = 0, weapon_file = 0;
++    std::vector<Byte> bytes;           // [0..1] maxNum, [2] isConsume byte, [3] cap byte, then weapons
++    int base_cap = 0;                  // the carry cap while the row's cap bytes are original
++    int floor = -1;                    // infinite: the count it keeps if the param change does not hold
++    bool floor_logged = false;
++    int failures = 0;
++};
++Cheat g_cheats[2] = {{"vials", kBloodVial, kUseHpCureMaxNum}, {"bullets", kQuicksilverBullets, kUseBulletMaxNum}};
++
++struct Handle { std::int32_t id, pad; std::uint64_t row; };
++std::uint64_t GuestRow(std::uint32_t id) {
++    Handle h{-1, 0, 0};
++    Call(Slot(kGoodsRow), &h, id);
++    return h.row;
++}
++int GuestCap(std::uint32_t id) {
++    Handle h{-1, 0, 0};
++    Call(Slot(kGoodsRow), &h, id);
++    return h.row ? static_cast<std::int32_t>(Call(Slot(kGoodsCap), &h)) : -1;
++}
++// The count held (0 when the item is not in the inventory); false if the inventory looks wrong.
++bool Count(std::uint64_t equip, std::uint32_t id, int* have) {
++    const std::uint64_t inv = equip + kInventory;
++    std::uint32_t bound = 0, first = 0;
++    std::uint64_t head = 0, rest = 0;
++    if (!Read(inv + kInvBound, &bound) || !Read(inv + kInvFirst, &first) || !Read(inv + kInvHead, &head) ||
++        !Read(inv + kInvRest, &rest) || bound > 65536 || first > bound + 1 || (!Plausible(head) && !Plausible(rest)))
++        return false;
++    std::uint32_t item[4] = {kGoods | id, 0, 0, 0};
++    const auto slot = static_cast<std::int32_t>(Call(Slot(kInventorySlot), inv, item));
++    *have = 0;
++    if (slot < 0 || static_cast<std::uint32_t>(slot) >= bound + 1) return true;
++    const auto index = static_cast<std::uint32_t>(slot);
++    if (!Plausible(index < first ? head : rest)) return false;
++    const std::uint64_t entry = index < first ? head + std::uint64_t(index) * 16 : rest + std::uint64_t(index - first) * 16;
++    std::uint32_t e[4] = {};
++    if (!Read(entry, &e)) return false;
++    if (e[0]) *have = static_cast<std::int32_t>(e[2]);
++    return *have >= 0 && *have <= 9999;
++}
++
++// The game reloaded the table (a new file): the snapshot's addresses are no longer its rows.
++bool SameTables(const Cheat& c) {
++    return params_table_file(c.goods_cap) == c.goods_file && (!c.weapons || params_table_file(c.weapon_cap) == c.weapon_file);
++}
++
++// Writes back each original value that is still the one this cheat wrote; never writes elsewhere.
++void RestoreSafe(Cheat& c) {
++    if (!c.snapped) return;
++    if (!SameTables(c)) { c.snapped = false; c.bytes.clear(); return; }
++    for (Byte& b : c.bytes) {
++        std::uint8_t current = 0;
++        if (b.now != b.original && Read(b.at, &current) && current == b.now) {
++            std::memcpy(reinterpret_cast<void*>(b.at), &b.original, 1);
++            b.now = b.original;
++        }
++    }
++}
++
++void Disable(Cheat& c, const char* why) {
++    if (c.disabled) return;
++    c.disabled = true;
++    RestoreSafe(c);
++    c.unavailable.store(why);
++    std::printf("Cheats: %s unavailable: %s\n", c.name, why);
++}
++
++// Reads one table's records and the rows' bytes (one read each); checks the rows' size.
++bool LoadTable(const char* table, std::size_t row_size, ParamTable* t, std::vector<ParamRecord>* records,
++               std::vector<std::uint8_t>* data, std::uint64_t* lo) {
++    if (!params_table(table, t) || !params_records(*t, records) || records->size() < 2 ||
++        (*records)[1].data - (*records)[0].data != row_size) return false;
++    std::uint64_t first = ~std::uint64_t(0), last = 0;
++    for (const ParamRecord& r : *records) { first = std::min(first, r.data); last = std::max(last, r.data); }
++    if (last - first > 16 * 1024 * 1024) return false;
++    data->resize(last - first + row_size);
++    *lo = first;
++    return host_read_safe(reinterpret_cast<const void*>(first), data->data(), data->size());
++}
++
++// The snapshot: the goods row's bytes (vials, bullets) and, for bullets, each weapon row's
++// bulletConsumeNum that is not 0. Checked against the game's own row lookup and plausible values.
++const char* Snapshot(Cheat& c) {
++    ParamTable goods;
++    std::vector<ParamRecord> records;
++    std::vector<std::uint8_t> data;
++    std::uint64_t lo = 0;
++    if (!LoadTable("EquipParamGoods", kGoodsRowSize, &goods, &records, &data, &lo))
++        return "EquipParamGoods not found or its rows are not 0x6c bytes";
++    const auto it = std::find_if(records.begin(), records.end(), [&](const ParamRecord& r) { return r.id == c.goods; });
++    if (it == records.end()) return "goods row missing";
++    if (GuestRow(c.goods) != it->data) return "goods row differs from the game's own lookup";
++    const std::uint8_t* row = data.data() + (it->data - lo);
++    std::int16_t max_num = 0;
++    std::memcpy(&max_num, row + kMaxNum, 2);
++    if (max_num < 1 || max_num > 999) return "goods row maxNum implausible";
++    if (c.goods == kBloodVial && !(row[kConsumeByte] & kIsConsume)) return "Blood Vial row is not consumable";
++    c.bytes.clear();
++    for (std::size_t off : {kMaxNum, kMaxNum + 1, kConsumeByte, kCapByte})
++        c.bytes.push_back({it->data + off, row[off], row[off]});
++    c.goods_cap = goods.cap;
++    c.goods_file = goods.file;
++    c.weapons = false;
++    if (c.goods == kQuicksilverBullets) {
++        ParamTable weapons;
++        std::vector<Byte> found;
++        const char* problem = nullptr;
++        if (!LoadTable("EquipParamWeapon", kWeaponRowSize, &weapons, &records, &data, &lo)) {
++            problem = "EquipParamWeapon not found or its rows are not 0x13c bytes";
++        } else {
++            // Negative values mark rows without a cost (left alone); many of them, or any value
++            // above 64, would mean the offset is wrong for this table.
++            std::size_t negative = 0;
++            for (const ParamRecord& r : records) {
++                const auto v = static_cast<std::int8_t>(data[r.data - lo + kBulletConsumeNum]);
++                if (v > 64) { problem = "a weapon's bulletConsumeNum is out of range"; break; }
++                if (v < 0) { ++negative; continue; }
++                if (v) found.push_back({r.data + kBulletConsumeNum, std::uint8_t(v), std::uint8_t(v)});
++            }
++            if (!problem && negative > found.size()) problem = "too many weapons with a negative bulletConsumeNum";
++            if (!problem && found.empty()) problem = "no weapon uses bullets";
++            if (!problem)
++                std::printf("Cheats: bullets: %zu weapons cost bullets, %zu rows without a cost left alone\n",
++                            found.size(), negative);
++        }
++        if (problem) {
++            // The weapon rows stay untouched; infinite bullets keep the count by refilling instead.
++            std::printf("Cheats: bullets: weapon params not used (%s); infinite bullets refill instead\n", problem);
++        } else {
++            c.weapons = true;
++            c.weapon_cap = weapons.cap;
++            c.weapon_file = weapons.file;
++            c.bytes.insert(c.bytes.end(), found.begin(), found.end());
++        }
++    }
++    c.snapped = true;
++    return nullptr;
++}
++
++bool CapBytesOriginal(const Cheat& c) {
++    return c.bytes[0].now == c.bytes[0].original && c.bytes[1].now == c.bytes[1].original &&
++           c.bytes[3].now == c.bytes[3].original;
++}
++
++// The bytes a mode wants: infinite clears isConsume (vials) or every weapon's bulletConsumeNum
++// (bullets); an amount above the carry cap raises the row's maxNum to it and makes the cap the
++// row's own (clears useHpCureMaxNum / useBulletMaxNum). Everything else: the original values.
++std::vector<std::uint8_t> Wanted(const Cheat& c, int mode) {
++    std::vector<std::uint8_t> want(c.bytes.size());
++    for (std::size_t i = 0; i < c.bytes.size(); ++i) want[i] = c.bytes[i].original;
++    if (mode == BbSettings::CheatInfinite) {
++        if (c.goods == kBloodVial) want[2] = std::uint8_t(c.bytes[2].original & ~kIsConsume);
++        for (std::size_t i = 4; i < c.bytes.size(); ++i) want[i] = 0;
++    } else if (mode > 0 && mode > c.base_cap) {
++        want[0] = std::uint8_t(mode & 0xff);
++        want[1] = std::uint8_t(mode >> 8);
++        want[3] = std::uint8_t(c.bytes[3].original & ~c.cap_bit);
++    }
++    return want;
++}
++
++// Brings the bytes to `want`: every byte to change is checked first (still what this cheat left
++// there), then written. A byte changed by anything else stops the cheat.
++bool Reconcile(Cheat& c, const std::vector<std::uint8_t>& want) {
++    for (std::size_t i = 0; i < c.bytes.size(); ++i) {
++        std::uint8_t current = 0;
++        if (want[i] != c.bytes[i].now && (!Read(c.bytes[i].at, &current) || current != c.bytes[i].now)) {
++            Disable(c, "a param byte changed outside the cheat");
++            return false;
++        }
++    }
++    for (std::size_t i = 0; i < c.bytes.size(); ++i) {
++        if (want[i] == c.bytes[i].now) continue;
++        std::memcpy(reinterpret_cast<void*>(c.bytes[i].at), &want[i], 1);
++        c.bytes[i].now = want[i];
++    }
++    return true;
++}
++
++// A changed setting, after the debounce.
++void Switch(Cheat& c, int mode) {
++    c.active = mode;
++    c.floor = -1;
++    c.failures = 0;
++    g_check = Clock::time_point{}; // the new mode applies at the next frame
++    if (mode == BbSettings::CheatOff) {
++        if (c.snapped && SameTables(c)) Reconcile(c, Wanted(c, mode));
++        else { c.snapped = false; c.bytes.clear(); }
++        std::printf("Cheats: %s off, params restored\n", c.name);
++    } else if (mode == BbSettings::CheatInfinite) {
++        std::printf("Cheats: infinite %s on\n", c.name);
++    } else {
++        std::printf("Cheats: %s kept at %d\n", c.name, mode);
++    }
++}
++
++// In the world, settled: params to the mode, then the count (at most every kInterval).
++void Run(Cheat& c, std::uint64_t equip) {
++    if (c.snapped && !SameTables(c)) {
++        std::printf("Cheats: %s: the game reloaded its params; applying again\n", c.name);
++        c.snapped = false;
++        c.bytes.clear();
++    }
++    if (!c.snapped) {
++        if (const char* why = Snapshot(c)) { Disable(c, why); return; }
++    }
++    if (CapBytesOriginal(c)) {
++        c.base_cap = GuestCap(c.goods);
++        if (c.base_cap < 1 || c.base_cap > 999) { Disable(c, "carry cap implausible"); return; }
++    }
++    if (!Reconcile(c, Wanted(c, c.active))) return;
++    int have = 0;
++    if (!Count(equip, c.goods, &have)) { Disable(c, "inventory not readable"); return; }
++    const int cap = GuestCap(c.goods);
++    if (cap < 1 || cap > 999) { Disable(c, "carry cap implausible"); return; }
++    int target = 0;
++    if (c.active > 0) {
++        target = std::min(c.active, cap); // never lowers a count above it
++    } else {
++        // Infinite: kept full (the carry cap), from none too. Where the param change applies,
++        // using one does not lower the count at all; otherwise it is refilled.
++        if (c.floor == cap && have < cap && !c.floor_logged) {
++            c.floor_logged = true;
++            std::printf("Cheats: %s dropped while infinite; keeping the count by refilling\n", c.name);
++        }
++        c.floor = have;
++        target = cap;
++    }
++    if (have >= target) { c.failures = 0; return; }
++    Call(Slot(kAddItem), equip, kGoods, c.goods, target - have, 1, 1, 0);
++    int after = have;
++    if (Count(equip, c.goods, &after) && after > have) c.failures = 0;
++    else if (++c.failures >= 3) Disable(c, "refill had no effect");
++}
++} // namespace
++
++bool Install(std::uint8_t* image, std::size_t size) {
++    for (const Signature& s : kSignatures) {
++        const std::size_t at = s.bn - kPreferredGuestSlide;
++        if (at > size || s.bytes.size() > size - at || std::memcmp(image + at, s.bytes.data(), s.bytes.size())) {
++            for (Cheat& c : g_cheats) {
++                c.unavailable.store("engine code differs from the verified 1.09 image");
++                std::printf("Cheats: %s unavailable: engine code differs at 0x%llx\n", c.name,
++                            static_cast<unsigned long long>(s.bn));
++            }
++            return false;
++        }
++    }
++    g_slide = reinterpret_cast<std::uint64_t>(image);
++    g_installed = true;
++    for (Cheat& c : g_cheats) c.unavailable.store(nullptr);
++    return true;
++}
++
++const char* Unavailable(Which which) { return g_cheats[which == Bullets ? 1 : 0].unavailable.load(); }
++
++void Tick() {
++    if (!g_installed) return;
++    const auto& s = BbSettings::Get();
++    const int settings[2] = {s.cheat_vials.load(std::memory_order_relaxed), s.cheat_bullets.load(std::memory_order_relaxed)};
++    bool idle = true;
++    for (int i = 0; i < 2; ++i) {
++        const Cheat& c = g_cheats[i];
++        idle = idle && (c.disabled || (settings[i] == BbSettings::CheatOff && c.pending == BbSettings::CheatOff &&
++                                       c.active == BbSettings::CheatOff));
++    }
++    if (idle) return; // both off: nothing read, nothing called
++    const auto now = Clock::now();
++    for (int i = 0; i < 2; ++i) {
++        Cheat& c = g_cheats[i];
++        if (c.disabled) continue;
++        int value = settings[i];
++        if (value != BbSettings::CheatInfinite && (value < 0 || value > BbSettings::CheatMaxAmount)) value = BbSettings::CheatOff;
++        if (value != c.pending) { c.pending = value; c.pending_since = now; }
++        if (c.pending != c.active && now - c.pending_since >= kDebounce) Switch(c, c.pending);
++    }
++    if (now < g_check) return;
++    g_check = now + kInterval;
++    // Acts only with a character loaded and in the world (not at the title, not while loading).
++    const std::uint64_t record = player_record();
++    std::uint32_t block = 0;
++    const bool present = Plausible(record) && world_player_block(&block);
++    if (!present || !g_present || record != g_record || block != g_block) {
++        g_present = present;
++        g_record = record;
++        g_block = block;
++        g_since = now;
++        for (Cheat& c : g_cheats) c.floor = -1;
++        return;
++    }
++    if (now - g_since < kSettle) return;
++    for (Cheat& c : g_cheats) {
++        if (!c.disabled && c.active != BbSettings::CheatOff) Run(c, record + kEquipGameData);
++    }
++}
++} // namespace BbEngine::Cheats
+diff --git a/gpu/shim/engine/cheats.h b/gpu/shim/engine/cheats.h
+new file mode 100644
+index 0000000..88d3e93
+--- /dev/null
++++ b/gpu/shim/engine/cheats.h
+@@ -0,0 +1,16 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Live cheats: Blood Vials and Quicksilver Bullets, infinite or kept at an amount (bbport.ini
++// cheat_vials / cheat_bullets, the in-game overlay). See cheats.cpp.
++#pragma once
++#include <cstddef>
++#include <cstdint>
++
++namespace BbEngine::Cheats {
++enum Which : int { Vials = 0, Bullets = 1 };
++/// Checks the game code the cheats rely on. Loader start, after the executable is verified.
++bool Install(std::uint8_t* image, std::size_t size);
++/// The main thread's frame hook (change_appearance.cpp FrameHook): the only place cheats act.
++void Tick();
++/// Why a cheat cannot run, for the overlay (static text), or nullptr while it can.
++const char* Unavailable(Which which);
++} // namespace BbEngine::Cheats
