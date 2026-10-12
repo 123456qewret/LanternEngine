@@ -169,6 +169,18 @@ namespace BloodborneLauncher.Core
             UpdateStateChanged?.Invoke();
         }
 
+        /// <summary>Trophies the loaded save had already earned: one line in the log, and a notification
+        /// only for a platinum they complete.</summary>
+        private void AnnounceFromSave(List<int> ids)
+        {
+            if (ids.Count == 0) return;
+            var names = ids.Where(id => id != TrophyTracker.PlatinumId && TrophyTracker.ById.ContainsKey(id))
+                .Select(id => TrophyTracker.ById[id].Name).ToList();
+            if (names.Count > 0) Log($"Trophies already earned in this save: {string.Join(", ", names)}", LogLevel.Good);
+            Announce(ids.Where(id => id == TrophyTracker.PlatinumId).ToList());
+            TrophiesChanged?.Invoke();
+        }
+
         private void Announce(List<int> ids)
         {
             if (ids.Count == 0) return;
@@ -290,6 +302,7 @@ namespace BloodborneLauncher.Core
             foreach (var line in batch)
             {
                 Announce(Trophies.Observe(line));
+                AnnounceFromSave(Trophies.ObserveSave(line));
                 Session?.Observe(line);
             }
             OutputLines.AddRange(batch);

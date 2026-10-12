@@ -7684,27 +7684,29 @@ index f176cc1..cee7291 100644
      bool IsPatchShaders() { return false; }
      bool IsPipelineCacheArchived() { return false; }
 diff --git a/gpu/shim/engine/change_appearance.cpp b/gpu/shim/engine/change_appearance.cpp
-index eff8103..ccfda8f 100644
+index eff8103..f9db012 100644
 --- a/gpu/shim/engine/change_appearance.cpp
 +++ b/gpu/shim/engine/change_appearance.cpp
-@@ -9,6 +9,8 @@
+@@ -9,6 +9,9 @@
  #include "rebirth.h"
  #include "menu_memory.h"
  #include "graphics.h"
 +#include "cheats.h"
 +#include "online_fixes.h"
++#include "trophy_sync.h"
  #include "bbport_settings.h"
  #include "bbport_platform.h"
  #include <atomic>
-@@ -159,6 +161,7 @@ std::int64_t __attribute__((sysv_abi)) FrameHook(std::uint64_t, const std::uint6
+@@ -159,6 +162,8 @@ std::int64_t __attribute__((sysv_abi)) FrameHook(std::uint64_t, const std::uint6
      BbInput::Tick();
      Camera::Tick();
      Widescreen::Tick();
 +    Cheats::Tick();
++    TrophySync::Tick();
      return 0; // The established FPS++ implementation still runs, byte for byte.
  }
  } // namespace
-@@ -168,7 +171,9 @@ void Install(std::uint8_t* image, std::size_t size) {
+@@ -168,7 +173,9 @@ void Install(std::uint8_t* image, std::size_t size) {
      const char* identity = std::getenv("BB_ENGINE_IMAGE_SHA256");
      const bool mirror = asset && *asset;
      const bool respec=std::getenv("BB_REBIRTH_ASSET");
@@ -7715,7 +7717,7 @@ index eff8103..ccfda8f 100644
      if (!identity || std::strcmp(identity, "071df19c8880086d97182dbc057bc8cb37badaca57d9112683836b24a0444c0a")) {
          Log("mirror disabled: executable identity was not verified"); return;
      }
-@@ -180,7 +185,6 @@ void Install(std::uint8_t* image, std::size_t size) {
+@@ -180,7 +187,6 @@ void Install(std::uint8_t* image, std::size_t size) {
          !std::filesystem::equivalent(resolved, std::filesystem::path(original) / "dvdroot_ps4/map/mapstudio/m21_00_00_00.msb.dcx", error))) {
          Log("mirror disabled: a user mod owns the Dream layout");
          asset = nullptr;
@@ -7723,7 +7725,7 @@ index eff8103..ccfda8f 100644
      }
      Hook hooks[2];
      if (!Prepare(hooks[0], image, size, 0x1c1cce0, kStepPrologue, StepHook) ||
-@@ -204,7 +208,9 @@ void Install(std::uint8_t* image, std::size_t size) {
+@@ -204,7 +210,9 @@ void Install(std::uint8_t* image, std::size_t size) {
          Log("mirror disabled: native editor memory budget differs");
      }
      const bool rebirth=menus && Rebirth::Install(image,size);
@@ -15116,6 +15118,90 @@ index 0000000..1b042f6
 +/// Loader start, after the executable is verified: nothing unless online. Commits its own hook.
 +bool Install(std::uint8_t* image, std::size_t size);
 +} // namespace BbEngine::OnlineFixes
+diff --git a/gpu/shim/engine/trophy_sync.cpp b/gpu/shim/engine/trophy_sync.cpp
+new file mode 100644
+index 0000000..0414afd
+--- /dev/null
++++ b/gpu/shim/engine/trophy_sync.cpp
+@@ -0,0 +1,63 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// The game unlocks a trophy only as it happens: a save imported from a PS4 (or played on another
++// port) never reports the bosses it had already defeated. Their defeat flags - set by the game
++// when a boss dies, and kept in the save - are read once a character is in the world, and each
++// one set is reported as earned in this save ("Runtime: trophy N earned in this save"), which the
++// launcher records without a notification per trophy. Defeat flags from droogie/bbhost's boss
++// rush table (plugins/boss_rush/boss_rush.cpp, 566184a), taken from the game's own data; trophy
++// ids are the game's (TROP.SFM order, the launcher's Core/Trophies.cs).
++#include "trophy_sync.h"
++#include "engine_state.h"
++#include <bitset>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++
++namespace BbEngine::TrophySync {
++namespace {
++struct Boss {
++    int trophy;
++    std::uint32_t defeat_flag;
++};
++constexpr Boss kBosses[] = {
++    {21, 12411700}, // Cleric Beast
++    {14, 12411800}, // Father Gascoigne
++    {22, 12301800}, // Blood-starved Beast
++    {15, 12401800}, // Vicar Amelia
++    {23, 12201800}, // The Witch of Hemwick
++    {24, 12301700}, // Darkbeast Paarl
++    {16, 12701800}, // Shadow of Yharnam
++    {17, 13201800}, // Rom, the Vacuous Spider
++    {18, 12801800}, // The One Reborn
++    {26, 12501800}, // Martyr Logarius
++    {25, 13301800}, // Amygdala
++    {27, 12421700}, // Celestial Emissary
++    {28, 12421800}, // Ebrietas, Daughter of the Cosmos
++    {20, 12601800}, // Mergo's Wet Nurse
++    {36, 13401800}, // Ludwig, the Holy Blade
++    {38, 13501850}, // Living Failures
++    {37, 13501800}, // Lady Maria of the Astral Clocktower
++    {39, 13401850}, // Laurence, the First Vicar
++    {35, 13601800}, // Orphan of Kos
++};
++constexpr int kBossCount = int(sizeof(kBosses) / sizeof(kBosses[0]));
++
++std::bitset<kBossCount> g_reported;
++std::chrono::steady_clock::time_point g_next{};
++} // namespace
++
++void Tick() {
++    if (g_reported.all()) return;
++    // A few seconds apart: the flags come with the save, before the world appears.
++    const auto now = std::chrono::steady_clock::now();
++    if (now < g_next) return;
++    g_next = now + std::chrono::seconds(3);
++    if (!player_record() || !world_player_block(nullptr)) return;
++    for (int i = 0; i < kBossCount; ++i) {
++        bool defeated = false;
++        if (g_reported.test(i) || !event_flag_get(kBosses[i].defeat_flag, &defeated) || !defeated) continue;
++        g_reported.set(i);
++        std::printf("Runtime: trophy %d earned in this save\n", kBosses[i].trophy);
++    }
++}
++} // namespace BbEngine::TrophySync
+diff --git a/gpu/shim/engine/trophy_sync.h b/gpu/shim/engine/trophy_sync.h
+new file mode 100644
+index 0000000..ffaf36b
+--- /dev/null
++++ b/gpu/shim/engine/trophy_sync.h
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Trophies a save has already earned (bosses it has defeated) are reported as earned, so an
++// imported save, or one from another port, counts what it had. See trophy_sync.cpp.
++#pragma once
++
++namespace BbEngine::TrophySync {
++/// The main thread's frame hook (change_appearance.cpp FrameHook).
++void Tick();
++} // namespace BbEngine::TrophySync
 diff --git a/src/respawn_patch.h b/src/respawn_patch.h
 new file mode 100644
 index 0000000..c73a186

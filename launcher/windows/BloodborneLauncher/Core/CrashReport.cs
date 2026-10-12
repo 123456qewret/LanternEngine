@@ -30,6 +30,10 @@ namespace BloodborneLauncher.Core
                 return "A frame reached the screen out of order (a timing race in the engine; Precise frame pacing makes it likelier).";
             if (Has("DEVICE_LOST") || Has("device lost"))
                 return "The graphics driver stopped responding: the GPU hung or lost the game's memory.";
+            if (Has("ErrorOutOfDeviceMemory") || Has("ErrorOutOfHostMemory"))
+                return "The graphics card ran out of video memory. A lower output resolution or upscaler preset (Graphics), " +
+                       "fewer texture or model mods, and closing other programs (browsers, recorders) leave it more room; " +
+                       "keep \"Use more VRAM for textures\" off on cards with 4-6 GB.";
             // The engine's own message: "GPU [Debug] <Critical> file:line Function: text", maybe
             // followed by a detail line ("data_fmt = 7") before the STOP line.
             var critical = tail.FindLastIndex(l => l.Contains("<Critical>", StringComparison.Ordinal));

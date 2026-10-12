@@ -74,6 +74,9 @@ namespace BloodborneLauncher.Core
         public static readonly Dictionary<int, Trophy> ById = All.ToDictionary(t => t.Id);
         private static readonly int[] PlatinumNeeds = All.Where(t => !t.Dlc && t.Id != PlatinumId).Select(t => t.Id).ToArray();
         private static readonly Regex UnlockLine = new(@"Runtime: trophy (\d+) unlocked", RegexOptions.Compiled);
+        // Trophies a save already had (the engine's trophy_sync.cpp: bosses it had defeated), as an
+        // imported save reports them: recorded without a notification each.
+        private static readonly Regex SaveLine = new(@"Runtime: trophy (\d+) earned in this save", RegexOptions.Compiled);
 
         private string _userDir = "";
         private (long, DateTime)? _logStamp, _runStamp;
@@ -158,6 +161,13 @@ namespace BloodborneLauncher.Core
             return ids.Count == 0 ? new List<int>() : Record(ids, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         }
 
+        /// <summary>A line of the running game's output: trophies the loaded save had already earned.</summary>
+        public List<int> ObserveSave(string line)
+        {
+            var ids = SaveLine.Matches(line).Select(m => int.Parse(m.Groups[1].Value)).ToList();
+            return ids.Count == 0 ? new List<int>() : Record(ids, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        }
+
         private static (long, DateTime)? Stamp(string path)
         {
             try
@@ -234,7 +244,7 @@ namespace BloodborneLauncher.Core
                 _runTail = chunk[Math.Max(0, end - 64)..end];
 
                 var text = Encoding.UTF8.GetString(chunk, 0, end);
-                var ids = UnlockLine.Matches(text).Select(m => int.Parse(m.Groups[1].Value)).ToList();
+                var ids = UnlockLine.Matches(text).Concat(SaveLine.Matches(text)).Select(m => int.Parse(m.Groups[1].Value)).ToList();
                 return ids.Count == 0 ? ids : Record(ids, new DateTimeOffset(stamp.Value.Item2).ToUnixTimeSeconds());
             }
             catch
