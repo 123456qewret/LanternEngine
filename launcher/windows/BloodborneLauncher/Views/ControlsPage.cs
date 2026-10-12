@@ -63,6 +63,8 @@ namespace BloodborneLauncher.Views
             IniToggle(SymbolRegular.ArrowRotateClockwise24, "Camera auto-rotation", "Let the camera turn by itself with movement, as with a gamepad",
                 "mouse_auto_rotation", mouse);
             Body.Children.Add(mouse);
+            ToggleRow(SymbolRegular.CursorHoverOff24, "Hide mouse cursor", "Hidden 2 seconds after the mouse stops moving; moving it brings it back",
+                () => Ini.Get("hide_cursor", "1") != "0", v => Ini.Set("hide_cursor", v ? "1" : "0"));
             void Enable() => mouse.IsEnabled = pc.IsChecked == true;
             pc.Click += (_, _) => { Enable(); Rebuild(); };
             Enable();
