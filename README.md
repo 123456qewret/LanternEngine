@@ -2,6 +2,8 @@
 
 Bloodborne on Windows in one package: launcher and engine. You only need your own game dump.
 
+**Community:** [join the Discord](https://discord.gg/d3Uv3Cfr5x) for help, news, co-op partners and beta feedback.
+
 **No game files are included.** Bring a decrypted Bloodborne dump (CUSA03173 or another
 region) with update 1.09.
 
