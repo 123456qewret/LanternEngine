@@ -1,8 +1,8 @@
 # Engine
 
-Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc) at tag
-`v0.4.0-darkizuku-preview.1` with the changes in `bbhost-changes.patch` (engine) and
-`run-windows-frame-rate.patch` (`scripts/run_windows.py`).
+The engine as developed here. Our work is `bbhost-changes.patch` (engine) and `run-windows-frame-rate.patch`
+(`scripts/run_windows.py`), applied to its starting point, [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
+at tag `v0.4.0-darkizuku-preview.1`.
 
 ## Changes
 

@@ -1,6 +1,6 @@
 # Bloodborne PC
 
-Bloodborne on Windows in one package: launcher and engine. You only need your own game dump.
+Bloodborne on Windows in one package: our launcher and our own engine. You only need your own game dump.
 
 **Community:** [join the Discord](https://discord.gg/d3Uv3Cfr5x) for help, news, co-op partners and beta feedback.
 
@@ -19,7 +19,7 @@ The launcher updates itself from the Releases page.
 ## Features
 
 - **Play**: game folder check, player profiles (each with its own saves and trophies), automatic save backups with restore, session summary.
-- **Display**: resolution, fullscreen, widescreen (21:9, 32:9), HDR output, 30 to 144 FPS or uncapped, in-game menu in 9 languages.
+- **Display**: resolution, fullscreen, widescreen (21:9, 32:9), native HDR, 30 to 144 FPS or uncapped, in-game menu in 9 languages.
 - **Graphics**: FSR 4, FSR 3, DLSS and DLAA, TAA, sharpening, occlusion culling, picture and camera tuning, best settings for your PC.
 - **Controls**: keyboard and mouse for every action, controller remapping, stick options, live controller detection, shareable profiles.
 - **Cheats**: Blood Vials and Quicksilver Bullets (infinite or a set amount), infinite consumables and stamina, stealth, no weapon wear, firearm range, keep echoes on death, echo multiplier. Each can be turned off.
@@ -59,15 +59,26 @@ install into a package folder instead of `LauncherApp/`.
 
 ## Engine
 
-Our Windows build of the engine, with our own changes: performance and stutter work, VRAM cleanup,
-uncapped FPS, controller support, cheats, more menu languages and crash fixes. The patch, the full list and build
-steps are in [engine/](engine/).
+The engine is developed here. It started from [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
+(built on bbport and shadPS4) and has been reworked for Windows since: about 10,000 lines changed or added
+across nearly 100 files.
+
+- **Performance**: occlusion culling with real query results, cached texture, sampler and render target lookups,
+  the end of each frame handed to the draw thread, render threads first, uncapped FPS. Up to the 120 FPS cap in
+  busy areas on a Ryzen 5 5600 with an RTX 5060.
+- **Picture**: native HDR (highlights from the game's own HDR scene), DLSS texture LOD bias, FSR 4 balanced model.
+- **Stability**: fixes for silent crashes (0xC0000005), exit 23 asserts, low memory and display loss; crash
+  reports and dumps; a GPU hang guard; VRAM cleanup.
+- **Sound**: the game's audio threads at their PS4 priority on Windows.
+- **Game**: cheats, menu languages, controller support, online with The Hunter's Dream.
+
+The patch against the starting point, every change with its switch, and build steps are in [engine/](engine/).
 
 ## Credits
 
 | | |
 |---|---|
-| Engine base | [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc) (built on [bbport](https://github.com/deadinside28/bloodborne_pc) and [shadPS4](https://github.com/shadps4-emu/shadPS4)) |
+| Engine starting point | [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc) (built on [bbport](https://github.com/deadinside28/bloodborne_pc) and [shadPS4](https://github.com/shadps4-emu/shadPS4)) |
 | VRAM cleanup | adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR) |
 | Crash and controller fixes | adapted from [AwesomeObserver](https://github.com/AwesomeObserver/bloodborne_pc), [Supermedo](https://github.com/Supermedo/bloodborne_pc) and [deadinside28](https://github.com/deadinside28/bloodborne_pc) |
 | Cheats and occlusion culling research | [droogie/bbhost](https://github.com/droogie/bbhost) |
