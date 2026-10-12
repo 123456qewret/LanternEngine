@@ -39,7 +39,9 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | The mouse cursor hidden 2 s after the mouse last moved (it was always shown on Windows unless the mouse camera was on) | `hide_cursor` |
 | Online: the client reports what it is after signing in (shadNet 0.0.34 signs out clients that report nothing); a rejection is logged and signs out at once | `BB_CLIENT_VERSION` |
 | Launch: the boot image (prepare, link_libc, link_modules, content profile) is reused while its inputs are unchanged, about 10 s a launch | `out/prepared.json` |
-| Loading profile: the main, render and resource-loading threads sampled every 2 ms, their hottest game and engine code in the log every 5 s | `BB_SAMPLE_THREADS=load` |
+| Loading profile: the game's main loop, render and resource-loading threads and the engine's GPU command and recording threads sampled every 2 ms, their hottest game and engine code in the log every 5 s | `BB_SAMPLE_THREADS=load` |
+| Patches check the executable first: a built-in patch whose write sites differ from the standard 1.09 (CRC-32s in `patches/Bloodborne-1.09-sites.json`) is left out and logged instead of writing into other code | |
+| A patch that enlarges the game's heaps (resolution patches above 1080p from the patches folder) gets the 9152 MiB pool; a full pool is logged and explained in the crash report | `BB_DMEM_MB` |
 | Online: a network drop of the shadNet connection keeps the game signed in for 90 s while it reconnects (it returned to the title menu) | |
 | Online co-op: shadNet server framing for signaling, UPnP port mapping (Supermedo 004d2c37), P2P port 3658 by default, play logs to the game server | `SHADPS4_P2P_PORT` |
 | In-game PC Colour page (brightness, contrast, saturation, hue from the game's own tone map) and a fog slider on PC Graphics, live; the same in the launcher's Picture tuning | `graphics_brightness`, `graphics_contrast`, `graphics_hue`, `graphics_fog` |

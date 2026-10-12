@@ -28,6 +28,11 @@ namespace BloodborneLauncher.Core
             bool Has(string text) => tail.Any(l => l.Contains(text, StringComparison.OrdinalIgnoreCase));
             if (Has("Out of order flip IRQ"))
                 return "A frame reached the screen out of order (a timing race in the engine; Precise frame pacing makes it likelier).";
+            // The game's memory pool full: the game doesn't check the failed allocation and crashes on
+            // it a moment later ("writing address 0").
+            if (Has("the game's memory pool is full"))
+                return "The game ran out of its memory pool: a patch from Mods → Third-party patches enlarges the game's memory " +
+                       "(a resolution patch above 1080p, for example). Turn it off and choose the resolution in Display → Output resolution instead.";
             // Out of video memory first: a device lost often follows it in the same log.
             if (Has("ErrorOutOfDeviceMemory") || Has("ErrorOutOfHostMemory"))
                 return "The graphics card ran out of video memory. A lower output resolution or upscaler preset (Graphics), " +
