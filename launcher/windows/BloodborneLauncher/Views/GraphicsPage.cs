@@ -80,6 +80,9 @@ namespace BloodborneLauncher.Views
             SettingToggle(SymbolRegular.FastForward24, "Faster draw thread",
                 "Remembers texture and sampler lookups and hands the end of each frame to the draw thread: higher FPS in busy areas. New: turn it off if the game hangs or crashes",
                 "exp_fast_draws");
+            SettingToggle(SymbolRegular.Shapes24, "No shader freezes",
+                "While a new shader compiles, the objects that need it appear a moment later instead of the game freezing. New: turn it off if something stays missing",
+                "exp_compile_skip");
             SettingToggle(SymbolRegular.Run24, "Sharper motion (FSR 4)",
                 "Uses FSR 4's balanced model at Performance and Ultra Performance: fewer trails behind moving characters, a little more GPU time",
                 "fsr4_balanced");

@@ -65,6 +65,9 @@ namespace BloodborneLauncher.Views
             SettingCombo(SymbolRegular.Flow20, "Two-stage GPU pipeline", "20–30% faster; turn off if the game is unstable",
                 Choices.DrawPipe, "draw_pipe");
             SettingCombo(SymbolRegular.ArrowSwap24, "CPU reads of GPU data", "Relaxed is the default", Choices.Readbacks, "readbacks");
+            SettingToggle(SymbolRegular.Speaker224, "Sound threads first",
+                "For CPUs with many slower cores (older Xeons and similar): the game's sound runs before its other threads, against late or stuttering sound. Off by default",
+                "audio_priority");
 
             Group("Diagnostics");
             SettingToggle(SymbolRegular.TextBulletListSquare24, "Frame statistics in the log", "BB_FRAME_STATS", "frame_stats");

@@ -127,7 +127,7 @@ index 7a41a21..858148e 100644
  # Third-party decoders: compiled once, without this project's -Werror policy.
  atrac9=(third_party/LibAtrac9/C/src/*.c)
 diff --git a/gpu/CMakeLists.txt b/gpu/CMakeLists.txt
-index f51df72..d0a65e2 100644
+index f51df72..5db6764 100644
 --- a/gpu/CMakeLists.txt
 +++ b/gpu/CMakeLists.txt
 @@ -16,6 +16,14 @@ add_compile_options(-fno-omit-frame-pointer)
@@ -191,17 +191,26 @@ index f51df72..d0a65e2 100644
      # bb-probe.exe links libbbgpu.a with these (out/gpu/bbgpu_link.txt, one argument per line,
      # in link order): the static library's transitive dependencies.
      include(cmake/LinkClosure.cmake)
-@@ -242,6 +272,9 @@ target_link_libraries(pipeline-archive-test PRIVATE fmt::fmt)
+@@ -242,6 +272,18 @@ target_link_libraries(pipeline-archive-test PRIVATE fmt::fmt)
  add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
  target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(motion-history-test PRIVATE ..)
 +add_executable(occlusion-test EXCLUDE_FROM_ALL ../tests/test_occlusion.cpp)
 +target_compile_options(occlusion-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 +target_include_directories(occlusion-test PRIVATE ..)
++# Pipeline compiles off the frame path (docs/pipeline_compiles.md); the draw pipe's waits run
++# with real threads (bbgpu: the platform and thread helpers).
++add_executable(pipeline-compile-test EXCLUDE_FROM_ALL ../tests/test_pipeline_compile.cpp ../tests/test_gpu_runtime_stubs.cpp)
++target_compile_options(pipeline-compile-test PRIVATE -UNDEBUG)
++target_include_directories(pipeline-compile-test PRIVATE shim shadps4 third_party/gcn/include)
++target_link_libraries(pipeline-compile-test PRIVATE bbgpu)
++if (WIN32)
++    target_link_libraries(pipeline-compile-test PRIVATE winmm ws2_32 psapi onecore)
++endif()
  add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
  target_compile_options(motion-shader-test PRIVATE -UNDEBUG)
  target_include_directories(motion-shader-test PRIVATE shim shadps4 third_party/gcn/include)
-@@ -252,7 +285,8 @@ endif()
+@@ -252,7 +294,8 @@ endif()
  add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
  target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(ui-composition-test PRIVATE ..)
@@ -211,7 +220,7 @@ index f51df72..d0a65e2 100644
  target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(settings-test PRIVATE .. shim)
  
-@@ -278,9 +312,16 @@ target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
+@@ -278,9 +321,16 @@ target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
  target_link_libraries(camera-motion-test PRIVATE bbgpu)
  add_dependencies(camera-motion-test host_shaders)
  
@@ -229,7 +238,7 @@ index f51df72..d0a65e2 100644
  target_include_directories(upscaler-support-test PRIVATE shim)
  target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
  
-@@ -315,6 +356,7 @@ target_include_directories(pc-input-test PRIVATE shim)
+@@ -315,6 +365,7 @@ target_include_directories(pc-input-test PRIVATE shim)
  target_link_libraries(pc-input-test PRIVATE PkgConfig::SDL3)
  target_compile_options(pc-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  add_executable(widescreen-test EXCLUDE_FROM_ALL ../tests/test_widescreen.cpp
@@ -401,7 +410,7 @@ index a300d10..ae628fd 100644
      std::chrono::nanoseconds target_interval{};
      std::chrono::nanoseconds total_wait{};
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
-index 30de04f..fe45c0c 100644
+index 30de04f..cd1ab02 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
 +++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
 @@ -2,6 +2,7 @@
@@ -412,7 +421,15 @@ index 30de04f..fe45c0c 100644
  #include <cmath>
  #include <vector>
  #include <chrono>
-@@ -372,6 +373,23 @@ static void PrintMemory() {
+@@ -33,6 +34,7 @@ extern "C" void runtime_wait_report(double frames);
+ #include "core/libraries/videoout/videoout_error.h"
+ #include "imgui/renderer/imgui_core.h"
+ #include "video_core/amdgpu/liverpool.h"
++#include "video_core/renderer_vulkan/pipeline_compile_queue.h"
+ #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_presenter.h"
+@@ -372,6 +374,23 @@ static void PrintMemory() {
  #endif
  }
  
@@ -436,7 +453,7 @@ index 30de04f..fe45c0c 100644
  void VideoOutDriver::Flip(const Request& req) {
      // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
      RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
-@@ -381,6 +399,14 @@ void VideoOutDriver::Flip(const Request& req) {
+@@ -381,6 +400,14 @@ void VideoOutDriver::Flip(const Request& req) {
      Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                  : 0);
  
@@ -451,7 +468,36 @@ index 30de04f..fe45c0c 100644
      // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
      static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
      if (frame_stats) {
-@@ -753,8 +779,18 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
+@@ -587,6 +614,28 @@ void VideoOutDriver::Flip(const Request& req) {
+                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
+                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
+                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
++            // bbport (docs/pipeline_compiles.md): what draws of pipelines still compiling did.
++            {
++                auto& p = Vulkan::pipeline_compile_stats;
++                const u64 background = p.background.exchange(0), taken = p.taken.exchange(0);
++                const u64 skipped = p.skipped_draws.exchange(0);
++                const u64 skipped_pipelines = p.skipped_pipelines.exchange(0);
++                const u64 late = p.late_binds.exchange(0), waits = p.waits.exchange(0);
++                const u64 wait_ns = p.wait_ns.exchange(0), longest = p.longest_wait_ns.exchange(0);
++                if (background + skipped + late + waits != 0) {
++                    std::printf("Pipelines: %llu compiled in the background (%llu by the thread "
++                                "that needed them); %llu draws of %llu pipelines left out while "
++                                "compiling; %llu draws/dispatches bound on the recording threads; "
++                                "%llu waits, %.1f ms, longest %.1f ms\n",
++                                static_cast<unsigned long long>(background),
++                                static_cast<unsigned long long>(taken),
++                                static_cast<unsigned long long>(skipped),
++                                static_cast<unsigned long long>(skipped_pipelines),
++                                static_cast<unsigned long long>(late),
++                                static_cast<unsigned long long>(waits), wait_ns / 1e6,
++                                longest / 1e6);
++                }
++            }
+             VideoCore::PageManager::ReportFaultSites();
+             if (const u64 notes = BbStats::cpu_write_notes.exchange(0)) {
+                 std::printf("Write notices: %.0f/s, %.2f MB/s (libc copies over pages the GPU side "
+@@ -753,8 +802,18 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
      {
          std::unique_lock lock{port->port_mutex};
          if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -472,7 +518,7 @@ index 30de04f..fe45c0c 100644
          }
  
          if (is_eop) {
-@@ -813,8 +849,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -813,8 +872,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
                                            : std::chrono::nanoseconds(0);
      auto next_flip = std::chrono::steady_clock::now();
@@ -484,7 +530,7 @@ index 30de04f..fe45c0c 100644
  
      const auto receive_request = [this] -> Request {
          std::scoped_lock lk{mutex};
-@@ -831,6 +868,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -831,6 +891,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      // next vblank tick.
      const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
  
@@ -622,7 +668,7 @@ index 30de04f..fe45c0c 100644
      while (!token.stop_requested()) {
          timer.Start();
          const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
-@@ -864,29 +1032,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -864,29 +1055,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
              }
          }
  
@@ -1457,7 +1503,7 @@ index 21a2260..fc52fad 100644
  }
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
-index a123982..a9c39b6 100644
+index a123982..8e8907c 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
 @@ -2,6 +2,7 @@
@@ -1485,7 +1531,7 @@ index a123982..a9c39b6 100644
 +        job->info = compute_pipeline_ci;
 +        job->info.stage.pNext = shader_ci.pNext ? &job->subgroup_size : nullptr;
 +        ready.store(false, std::memory_order_relaxed);
-+        SubmitPipelineJob([this, job, device, cache = pipeline_cache, name = debug_str] {
++        SubmitPipelineJob(this, [this, job, device, cache = pipeline_cache, name = debug_str] {
 +            auto [result, created] = device.createComputePipelineUnique(cache, job->info);
 +            ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
 +                       vk::to_string(result));
@@ -1509,10 +1555,56 @@ index a123982..a9c39b6 100644
  
  } // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
-index 0e80933..6a947e6 100644
+index 0e80933..954f6de 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
-@@ -168,6 +168,16 @@ public:
+@@ -112,18 +112,23 @@ public:
+         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
+         ++drains_by_reason[slot];
+         const u64 start = __rdtsc();
+-        for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
+-            if (spins < 4096) {
+-                __builtin_ia32_pause();
+-            } else {
+-                std::this_thread::yield();
+-            }
+-        }
++        WaitUntil([this] { return consumed.load(std::memory_order_acquire) == head; },
++                  [this] { return packets; });
+         const u64 waited = __rdtsc() - start;
+         drain_cycles += waited;
+         cycles_by_reason[slot] += waited;
+     }
+ 
++    /// bbport: whether stage A's waits sleep once they outlast a spin (BB_DRAIN_SLEEP=0: they
++    /// spin and yield to the end, as before), and how long they spin first (BB_DRAIN_SPIN_US).
++    static bool SleepEnabled() {
++        static const bool enabled = [] {
++            const char* env = std::getenv("BB_DRAIN_SLEEP");
++            return !(env && env[0] == '0');
++        }();
++        return enabled;
++    }
++
+     /// Stage A: the number the next committed packet gets (packets are numbered from 1), and
+     /// whether stage B has run the packet with that number.
+     [[nodiscard]] u64 NextPacket() const noexcept {
+@@ -141,13 +146,7 @@ public:
+         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
+         ++drains_by_reason[slot];
+         const u64 start = __rdtsc();
+-        for (u32 spins = 0; !ReachedPacket(number); ++spins) {
+-            if (spins < 4096) {
+-                __builtin_ia32_pause();
+-            } else {
+-                std::this_thread::yield();
+-            }
+-        }
++        WaitUntil([this, number] { return ReachedPacket(number); }, [number] { return number; });
+         const u64 waited = __rdtsc() - start;
+         drain_cycles += waited;
+         cycles_by_reason[slot] += waited;
+@@ -168,14 +167,24 @@ public:
      [[nodiscard]] u64 Consumed() const noexcept {
          return consumed.load(std::memory_order_acquire);
      }
@@ -1529,7 +1621,87 @@ index 0e80933..6a947e6 100644
      /// Stage B: bytes of packets committed and not run yet (the work queued for this thread).
      [[nodiscard]] u64 Backlog() const noexcept {
          return published.load(std::memory_order_acquire) - consumed.load(std::memory_order_relaxed);
-@@ -197,6 +207,7 @@ private:
+     }
+ 
+     /// Statistics (stage A): packets, drains that had to wait, cycles waited, cycles stage B
+-    /// spent running packets.
+-    u64 packets = 0, drains = 0, drain_cycles = 0;
++    /// spent running packets, waits that went to sleep.
++    u64 packets = 0, drains = 0, drain_cycles = 0, sleeps = 0;
+     std::atomic<u64> busy_cycles{0};
+ 
+ private:
+@@ -184,19 +193,76 @@ private:
+         u32 payload; ///< bytes written by the producer
+     };
+     static constexpr u64 Capacity = 16ull << 20;
++    static constexpr u64 NoWaiter = ~u64{0};
+ 
+     static constexpr u32 Align(u32 size) {
+         return (size + 63) & ~63u;
+     }
+ 
+     void WaitForSpace(u64 at, u64 size) {
+-        while (at + size - consumed.load(std::memory_order_acquire) > Capacity) {
++        if (at + size - consumed.load(std::memory_order_acquire) <= Capacity) {
++            return;
++        }
++        WaitUntil(
++            [this, at, size] {
++                return at + size - consumed.load(std::memory_order_acquire) <= Capacity;
++            },
++            [this] { return consumed_packets.load(std::memory_order_relaxed) + 1; });
++    }
++
++    /// Stage A: waits until `done()`. bbport: spins (most waits end within microseconds),
++    /// yields for up to BB_DRAIN_SPIN_US (500), then sleeps until stage B has run packet
++    /// `target()` (it wakes this thread, Run). A long packet (an image created or uploaded with
++    /// memory short, a pipeline compile) kept this thread in SwitchToThread for all of it: ~200
++    /// ms of kernel time in a 330 ms stall, a core taken from the threads doing the work.
++    template <typename Done, typename Target>
++    void WaitUntil(Done&& done, Target&& target) {
++        for (u32 spins = 0; spins < 4096; ++spins) {
++            if (done()) {
++                return;
++            }
+             __builtin_ia32_pause();
+         }
++        static const auto spin_time = std::chrono::microseconds([] {
++            const char* env = std::getenv("BB_DRAIN_SPIN_US");
++            return env && env[0] ? std::max(0, std::atoi(env)) : 500;
++        }());
++        const auto sleep_after = std::chrono::steady_clock::now() + spin_time;
++        while (!done()) {
++            if (!SleepEnabled() || std::chrono::steady_clock::now() < sleep_after) {
++                std::this_thread::yield();
++                continue;
++            }
++            // Announced before the check, which stage B's count update and announcement check
++            // mirror (sequentially consistent both): either this check sees the packet run, or
++            // stage B sees the target and wakes this thread.
++            const u64 wait_for = target();
++            const u32 seen = drained.load(std::memory_order_seq_cst);
++            wake_at.store(wait_for, std::memory_order_seq_cst);
++            const bool asleep =
++                consumed_packets.load(std::memory_order_seq_cst) < wait_for && !done();
++            if (asleep) {
++                ++sleeps;
++                drained.wait(seen, std::memory_order_seq_cst);
++            }
++            wake_at.store(NoWaiter, std::memory_order_relaxed);
++            if (!asleep) {
++                std::this_thread::yield(); // the packet ran, the position follows at once
++            }
++        }
++    }
++
++    /// Stage B: stage A sleeps until the packet just run (WaitUntil).
++    void WakeStageA() {
++        if (wake_at.exchange(NoWaiter, std::memory_order_seq_cst) != NoWaiter) {
++            drained.fetch_add(1, std::memory_order_seq_cst);
++            drained.notify_all();
++        }
+     }
  
      void Run(std::stop_token stop) {
          Common::SetCurrentThreadName("bb:DrawRec");
@@ -1537,7 +1709,7 @@ index 0e80933..6a947e6 100644
          on_stage_b = true;
          BbSections::recording_thread = true;
          stage_b_tid.store(BbPlatform::CurrentThreadId(), std::memory_order_release);
-@@ -212,7 +223,7 @@ private:
+@@ -212,7 +278,7 @@ private:
                      if (const char* env = std::getenv("BB_PIPE_SPIN_US")) {
                          return std::max(0, std::atoi(env));
                      }
@@ -1546,7 +1718,7 @@ index 0e80933..6a947e6 100644
                  }());
                  const auto spin_until = std::chrono::steady_clock::now() + spin_time;
                  for (u32 spins = 1; available == at; ++spins) {
-@@ -239,6 +250,7 @@ private:
+@@ -239,11 +305,18 @@ private:
                  continue;
              }
              const u64 start = __rdtsc();
@@ -1554,7 +1726,19 @@ index 0e80933..6a947e6 100644
              handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
              busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
              at += header->size;
-@@ -256,6 +268,7 @@ private:
+-            consumed_packets.fetch_add(1, std::memory_order_release);
++            // bbport: the position first, then the count stage A's sleeping waits look at (it
++            // finds the position past the packet once the count says so), then whether one of
++            // them waits for this packet: a load and a branch per packet.
+             consumed.store(at, std::memory_order_release);
++            const u64 run = consumed_packets.fetch_add(1, std::memory_order_seq_cst) + 1;
++            if (run >= wake_at.load(std::memory_order_seq_cst)) [[unlikely]] {
++                WakeStageA();
++            }
+         }
+     }
+ 
+@@ -256,9 +329,15 @@ private:
      alignas(64) std::atomic<u64> published{0};
      alignas(64) std::atomic<u64> consumed{0};
      std::atomic<u64> consumed_packets{0}; ///< packets stage B has run (NextPacket numbers)
@@ -1562,6 +1746,14 @@ index 0e80933..6a947e6 100644
      alignas(64) std::atomic<u32> wake{0};
      std::atomic<bool> sleeping{false};
      std::atomic<u32> stage_b_tid{0};
++    /// bbport: the packet a sleeping wait of stage A needs run (NoWaiter: none), read by stage B
++    /// after every packet (its own line: written only when stage A goes to sleep), and the word
++    /// stage A sleeps on (WaitUntil, WakeStageA).
++    alignas(64) std::atomic<u64> wake_at{NoWaiter};
++    alignas(64) std::atomic<u32> drained{0};
+     std::jthread thread;
+ };
+ 
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_prep.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_prep.cpp
 index e71cccf..2bf24a8 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_prep.cpp
@@ -1606,10 +1798,10 @@ index 995eb38..d2f9c82 100644
      case 0:
          return FFX_FSR4_MODEL_PRESET_NATIVE_AA;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
-index 87381c5..0470c03 100644
+index 87381c5..6a003da 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
-@@ -2,10 +2,21 @@
+@@ -2,15 +2,27 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include <algorithm>
@@ -1631,7 +1823,13 @@ index 87381c5..0470c03 100644
  #include "common/serdes.h"
  #include "common/assert.h"
  #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
-@@ -21,6 +32,99 @@ namespace Vulkan {
+ #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
++#include "video_core/renderer_vulkan/pipeline_compile_queue.h"
+ #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_object_motion.h"
+@@ -21,6 +33,101 @@ namespace Vulkan {
  
  using Shader::Backend::SPIRV::AuxShaderType;
  
@@ -1686,52 +1884,54 @@ index 87381c5..0470c03 100644
 +        return *compiler;
 +    }
 +
-+    void Submit(std::function<void()> job) {
-+        {
-+            std::scoped_lock lk{mutex};
-+            jobs.push_back(std::move(job));
-+        }
-+        cv.notify_one();
-+    }
++    PipelineJobQueue queue;
++    u32 threads = 0;
 +
 +private:
 +    PipelineCompiler() {
-+        u32 count = std::clamp<u32>(BbThreads::Available() / 3, 1, 4);
++        threads = std::clamp<u32>(BbThreads::Available() / 3, 1, 4);
 +        if (const char* env = std::getenv("BB_PIPELINE_THREADS"); env && env[0]) {
-+            count = std::clamp(std::atoi(env), 1, 16);
++            threads = std::clamp(std::atoi(env), 1, 16);
 +        }
-+        for (u32 i = 0; i < count; ++i) {
++        for (u32 i = 0; i < threads; ++i) {
 +            std::thread([this, i] {
 +                Common::SetCurrentThreadName(("bb:Pipeline" + std::to_string(i)).c_str());
 +                for (;;) {
-+                    std::function<void()> job;
-+                    {
-+                        std::unique_lock lk{mutex};
-+                        cv.wait(lk, [this] { return !jobs.empty(); });
-+                        job = std::move(jobs.front());
-+                        jobs.pop_front();
-+                    }
-+                    job();
++                    queue.Pop()();
 +                }
 +            }).detach();
 +        }
 +    }
-+
-+    std::mutex mutex;
-+    std::condition_variable cv;
-+    std::deque<std::function<void()>> jobs;
 +};
 +
 +} // namespace
 +
-+void SubmitPipelineJob(std::function<void()> job) {
-+    PipelineCompiler::Get().Submit(std::move(job));
++void SubmitPipelineJob(const void* owner, std::function<void()> job) {
++    pipeline_compile_stats.background.fetch_add(1, std::memory_order_relaxed);
++    PipelineCompiler::Get().queue.Push(owner, std::move(job));
++}
++
++std::function<void()> TakePipelineJob(const void* owner) {
++    // bbport: BB_PIPELINE_TAKE=0: a thread that needs a queued pipeline waits for a compile
++    // thread to get to it, as before.
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_PIPELINE_TAKE");
++        return !(env && env[0] == '0');
++    }();
++    if (!enabled) {
++        return {};
++    }
++    return PipelineCompiler::Get().queue.Take(owner);
++}
++
++u32 PipelineCompileThreads() {
++    return PipelineCompiler::Get().threads;
 +}
 +
  static constexpr std::array LogicalStageToStageBit = {
      vk::ShaderStageFlagBits::eFragment,
      vk::ShaderStageFlagBits::eTessellationControl,
-@@ -428,6 +532,105 @@ GraphicsPipeline::GraphicsPipeline(
+@@ -428,6 +535,105 @@ GraphicsPipeline::GraphicsPipeline(
          .layout = *pipeline_layout,
      };
  
@@ -1822,7 +2022,7 @@ index 87381c5..0470c03 100644
 +        // Anything this copy does not know how to own (a chain added later): created here.
 +        if (ok) {
 +            ready.store(false, std::memory_order_relaxed);
-+            SubmitPipelineJob([this, job, device, cache = pipeline_cache, name = debug_str] {
++            SubmitPipelineJob(this, [this, job, device, cache = pipeline_cache, name = debug_str] {
 +                auto [result, created] = device.createGraphicsPipelineUnique(cache, job->info);
 +                ASSERT_MSG(result == vk::Result::eSuccess,
 +                           "Failed to create graphics pipeline: {}", vk::to_string(result));
@@ -1837,7 +2037,7 @@ index 87381c5..0470c03 100644
      auto [pipeline_result, pipe] =
          device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
      if (preloading && pipeline_result != vk::Result::eSuccess) {
-@@ -442,7 +645,10 @@ GraphicsPipeline::GraphicsPipeline(
+@@ -442,7 +648,10 @@ GraphicsPipeline::GraphicsPipeline(
      SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
  }
  
@@ -1948,18 +2148,29 @@ index f1f48b6..198095d 100644
      bool shader_float8{};           // bbport: VK_EXT_shader_float8 with FP8 matrices (RDNA4)
      bool supports_memory_budget{};
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
-index 52778fb..4fdc47a 100644
+index 52778fb..6bba722 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
-@@ -1,6 +1,7 @@
+@@ -1,12 +1,18 @@
  // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
++#include <algorithm>
 +#include <chrono>
++#include <cstdio>
++#include <cstdlib>
  #include <span>
++#include <string>
  
  #include <boost/container/small_vector.hpp>
-@@ -20,7 +21,32 @@ Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorH
+ #include <boost/container/static_vector.hpp>
+ 
+ #include "shader_recompiler/resource.h"
++#include "video_core/renderer_vulkan/pipeline_compile_queue.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+ #include "video_core/renderer_vulkan/vk_pipeline_common.h"
+@@ -20,7 +26,98 @@ Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorH
      : instance{instance_}, scheduler{scheduler_}, desc_heap{desc_heap_}, profile{profile_},
        is_compute{is_compute_} {}
  
@@ -1978,12 +2189,78 @@ index 52778fb..4fdc47a 100644
 +        return;
 +    }
 +    const auto start = std::chrono::steady_clock::now();
++    // bbport: still queued (the compile threads busy with the pipelines before it): compiled
++    // here, instead of waiting for them first and then for this one.
++    if (auto job = TakePipelineJob(this)) {
++        job();
++        pipeline_compile_stats.taken.fetch_add(1, std::memory_order_relaxed);
++    }
 +    while (!ready.load(std::memory_order_acquire)) {
 +        ready.wait(false, std::memory_order_acquire);
 +    }
-+    g_bb_compile_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
++    const u64 waited = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                               std::chrono::steady_clock::now() - start)
 +                               .count());
++    g_bb_compile_ns += waited;
++    pipeline_compile_stats.NoteWait(waited);
++}
++
++namespace {
++bool EnvOff(const char* name) {
++    const char* env = std::getenv(name);
++    return env && env[0] == '0';
++}
++} // namespace
++
++u64 SkipUncompiledBudgetNs() {
++    static const u64 budget = [] {
++        if (EnvOff("BB_SKIP_UNCOMPILED")) {
++            return u64{0};
++        }
++        const char* env = std::getenv("BB_SKIP_UNCOMPILED_MS");
++        const u64 ms = env && env[0] ? std::strtoull(env, nullptr, 10) : 1000;
++        return ms * 1'000'000;
++    }();
++    return budget;
++}
++
++bool LatePipelineBindEnabled() {
++    static const bool enabled = !EnvOff("BB_LATE_PIPELINE_BIND");
++    return enabled;
++}
++
++void LogPipelineCompileMode(const Instance& instance, bool late_binds_possible) {
++    if (!AsyncPipelinesEnabled()) {
++        std::printf("Pipelines: new ones compiled where the draw needs them (BB_ASYNC_PIPELINES=0)\n");
++        return;
++    }
++    // VK_EXT_graphics_pipeline_library is reported, not used: shaders reach the port at the draw
++    // that needs them and a pipeline's shaders share one descriptor set layout, so the libraries
++    // would be compiled at that draw as well (docs/pipeline_compiles.md).
++    const auto extensions = instance.GetAvailableExtensions();
++    const bool gpl = std::ranges::find(extensions, std::string{
++                                                       VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME}) !=
++                     extensions.end();
++    bool fast_linking = false;
++    if (gpl) {
++        const auto chain = instance.GetPhysicalDevice()
++                               .getProperties2<vk::PhysicalDeviceProperties2,
++                                               vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>();
++        fast_linking = chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>()
++                           .graphicsPipelineLibraryFastLinking;
++    }
++    const u64 budget_ms = SkipUncompiledBudgetNs() / 1'000'000;
++    std::printf("Pipelines: new ones compiled on %u threads; draws of one still compiling: scene "
++                "geometry %s, other draws %s (BB_SKIP_UNCOMPILED, BB_LATE_PIPELINE_BIND); graphics "
++                "pipeline library %s, not used\n",
++                PipelineCompileThreads(),
++                budget_ms ? fmt::format("left out for up to {} ms", budget_ms).c_str() : "waits",
++                late_binds_possible && LatePipelineBindEnabled()
++                    ? "bind it on the recording threads (they wait for it)"
++                    : "wait for it on the draw recording thread",
++                gpl ? (fast_linking ? "offered (fast linking)" : "offered (no fast linking)")
++                    : "not offered");
++    std::fflush(stdout);
 +}
 +
 +void Pipeline::MarkReady() noexcept {
@@ -1994,7 +2271,7 @@ index 52778fb..4fdc47a 100644
  
  void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data,
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h
-index ff89b44..3bc4a14 100644
+index ff89b44..45a1560 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.h
 @@ -3,6 +3,9 @@
@@ -2007,20 +2284,37 @@ index ff89b44..3bc4a14 100644
  #include "shader_recompiler/profile.h"
  #include "shader_recompiler/runtime_info.h"
  #include "video_core/renderer_vulkan/vk_common.h"
-@@ -25,6 +28,12 @@ class Instance;
+@@ -25,6 +28,29 @@ class Instance;
  class Scheduler;
  class DescriptorHeap;
  
 +/// bbport: pipelines first created during play are created on compile threads
 +/// (BB_ASYNC_PIPELINES=0: where they are selected, as before; vk_graphics_pipeline.cpp).
 +bool AsyncPipelinesEnabled();
-+/// Runs `job` on a compile thread (BB_PIPELINE_THREADS), first in, first out.
-+void SubmitPipelineJob(std::function<void()> job);
++/// Runs `job`, which creates `owner`, on a compile thread (BB_PIPELINE_THREADS), first in,
++/// first out.
++void SubmitPipelineJob(const void* owner, std::function<void()> job);
++/// bbport: `owner`'s job when no compile thread has started it yet (the caller runs it), else
++/// empty (BB_PIPELINE_TAKE=0: always empty).
++std::function<void()> TakePipelineJob(const void* owner);
++/// The number of compile threads.
++u32 PipelineCompileThreads();
++
++/// bbport (docs/pipeline_compiles.md): what a draw does with a pipeline still compiling.
++/// Scene geometry is left out (BB_SKIP_UNCOMPILED=0: never) for at most this long
++/// (BB_SKIP_UNCOMPILED_MS, default 1000); 0 when draws are never left out.
++u64 SkipUncompiledBudgetNs();
++/// Other draws and dispatches bind it on the recording threads, which wait for it there
++/// (BB_LATE_PIPELINE_BIND=0: the draw recording thread waits, as before).
++bool LatePipelineBindEnabled();
++/// One line at start saying which of these run, with whether the device offers
++/// VK_EXT_graphics_pipeline_library (not used: see the document).
++void LogPipelineCompileMode(const Instance& instance, bool late_binds_possible);
 +
  class Pipeline {
  public:
      Pipeline(const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
-@@ -32,10 +41,20 @@ public:
+@@ -32,10 +58,31 @@ public:
               bool is_compute = false);
      virtual ~Pipeline();
  
@@ -2038,18 +2332,31 @@ index ff89b44..3bc4a14 100644
 +        return ready.load(std::memory_order_acquire);
 +    }
 +
++    /// bbport: the handle once the pipeline is created, else null without waiting (the caller
++    /// leaves the draw out or binds the pipeline on a recording thread). The same load and
++    /// branch as Handle() for a created pipeline.
++    [[nodiscard]] vk::Pipeline HandleIfReady() const noexcept {
++        return ready.load(std::memory_order_acquire) ? *pipeline : vk::Pipeline{};
++    }
++
++    /// bbport: when a draw of this pipeline was first left out while it compiled (0: never).
++    /// Only the thread recording draws uses it (Rasterizer::SkipUncompiledDraw).
++    mutable u64 first_skip_ns = 0;
++
      vk::PipelineLayout GetLayout() const noexcept {
          return *pipeline_layout;
      }
-@@ -66,7 +85,13 @@ public:
+@@ -66,7 +113,14 @@ public:
  
  protected:
      [[nodiscard]] std::string GetDebugString() const;
-+    /// bbport: blocks until a compile thread has stored `pipeline` (Handle, destructors).
+-
++    /// bbport: blocks until a compile thread has stored `pipeline` (Handle, destructors); runs
++    /// the job itself when no compile thread has started it (TakePipelineJob).
 +    void WaitReady() const noexcept;
 +    /// bbport: the compile thread stores `pipeline`, then sets this (release) and wakes waiters.
 +    void MarkReady() noexcept;
- 
++
 +    /// bbport: cleared by a graphics pipeline whose creation went to a compile thread.
 +    std::atomic<bool> ready{true};
      const Instance& instance;
@@ -2212,7 +2519,7 @@ index c171d07..cb211e2 100644
  concept VulkanHandleType = vk::isVulkanHandleType<T>::value;
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
-index 602cb30..f824c74 100644
+index 602cb30..2e83545 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
 @@ -13,6 +13,7 @@
@@ -2475,7 +2782,7 @@ index 602cb30..f824c74 100644
 +        std::printf("HDR output: %s, mode %s (%s)\n",
 +                    scrgb ? "scRGB (FP16)" : "HDR10 (PQ, BT.2020)", BbSettings::HdrModeNames[mode],
 +                    mode == BbSettings::HdrModeNative
-+                        ? "highlights from the game's HDR scene, expand where a frame has none"
++                        ? "highlights from the game's HDR scene, plain SDR where a frame has none"
 +                        : "highlights expanded from the SDR picture");
 +    }
 +    if (mode != BbSettings::HdrModeNative) {
@@ -2645,7 +2952,7 @@ index 0b3dc78..f090799 100644
      AmdGpu::Liverpool* liverpool;
      Scheduler draw_scheduler;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index 5fd360b..6732045 100644
+index 5fd360b..c9fc1e7 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 @@ -5,6 +5,7 @@
@@ -2656,15 +2963,17 @@ index 5fd360b..6732045 100644
  #include <map>
  #include <unordered_set>
  #include <xxhash.h>
-@@ -30,6 +31,7 @@
+@@ -29,7 +30,9 @@
+ #include "video_core/buffer_cache/buffer.h"
  #include "video_core/buffer_cache/buffer_cache.h"
  #include "video_core/renderer_vulkan/liverpool_to_vk.h"
++#include "video_core/renderer_vulkan/pipeline_compile_queue.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
 +#include "video_core/renderer_vulkan/vk_occlusion.h"
  #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
  #include "video_core/renderer_vulkan/vk_rasterizer.h"
  #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
-@@ -71,8 +73,10 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
+@@ -71,8 +74,10 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
      pipeline_cache.SetObjectMotionEnabled(object_motion->Enabled());
      camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
      camera_motion->SetObjectMotion(object_motion.get());
@@ -2676,7 +2985,7 @@ index 5fd360b..6732045 100644
      if (!EmulatorSettings.IsNullGPU()) {
          liverpool->BindRasterizer(this);
      }
-@@ -80,6 +84,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
+@@ -80,10 +85,19 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
      memory->SetRasterizer(this);
  
      GpuProfiler::Init(instance, scheduler);
@@ -2684,7 +2993,19 @@ index 5fd360b..6732045 100644
      if (DrawPipeWanted()) {
          constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
          draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
-@@ -462,6 +467,19 @@ bool Rasterizer::FilterDraw() {
+     }
++    // bbport (docs/pipeline_compiles.md): which of the waits for compiles, drains and the texture
++    // cache's lock run, once at start.
++    LogPipelineCompileMode(instance, scheduler.IsRecordingDeferred());
++    std::printf("Waits: GPU command thread drains %s; write faults on pages no image watches %s "
++                "(BB_DRAIN_SLEEP, BB_FAULT_SKIP_TEXTURES)\n",
++                DrawPipe::SleepEnabled() ? "sleep after a spin (stage B wakes them)" : "spin",
++                FaultSkipsTextureCache() ? "leave the texture cache alone"
++                                         : "take the texture cache's lock");
+     // bbport: this thread joins the texture binding helper before it changes image state.
+     runtime.SetImageAccessHook(&JoinBindHelper, this);
+     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
+@@ -462,6 +476,19 @@ bool Rasterizer::FilterDraw() {
      return true;
  }
  
@@ -2704,7 +3025,7 @@ index 5fd360b..6732045 100644
  template <typename... Parts>
  VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::ImageDesc& desc,
                                                    LastTarget& last, auto&& make_desc,
-@@ -476,16 +494,19 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
+@@ -476,16 +503,19 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
      (append(parts), ...);
      const u64 generation = texture_cache.RegistryGeneration();
      const bool memo_enabled = !BbToggle::Disabled(BbToggle::TextureBindingMemo);
@@ -2727,7 +3048,7 @@ index 5fd360b..6732045 100644
      };
      u64 hash = 0xCBF29CE484222325ull;
      for (u32 i = 0; i < key_size; i += 8) {
-@@ -495,22 +516,30 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
+@@ -495,22 +525,30 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
          hash ^= hash >> 29;
      }
      auto& memo = target_memo[hash % target_memo.size()];
@@ -2762,7 +3083,7 @@ index 5fd360b..6732045 100644
      } else {
          last.generation = ~0ULL;
      }
-@@ -1115,6 +1144,18 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
+@@ -1115,6 +1153,18 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
      return true;
  }
  
@@ -2781,7 +3102,25 @@ index 5fd360b..6732045 100644
  namespace {
  // BB_SECTIONS: ordered tasks by function (cycles, count), stage B only.
  constexpr std::size_t TaskKinds = 16;
-@@ -1352,6 +1393,8 @@ void Rasterizer::PrintPipeStats() {
+@@ -1291,12 +1341,15 @@ void Rasterizer::PrintPipeStats() {
+     const u64 tsc = __rdtsc();
+     const double cycles = double(tsc - last_tsc);
+     const u64 busy = draw_pipe->busy_cycles.load(std::memory_order_relaxed);
+-    std::printf("Draw pipe: %.0f draws/s pipelined, %.0f drains/s that waited, stage A waited "
+-                "%.1f%%, stage B busy %.1f%%\n",
++    static u64 last_sleeps = 0;
++    std::printf("Draw pipe: %.0f draws/s pipelined, %.0f drains/s that waited (%.1f/s slept), "
++                "stage A waited %.1f%%, stage B busy %.1f%%\n",
+                 (draw_pipe->packets - last_packets) / seconds,
+                 (draw_pipe->drains - last_drains) / seconds,
++                (draw_pipe->sleeps - last_sleeps) / seconds,
+                 100.0 * (draw_pipe->drain_cycles - last_drain_cycles) / cycles,
+                 100.0 * (busy - last_busy) / cycles);
++    last_sleeps = draw_pipe->sleeps;
+     std::printf("  drains by reason/s:");
+     for (u32 r = 0; r < DrawPipe::NumReasons; ++r) {
+         if (const u64 n = draw_pipe->drains_by_reason[r]) {
+@@ -1352,6 +1405,8 @@ void Rasterizer::PrintPipeStats() {
              last_task_counts[k] = n;
          }
      }
@@ -2790,7 +3129,7 @@ index 5fd360b..6732045 100644
      std::printf("\n  stage A waits over 0.5%%:");
      for (const auto& [function, lines] : drain_sites) {
          for (const auto& [line, waited] : lines) {
-@@ -1396,6 +1439,9 @@ bool Rasterizer::FilterDrawPasses() const {
+@@ -1396,6 +1451,9 @@ bool Rasterizer::FilterDrawPasses() const {
  void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
      RENDERER_TRACE;
      BbStats::draws.fetch_add(1, std::memory_order_relaxed);
@@ -2800,7 +3139,7 @@ index 5fd360b..6732045 100644
      // bbport debugging: BB_IMAGE_DUMP_TRIGGER=<file> holding hex guest addresses, one per line;
      // the images registered there are written to BB_CAPTURE_DIR (TextureCache::DumpImagesAt).
      if (static const char* trigger = std::getenv("BB_IMAGE_DUMP_TRIGGER"); trigger) {
-@@ -1460,6 +1506,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+@@ -1460,6 +1518,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
          FrameCapture::Poll();
          scheduler.PopPendingOperations();
      }
@@ -2811,17 +3150,40 @@ index 5fd360b..6732045 100644
      // bbport (BB_PREUPLOAD): once a frame, guest GPU memory the CPU wrote and then left alone is
      // uploaded ahead of its use, BB_PREUPLOAD_MB (16) at most per frame.
      if (const u32 frame = BbStats::frame_number.load(std::memory_order_relaxed);
-@@ -1478,6 +1528,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+@@ -1478,6 +1540,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
      if (camera_motion->Enabled() && regs.color_buffers[0] &&
          FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
          scene_started = false;
 +        // bbport: native HDR output: the gain map of the frame this pass copies, for this
 +        // display buffer (before OnFrameStart forgets the frame's UI phase).
 +        upscaler->OnDisplayPass(regs.color_buffers[0].Address(), cb_descs[0].first);
++        previous_scene_depth = camera_motion->Depth(); // the last G-buffer pass's (bbport)
          camera_motion->OnDisplayPass(cb_descs[0].first);
          if (upscaler->OnFrameStart()) {
              object_motion->InvalidateHistory();
-@@ -1644,13 +1697,23 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+@@ -1632,7 +1698,20 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+     const auto& fetch_shader = pipeline->GetFetchShader();
+     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
+ 
+-    const vk::Pipeline handle = pipeline->Handle();
++    // bbport (docs/pipeline_compiles.md): a pipeline still compiling does not hold this thread
++    // (nor the GPU command thread and the guest threads that drain behind it): the draw is left
++    // out (scene geometry) or a recording thread binds the pipeline once it is there.
++    // Everything above ran as for a draw (targets, barriers, render pass): only the draw itself
++    // is missing for those frames.
++    vk::Pipeline handle = pipeline->HandleIfReady();
++    if (!handle) [[unlikely]] {
++        if (SkipUncompiledDraw(pipeline)) {
++            ResetBindings(false);
++            scheduler.KickRecording();
++            return;
++        }
++        handle = BindWhenCompiled(pipeline, vk::PipelineBindPoint::eGraphics);
++    }
+     const u32 num_indices = regs.num_indices;
+     const u32 num_instances = regs.num_instances.NumInstances();
+     const u32 first_vertex = vertex_offset;
+@@ -1644,13 +1723,25 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
          .program = {vs_info.ProgramBase(), ps_info ? ps_info->ProgramBase() : 0},
          .count = {num_indices, num_instances, 0},
      };
@@ -2830,7 +3192,10 @@ index 5fd360b..6732045 100644
 +    const auto query = occlusion ? occlusion->BeginDraw(push_data.scene_size)
 +                                 : Occlusion::DrawQuery{};
      scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
-         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        if (handle) { // null: bound by the command before (BindWhenCompiled)
++            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        }
 +        if (query.pool) {
 +            cmdbuf.beginQuery(query.pool, query.index, query.flags);
 +        }
@@ -2845,7 +3210,7 @@ index 5fd360b..6732045 100644
      });
      if (FrameCapture::Active()) {
          const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-@@ -1676,6 +1739,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
+@@ -1676,6 +1767,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                                u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                                u16 instance_sgpr_offset) {
      RENDERER_TRACE;
@@ -2855,7 +3220,7 @@ index 5fd360b..6732045 100644
      // bbport: like direct draws, handed to the recording thread after the pipeline selection
      // (else the GPU thread waited here for a whole frame of queued draws).
      const bool pipelined = UseDrawPipe() && FilterDrawPasses() &&
-@@ -1711,6 +1777,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+@@ -1711,6 +1805,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
          FrameCapture::Poll();
          scheduler.PopPendingOperations();
      }
@@ -2865,21 +3230,37 @@ index 5fd360b..6732045 100644
      const VAddr count_address = indirect.count;
      const u32 stride = indirect.stride;
      const u32 max_count = indirect.max_count;
-@@ -1780,8 +1849,13 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+@@ -1765,7 +1862,11 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+ 
+     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
+                                  : sizeof(VkDrawIndirectCommand)));
+-    const vk::Pipeline handle = pipeline->Handle();
++    // bbport: never left out (what it draws is decided in GPU memory), bound late instead.
++    vk::Pipeline handle = pipeline->HandleIfReady();
++    if (!handle) [[unlikely]] {
++        handle = BindWhenCompiled(pipeline, vk::PipelineBindPoint::eGraphics);
++    }
+     const vk::Buffer args = buffer->Handle();
+     const u64 args_offset = base;
+     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
+@@ -1780,8 +1881,15 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
          .address = indirect.args,
          .count = {max_count, stride, 0},
      };
 +    const auto query = occlusion ? occlusion->BeginDraw(push_data.scene_size)
 +                                 : Occlusion::DrawQuery{};
      scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
-         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        if (handle) { // null: bound by the command before (BindWhenCompiled)
++            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        }
 +        if (query.pool) {
 +            cmdbuf.beginQuery(query.pool, query.index, query.flags);
 +        }
          if (is_indexed) {
              if (counts) {
                  cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
-@@ -1794,6 +1868,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+@@ -1794,6 +1902,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
          } else {
              cmdbuf.drawIndirect(args, args_offset, max_count, stride);
          }
@@ -2889,10 +3270,104 @@ index 5fd360b..6732045 100644
      });
      DebugState.IncDrawCall();
  
-@@ -1950,6 +2027,68 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
+@@ -1865,7 +1976,11 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+     pipeline->BindResources(set_writes, push_data, {image_infos.data(), image_infos.size()},
+                             {buffer_infos.data(), buffer_infos.size()});
+ 
+-    const vk::Pipeline handle = pipeline->Handle();
++    // bbport: dispatches are never left out; a compute pipeline still compiling is bound late.
++    vk::Pipeline handle = pipeline->HandleIfReady();
++    if (!handle) [[unlikely]] {
++        handle = BindWhenCompiled(pipeline, vk::PipelineBindPoint::eCompute);
++    }
+     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+     if (FrameCapture::Active()) {
+         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
+@@ -1877,7 +1992,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+         .count = {dim_x, dim_y, dim_z},
+     };
+     scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
+-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
++        if (handle) { // null: bound by the command before (BindWhenCompiled)
++            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
++        }
+         cmdbuf.dispatch(dim_x, dim_y, dim_z);
+     });
+     DebugState.IncDispatch();
+@@ -1926,7 +2043,10 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
+     pipeline->BindResources(set_writes, push_data, {image_infos.data(), image_infos.size()},
+                             {buffer_infos.data(), buffer_infos.size()});
+ 
+-    const vk::Pipeline handle = pipeline->Handle();
++    vk::Pipeline handle = pipeline->HandleIfReady();
++    if (!handle) [[unlikely]] {
++        handle = BindWhenCompiled(pipeline, vk::PipelineBindPoint::eCompute);
++    }
+     const vk::Buffer args = buffer->Handle();
+     const u64 args_offset = base;
+     const auto& cs_crumb = pipeline->GetStage(Shader::SwStage::Compute);
+@@ -1941,7 +2061,9 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
+     };
+     scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
+         Breadcrumbs::CopyArgs(cmdbuf, args, args_offset, args_slot);
+-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
++        if (handle) { // null: bound by the command before (BindWhenCompiled)
++            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
++        }
+         cmdbuf.dispatchIndirect(args, args_offset);
+     });
+     DebugState.IncDispatch();
+@@ -1950,6 +2072,115 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
      scheduler.KickRecording();
  }
  
++bool Rasterizer::SkipUncompiledDraw(const GraphicsPipeline* pipeline) {
++    const u64 budget = SkipUncompiledBudgetNs();
++    if (budget == 0) {
++        return false;
++    }
++    // Scene geometry only (the draws the upscaler jitters): drawn with the scene depth, which
++    // every frame draws again from a clear, and not a full-screen pass. The depth must also have
++    // been the scene's the frame before: a G-buffer pass of its own (a reflection, drawn now and
++    // then and kept) is not left out. Shadow maps, half-resolution effects, post-processing and
++    // UI wait: what they draw may be kept over frames or read as a whole. A draw the game
++    // measures (occlusion query) waits as well.
++    const auto& regs = Regs();
++    if (!db_desc.first || db_desc.first != camera_motion->Depth() ||
++        db_desc.first != previous_scene_depth ||
++        (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) ||
++        (occlusion && occlusion->Measuring()) || FrameCapture::Active()) {
++        return false;
++    }
++    const bool first = pipeline->first_skip_ns == 0;
++    const u64 now = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                            std::chrono::steady_clock::now().time_since_epoch())
++                            .count());
++    if (!WithinSkipBudget(pipeline->first_skip_ns, now, budget)) {
++        return false;
++    }
++    pipeline_compile_stats.skipped_draws.fetch_add(1, std::memory_order_relaxed);
++    if (first) {
++        pipeline_compile_stats.skipped_pipelines.fetch_add(1, std::memory_order_relaxed);
++    }
++    return true;
++}
++
++vk::Pipeline Rasterizer::BindWhenCompiled(const Pipeline* pipeline,
++                                          vk::PipelineBindPoint bind_point) {
++    if (!LatePipelineBindEnabled() || !scheduler.IsRecordingDeferred()) {
++        return pipeline->Handle(); // waits here (and compiles it here when still queued)
++    }
++    // The recording thread that runs this waits for the compile (or compiles it, when still
++    // queued): the draws after it are recorded meanwhile, and drains of the GPU command thread
++    // (write faults, readbacks for guest threads) do not wait for the compile.
++    pipeline_compile_stats.late_binds.fetch_add(1, std::memory_order_relaxed);
++    scheduler.Record([pipeline, bind_point](vk::CommandBuffer cmdbuf) {
++        cmdbuf.bindPipeline(bind_point, pipeline->Handle());
++    });
++    return {};
++}
++
 +bool Rasterizer::OcclusionDump(VAddr va, u32 pipes) {
 +    if (!occlusion || (va & 7) != 0) {
 +        return false;
@@ -2958,7 +3433,7 @@ index 5fd360b..6732045 100644
  u64 Rasterizer::Flush() {
      BB_SECTION(Flush);
      DrainDrawPipe();
-@@ -2051,10 +2190,10 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
+@@ -2051,10 +2282,10 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
              !IsKnownFormat(data_fmt, num_fmt)) {
              continue; // null descriptor
          }
@@ -2971,7 +3446,7 @@ index 5fd360b..6732045 100644
              return false;
          }
          VideoCore::ImageId image_id = entry.found_id;
-@@ -2848,11 +2987,39 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
+@@ -2848,11 +3079,39 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
          entry.sharp = key;
          entry.flags = flags;
          entry.found_generation = ~0ULL;
@@ -3011,7 +3486,7 @@ index 5fd360b..6732045 100644
  void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* prepared,
                                Shader::Backend::Bindings& binding, u32& write_index,
                                bool& barrier, bool on_helper) {
-@@ -2882,7 +3049,19 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2882,7 +3141,19 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
      boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
      // TextureSetMemo: what this call resolves, to remember when the set qualifies.
      std::array<TextureSetEntry, TextureSet::MaxImages> resolved{};
@@ -3031,7 +3506,7 @@ index 5fd360b..6732045 100644
      // SampleSceneProxies: bindings that may read a reduced scene proxy instead of the native
      // image (normalized sampling only; see Shader::ImageResource::needs_native).
      boost::container::small_vector<bool, 16> binding_proxy_ok;
-@@ -2916,6 +3095,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2916,6 +3187,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                          "data_format={}, num_format={}",
                          tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                          static_cast<u32>(num_fmt));
@@ -3039,7 +3514,7 @@ index 5fd360b..6732045 100644
              image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
              image_binding_entries.push_back(nullptr);
              binding_proxy_ok.push_back(false);
-@@ -2951,9 +3131,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2951,9 +3223,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
              // bbport: a plain binding (no mip override) of the same T# resolves to the same image
              // while no image was registered or unregistered.
              if (mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
@@ -3053,7 +3528,7 @@ index 5fd360b..6732045 100644
                  auto& [image_id, _] =
                      image_bindings.emplace_back(desc_entry.found_id, &desc_entry.found_desc);
                  image_binding_entries.push_back(&desc_entry);
-@@ -2963,6 +3145,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2963,6 +3237,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                  if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                      image_id = depth_image_id;
                      image = &texture_cache.GetImage(image_id);
@@ -3061,7 +3536,7 @@ index 5fd360b..6732045 100644
                  }
                  debug_native(*image);
                  if (image->binding.is_bound) {
-@@ -2986,21 +3169,32 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2986,21 +3261,32 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
              }
  
              const u64 generation = texture_cache.RegistryGeneration();
@@ -3094,7 +3569,7 @@ index 5fd360b..6732045 100644
              }
              debug_native(*image);
              if (image->binding.is_bound) {
-@@ -3049,7 +3243,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -3049,7 +3335,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                      image.usage.texture = 1u;
                      image_infos.emplace_back(VK_NULL_HANDLE, proxy->view, proxy->layout);
                      if (set_ok && binding_index < resolved.size()) {
@@ -3104,7 +3579,7 @@ index 5fd360b..6732045 100644
                                                     desc.view_info.range, true};
                      }
                      ++proxy_samples;
-@@ -3098,18 +3293,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -3098,18 +3385,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
              }
              image_infos.emplace_back(VK_NULL_HANDLE, view, layout);
              if (set_ok && binding_index < resolved.size()) {
@@ -3129,7 +3604,7 @@ index 5fd360b..6732045 100644
      } else if (set_slot) {
          set_slot->key = 0;
      }
-@@ -3150,7 +3349,9 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+@@ -3150,7 +3441,9 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
          static std::atomic<u64> seen{0};
          const u32 kind = u32(sharp.xy_min_filter.Value()) * 3 * 5 + u32(sharp.mip_filter.Value()) * 5 +
                           u32(sharp.max_aniso.Value());
@@ -3140,7 +3615,7 @@ index 5fd360b..6732045 100644
              std::printf("Sampler: game uses min filter %u, mip filter %u, anisotropy %.0fx\n",
                          u32(sharp.xy_min_filter.Value()), u32(sharp.mip_filter.Value()),
                          sharp.MaxAniso());
-@@ -3175,6 +3376,41 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+@@ -3175,6 +3468,41 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
      sharp.max_aniso.Assign(ratio);
  }
  
@@ -3182,7 +3657,7 @@ index 5fd360b..6732045 100644
  void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                                Shader::Backend::Bindings& binding, u32& write_index) {
      for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
-@@ -3182,8 +3418,8 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
+@@ -3182,8 +3510,8 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
          auto ssharp =
              prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
          ForceAnisotropy(ssharp, sampler.is_depth);
@@ -3193,7 +3668,7 @@ index 5fd360b..6732045 100644
          image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
          auto& set_write = set_writes[write_index++];
          set_write.dstSet = VK_NULL_HANDLE;
-@@ -3224,6 +3460,31 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
+@@ -3224,6 +3552,31 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
      return sig;
  }
  
@@ -3225,7 +3700,7 @@ index 5fd360b..6732045 100644
  bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                                       u32 first_image_idx, bool& barrier, TextureSet*& slot) {
      const u32 count = static_cast<u32>(stage.images.size());
-@@ -3242,11 +3503,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+@@ -3242,11 +3595,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
      auto& set = texture_sets[key % texture_sets.size()];
      slot = &set;
      const u64 generation = texture_cache.RegistryGeneration();
@@ -3243,7 +3718,7 @@ index 5fd360b..6732045 100644
      if (!match) {
          const bool generation_miss = set.key == key && set.stage == &stage && set.count == count &&
                                       set.generation != generation;
-@@ -3285,6 +3547,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+@@ -3285,6 +3639,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
          set.stage = &stage;
          set.count = 0;
          set.generation = ~0ull;
@@ -3251,7 +3726,7 @@ index 5fd360b..6732045 100644
          std::copy_n(prepared->image_hashes, count, set.hashes.begin());
          return false;
      }
-@@ -3308,6 +3571,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+@@ -3308,6 +3663,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
              ++texture_set_why[2];
              ++texture_set_misses;
              set.generation = ~0ull;
@@ -3259,7 +3734,7 @@ index 5fd360b..6732045 100644
              return false;
          }
      }
-@@ -3341,26 +3605,70 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+@@ -3341,26 +3697,70 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
      return true;
  }
  
@@ -3333,7 +3808,7 @@ index 5fd360b..6732045 100644
      }
      BeginSignature signature;
      if (memo_on) {
-@@ -3369,7 +3677,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+@@ -3369,7 +3769,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
          bool usable = begin_memo.valid && scheduler.IsRenderingWith(begin_memo.state) &&
                        !regs.depth_render_control.depth_clear_enable &&
                        !regs.depth_render_control.stencil_clear_enable &&
@@ -3342,7 +3817,7 @@ index 5fd360b..6732045 100644
          for (const auto id : signature.ids) {
              if (usable && id) {
                  const auto& image = texture_cache.GetImage(id);
-@@ -3399,6 +3707,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+@@ -3399,6 +3799,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
              // Recomputed after the full path: it may have started the scene (scene_started).
              begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
                            target_scale,target_offset};
@@ -3350,20 +3825,40 @@ index 5fd360b..6732045 100644
          }
      }
      return state;
-@@ -3909,7 +4218,10 @@ void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
+@@ -3907,9 +4308,30 @@ void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
+     }
+ }
  
++bool Rasterizer::FaultSkipsTextureCache() {
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_FAULT_SKIP_TEXTURES");
++        return !(env && env[0] == '0');
++    }();
++    return enabled;
++}
++
  bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks, u64 guest_rip) {
      DrainDrawPipe();
 -    if (!InvalidateMemory(addr, 8, assume_locks)) {
 +    // bbport: within the faulting page. 8 bytes from a write to the last bytes of a mapping
 +    // reached past its end: IsMapped failed and the fault went unhandled (the game ended).
 +    const u64 size = std::min<u64>(8, VideoCore::PageManager::GetNextPageAddr(addr) - addr);
-+    if (!InvalidateMemory(addr, size, assume_locks)) {
++    // bbport: a page no tracked image watches (a buffer's page: most faults) needs nothing from
++    // the texture cache, whose lock the draw recording thread holds while it creates or uploads
++    // an image: a guest thread writing its constants waited for that (0.6 s with memory short:
++    // the frame with it). Images learn of CPU writes through their own page protection only
++    // (WatchedPages). BB_FAULT_SKIP_TEXTURES=0: the lock is taken for every fault, as before.
++    if (FaultSkipsTextureCache() && !texture_cache.WatchesPages(addr, size)) {
++        if (!IsMapped(addr, size)) {
++            return false;
++        }
++        buffer_cache.InvalidateMemory(addr, size, assume_locks);
++    } else if (!InvalidateMemory(addr, size, assume_locks)) {
          return false;
      }
      buffer_cache.ExtendWriteFault(addr, guest_rip);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
-index 64f1e31..8f0969a 100644
+index 64f1e31..cb2f27f 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
 @@ -36,6 +36,7 @@ class MemoryManager;
@@ -3423,7 +3918,17 @@ index 64f1e31..8f0969a 100644
      /// bbport BB_HONEST_LABELS=1: runs `signal` once the GPU has finished every command recorded
      /// before this call (the submission of the current tick), in call order, on a thread that
      /// waits on the work semaphore: fences the guest sees when the work is done, not when it is
-@@ -292,8 +316,22 @@ private:
+@@ -231,6 +255,9 @@ public:
+     /// A guest write hit a protected page.
+     /// `guest_rip`: the guest instruction that wrote (0: unknown), see BufferCache::NoteCpuWrite.
+     bool OnWriteFault(VAddr addr, bool assume_locks, u64 guest_rip = 0);
++    /// bbport: write faults on pages no tracked image watches skip the texture cache
++    /// (BB_FAULT_SKIP_TEXTURES=0: they take its lock as before).
++    static bool FaultSkipsTextureCache();
+     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+     void ProcessDownloadImages();
+     bool IsMapped(VAddr addr, u64 size);
+@@ -292,8 +319,22 @@ private:
          u32 scene_size = 0;
          std::array<float, 2> target_scale{};
          std::array<float,2> target_offset{};
@@ -3446,7 +3951,22 @@ index 64f1e31..8f0969a 100644
      void Resolve();
      void DepthStencilCopy(bool is_depth, bool is_stencil);
      void EliminateFastClear();
-@@ -354,10 +392,28 @@ private:
+@@ -331,6 +372,14 @@ private:
+                   const IndirectDraw* indirect = nullptr);
+     /// Everything of a direct dispatch after the pipeline selection (GPU thread or stage B).
+     void DispatchRecord(const ComputePipeline* pipeline);
++    /// bbport (docs/pipeline_compiles.md): whether the direct draw being recorded, whose
++    /// pipeline is still compiling, is left out: scene geometry, for a bounded time.
++    bool SkipUncompiledDraw(const GraphicsPipeline* pipeline);
++    /// bbport: for a pipeline still compiling, records its bind as a command of its own, which a
++    /// recording thread runs once the pipeline is there (it waits for it): returns null, the
++    /// draw or dispatch command binds nothing. Recording on this thread: waits here and returns
++    /// the handle.
++    vk::Pipeline BindWhenCompiled(const Pipeline* pipeline, vk::PipelineBindPoint bind_point);
+     /// The compute registers of the dispatch being recorded.
+     const AmdGpu::ComputeProgram& CsRegs() const;
+     static void RunDrawPacket(void* rasterizer, const u8* packet, u32 size);
+@@ -354,10 +403,28 @@ private:
      void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const;
      void BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                        Shader::Backend::Bindings& binding, u32& write_index);
@@ -3475,7 +3995,7 @@ index 64f1e31..8f0969a 100644
          vk::ImageView view;
          const void* backing = nullptr;
          VideoCore::SubresourceRange range;
-@@ -369,13 +425,22 @@ private:
+@@ -369,13 +436,22 @@ private:
          u64 generation = ~0ull;
          u64 scene_generation = 0; ///< SceneTargets::Generation of the proxy views
          u32 count = 0;
@@ -3498,7 +4018,13 @@ index 64f1e31..8f0969a 100644
      /// Returns true when the stage's images were bound from the memo.
      bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                               u32 first_image_idx, bool& barrier, TextureSet*& slot);
-@@ -432,6 +497,8 @@ private:
+@@ -428,10 +504,14 @@ private:
+     std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
+     std::unique_ptr<SceneTargets> scene_targets;
+     bool scene_started = false;
++    /// bbport: the scene depth of the frame before (SkipUncompiledDraw).
++    VideoCore::ImageId previous_scene_depth{};
+     std::unique_ptr<ObjectMotion> object_motion;
      bool motion_draw = false;
      u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw
      bool gbuffer_draw = false;
@@ -3507,7 +4033,7 @@ index 64f1e31..8f0969a 100644
      std::unique_ptr<TemporalUpscaler> upscaler; // bbport: FSR (docs/upscaler.md)
      std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
      std::array<float,2> target_offset{};
-@@ -470,6 +537,11 @@ private:
+@@ -470,6 +550,11 @@ private:
          // Memoized FindImage for bindings without mip overrides (TextureBindingMemo).
          u64 found_generation = ~0ULL;
          VideoCore::ImageId found_id{};
@@ -3519,7 +4045,7 @@ index 64f1e31..8f0969a 100644
          VideoCore::TextureCache::ImageDesc found_desc;
          u64 pinned = 0; ///< bind_epoch of the BindTextures call referencing found_desc
          u64 last_use = 0;
-@@ -486,11 +558,15 @@ private:
+@@ -486,11 +571,15 @@ private:
      u64 bind_epoch = 0;
      // bbport: render/depth target lookups memoized by their raw register bytes while image
      // registrations are unchanged (the descriptions depend only on those registers).
@@ -3535,7 +4061,7 @@ index 64f1e31..8f0969a 100644
          VideoCore::TextureCache::ImageDesc desc;
      };
      std::array<TargetMemo, 64> target_memo{};
-@@ -499,10 +575,15 @@ private:
+@@ -499,10 +588,15 @@ private:
      struct LastTarget {
          std::array<u8, 256> key{};
          u32 key_size = 0;
@@ -3552,7 +4078,7 @@ index 64f1e31..8f0969a 100644
      template <typename... Parts>
      VideoCore::ImageId FindTargetMemoized(VideoCore::TextureCache::ImageDesc& desc,
                                            LastTarget& last, auto&& make_desc,
-@@ -512,6 +593,9 @@ private:
+@@ -512,6 +606,9 @@ private:
      /// `hash` is ImageDescHash(sharp, res), computed by a draw-preparation worker or here.
      ImageDescCacheEntry& CachedImageDescEntry(const AmdGpu::Image& sharp,
                                                const Shader::ImageResource& res, u64 hash);
@@ -3562,7 +4088,7 @@ index 64f1e31..8f0969a 100644
      ImageDescCacheEntry& CachedImageDescEntry(const AmdGpu::Image& sharp,
                                                const Shader::ImageResource& res) {
          return CachedImageDescEntry(sharp, res, ImageDescHash(sharp, res));
-@@ -650,6 +734,9 @@ private:
+@@ -650,6 +747,9 @@ private:
      std::unique_ptr<ConstantRing> constant_ring;
      /// Submissions (prepared draws) kept alive until stage B reaches the position.
      std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
@@ -4866,7 +5392,7 @@ index 21f9e6e..6d89586 100644
      u64 depth_uid{};
      u64 image_uid{};
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 98ccdd1..f912bb1 100644
+index 98ccdd1..1f864f7 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 @@ -150,8 +150,61 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
@@ -5126,7 +5652,74 @@ index 98ccdd1..f912bb1 100644
  
      return it->second.Handle();
  }
-@@ -1160,6 +1378,9 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
+@@ -1051,6 +1269,16 @@ void TextureCache::UnregisterImage(ImageId image_id) {
+     });
+ }
+ 
++void TextureCache::WatchPages(VAddr addr, u64 size) {
++    watched_pages.Add(addr, size, 1);
++    tracker.UpdatePageWatchers<1>(addr, size);
++}
++
++void TextureCache::UnwatchPages(VAddr addr, u64 size) {
++    tracker.UpdatePageWatchers<false>(addr, size);
++    watched_pages.Add(addr, size, -1);
++}
++
+ void TextureCache::TrackImage(ImageId image_id) {
+     auto& image = slot_images[image_id];
+     if (!(image.flags & ImageFlagBits::Registered)) {
+@@ -1066,7 +1294,7 @@ void TextureCache::TrackImage(ImageId image_id) {
+         // Re-track the whole image
+         image.track_addr = image_begin;
+         image.track_addr_end = image_end;
+-        tracker.UpdatePageWatchers<1>(image_begin, image.info.guest_size);
++        WatchPages(image_begin, image.info.guest_size);
+     } else {
+         if (image_begin < image.track_addr) {
+             TrackImageHead(image_id);
+@@ -1089,7 +1317,7 @@ void TextureCache::TrackImageHead(ImageId image_id) {
+     ASSERT(image.track_addr != 0 && image_begin < image.track_addr);
+     const auto size = image.track_addr - image_begin;
+     image.track_addr = image_begin;
+-    tracker.UpdatePageWatchers<1>(image_begin, size);
++    WatchPages(image_begin, size);
+ }
+ 
+ void TextureCache::TrackImageTail(ImageId image_id) {
+@@ -1105,7 +1333,7 @@ void TextureCache::TrackImageTail(ImageId image_id) {
+     const auto addr = image.track_addr_end;
+     const auto size = image_end - image.track_addr_end;
+     image.track_addr_end = image_end;
+-    tracker.UpdatePageWatchers<1>(addr, size);
++    WatchPages(addr, size);
+ }
+ 
+ void TextureCache::UntrackImage(ImageId image_id) {
+@@ -1118,7 +1346,7 @@ void TextureCache::UntrackImage(ImageId image_id) {
+     image.track_addr = 0;
+     image.track_addr_end = 0;
+     if (size != 0) {
+-        tracker.UpdatePageWatchers<false>(addr, size);
++        UnwatchPages(addr, size);
+     }
+ }
+ 
+@@ -1137,7 +1365,7 @@ void TextureCache::UntrackImageHead(ImageId image_id) {
+         // Cehck its hash later.
+         MarkAsMaybeDirty(image_id, image);
+     }
+-    tracker.UpdatePageWatchers<false>(image_begin, size);
++    UnwatchPages(image_begin, size);
+ }
+ 
+ void TextureCache::UntrackImageTail(ImageId image_id) {
+@@ -1156,10 +1384,13 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
+         // Cehck its hash later.
+         MarkAsMaybeDirty(image_id, image);
+     }
+-    tracker.UpdatePageWatchers<false>(addr, size);
++    UnwatchPages(addr, size);
  }
  
  void TextureCache::GarbageCollectImages() {
@@ -5136,7 +5729,7 @@ index 98ccdd1..f912bb1 100644
      if (instance.CanReportMemoryUsage()) {
          total_used_memory = instance.GetDeviceMemoryUsage();
          // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
-@@ -1179,6 +1400,16 @@ void TextureCache::GarbageCollectImages() {
+@@ -1179,6 +1410,16 @@ void TextureCache::GarbageCollectImages() {
                  pressure_gc_memory = budget / 100 * 85;
                  critical_gc_memory = budget / 100 * 95;
              }
@@ -5153,7 +5746,7 @@ index 98ccdd1..f912bb1 100644
          }
      }
      BbStats::gc_used_bytes.store(total_used_memory, std::memory_order_relaxed);
-@@ -1188,9 +1419,6 @@ void TextureCache::GarbageCollectImages() {
+@@ -1188,9 +1429,6 @@ void TextureCache::GarbageCollectImages() {
      // discrete GPU it stays over the trigger, where an age of 16 ticks (~3 frames) evicted every
      // texture briefly off screen and uploaded it again. Below the pressure mark an image goes
      // once unused for BB_GC_IDLE_SECONDS (20): the textures of an area left behind.
@@ -5163,7 +5756,7 @@ index 98ccdd1..f912bb1 100644
      if (second != gc_second) {
          gc_second = second;
          BbStats::coarse_second.store(u32(second), std::memory_order_relaxed);
-@@ -1216,6 +1444,29 @@ void TextureCache::GarbageCollectImages() {
+@@ -1216,6 +1454,29 @@ void TextureCache::GarbageCollectImages() {
      u64 below_tick = 0;
      size_t num_deletions = 0;
      u32 visited = 0;
@@ -5193,7 +5786,7 @@ index 98ccdd1..f912bb1 100644
  
      const auto configure = [&](bool allow_aggressive) {
          pressured = total_used_memory >= pressure_gc_memory;
-@@ -1224,6 +1475,9 @@ void TextureCache::GarbageCollectImages() {
+@@ -1224,6 +1485,9 @@ void TextureCache::GarbageCollectImages() {
          below_tick = gc_tick - ticks_to_destroy;
          if (!pressured && !aggresive) {
              below_tick = std::min(below_tick, idle_tick);
@@ -5203,7 +5796,7 @@ index 98ccdd1..f912bb1 100644
          }
          num_deletions = aggresive ? 40 : pressured ? 20 : 10;
          visited = 0;
-@@ -1237,16 +1491,47 @@ void TextureCache::GarbageCollectImages() {
+@@ -1237,16 +1501,47 @@ void TextureCache::GarbageCollectImages() {
          const bool download = image.SafeToDownload();
          const bool tiled = image.info.IsTiled();
          // bbport: images that cannot go now (GPU-written: their contents exist only here, and
@@ -5256,7 +5849,7 @@ index 98ccdd1..f912bb1 100644
              // bbport: synchronously, while the image still protects its pages. A deferred
              // write-back landed after FreeImage had unprotected them, over whatever the game
              // had meanwhile stored there (e.g. its heap after unloading an area).
-@@ -1279,17 +1564,20 @@ void TextureCache::GarbageCollectImages() {
+@@ -1279,17 +1574,20 @@ void TextureCache::GarbageCollectImages() {
          lru_cache.ForEachItemBelow(below_tick, clean_up);
      }
      // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
@@ -5281,7 +5874,7 @@ index 98ccdd1..f912bb1 100644
          }
      }
  }
-@@ -1320,6 +1608,7 @@ void TextureCache::GarbageCollectSamplers() {
+@@ -1320,6 +1618,7 @@ void TextureCache::GarbageCollectSamplers() {
          const size_t lru_id = samplers.at(hash).lru_id;
          samplers.erase(hash);
          sampler_lru_cache.Free(lru_id);
@@ -5289,7 +5882,7 @@ index 98ccdd1..f912bb1 100644
          return false;
      };
  
-@@ -1338,6 +1627,10 @@ void TextureCache::RunGarbageCollector() {
+@@ -1338,6 +1637,10 @@ void TextureCache::RunGarbageCollector() {
      SCOPE_EXIT {
          ++gc_tick;
      };
@@ -5300,7 +5893,7 @@ index 98ccdd1..f912bb1 100644
  
      GarbageCollectImages();
      GarbageCollectSamplers();
-@@ -1375,6 +1668,16 @@ void TextureCache::DeleteImage(ImageId image_id) {
+@@ -1375,6 +1678,16 @@ void TextureCache::DeleteImage(ImageId image_id) {
          }
      }
  
@@ -5317,7 +5910,7 @@ index 98ccdd1..f912bb1 100644
      // Reclaim image and any image views it references.
      scheduler.DeferOperation([this, image_id] {
          Image& image = slot_images[image_id];
-@@ -1387,4 +1690,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
+@@ -1387,4 +1700,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
      });
  }
  
@@ -5333,7 +5926,7 @@ index 98ccdd1..f912bb1 100644
 +
  } // namespace VideoCore
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.h b/gpu/shadps4/video_core/texture_cache/texture_cache.h
-index 2e4c529..9889210 100644
+index 2e4c529..09d2739 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.h
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.h
 @@ -13,6 +13,7 @@
@@ -5344,7 +5937,15 @@ index 2e4c529..9889210 100644
  #include <queue>
  #include <tsl/robin_map.h>
  
-@@ -104,6 +105,28 @@ public:
+@@ -25,6 +26,7 @@
+ #include "video_core/texture_cache/image_view.h"
+ #include "video_core/texture_cache/sampler.h"
+ #include "video_core/texture_cache/tile_manager.h"
++#include "video_core/texture_cache/watched_pages.h"
+ 
+ namespace AmdGpu {
+ struct Liverpool;
+@@ -104,6 +106,28 @@ public:
          slot_images[image_id].tick_accessed_last = scheduler.CurrentTick();
      }
  
@@ -5373,7 +5974,20 @@ index 2e4c529..9889210 100644
      TileManager& GetTileManager() noexcept {
          return tile_manager;
      }
-@@ -217,7 +240,24 @@ public:
+@@ -111,6 +135,12 @@ public:
+     /// Invalidates any image in the logical page range.
+     void InvalidateMemory(VAddr addr, size_t size);
+ 
++    /// bbport: whether a tracked image protects a page of the range; without the lock, from any
++    /// thread (Rasterizer::OnWriteFault: a write fault elsewhere leaves this cache alone).
++    [[nodiscard]] bool WatchesPages(VAddr addr, size_t size) const noexcept {
++        return watched_pages.Any(addr, size);
++    }
++
+     /// Marks an image as dirty if it exists at the provided address.
+     void InvalidateMemoryFromGPU(VAddr address, size_t max_size);
+ 
+@@ -217,7 +247,24 @@ public:
      /// extra_lod_bias: bbport, added to the S#'s bias (reduced scene rendering).
      [[nodiscard]] vk::Sampler GetSampler(const AmdGpu::Sampler& sampler,
                                           AmdGpu::BorderColorBuffer border_color_base,
@@ -5399,7 +6013,7 @@ index 2e4c529..9889210 100644
  
      /// Retrieves the image with the specified id.
      Image* TryGetImage(ImageId id, u64 uid) {
-@@ -365,6 +405,12 @@ private:
+@@ -365,6 +412,12 @@ private:
      /// Copies image memory back to CPU.
      void DownloadImageMemory(ImageId image_id, bool sync = false);
  
@@ -5412,7 +6026,18 @@ index 2e4c529..9889210 100644
      /// Thread function for copying downloaded images out to CPU memory.
      void DownloadedImagesThread(const std::stop_token& token);
  
-@@ -393,6 +439,14 @@ private:
+@@ -387,12 +440,25 @@ private:
+     void UntrackImageHead(ImageId image_id);
+     void UntrackImageTail(ImageId image_id);
+ 
++    /// bbport: the page manager's write watchers of an image's pages, and watched_pages with
++    /// them: counted before the pages are protected, uncounted after they are unprotected.
++    void WatchPages(VAddr addr, u64 size);
++    void UnwatchPages(VAddr addr, u64 size);
++
+     void MarkAsMaybeDirty(ImageId image_id, Image& image);
+     static u64 MaybeDirtyHash(const Image& image);
+ 
      /// Removes the image and any views/surface metas that reference it.
      void DeleteImage(ImageId image_id);
  
@@ -5427,7 +6052,7 @@ index 2e4c529..9889210 100644
      /// Touch the image in the LRU cache.
      void TouchImage(const Image& image);
  
-@@ -420,6 +474,9 @@ private:
+@@ -420,6 +486,9 @@ private:
      std::unordered_set<ImageId> download_images;
      u64 total_used_memory = 0;
      u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
@@ -5437,7 +6062,7 @@ index 2e4c529..9889210 100644
      std::chrono::steady_clock::time_point gc_report_time{};
      /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
      std::array<u64, 64> gc_tick_at_second{};
-@@ -427,11 +484,29 @@ private:
+@@ -427,16 +496,37 @@ private:
      u64 trigger_gc_memory = 0;
      u64 pressure_gc_memory = 0;
      u64 critical_gc_memory = 0;
@@ -5467,6 +6092,14 @@ index 2e4c529..9889210 100644
      Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
      Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
      const bool readback_linear_images;
+     PageTable page_table;
+     std::mutex mutex;
++    /// bbport: the pages tracked images protect, readable without `mutex` (WatchesPages);
++    /// changed with `mutex` held, through WatchPages and UnwatchPages.
++    WatchedPages watched_pages;
+     // bbport: FindImage results for unchanged image registrations (guarded by `mutex`).
+     struct FindImageCacheEntry {
+         VAddr address = 0;
 diff --git a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp b/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
 index da02543..8e9d6bb 100644
 --- a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
@@ -7213,6 +7846,114 @@ index b36f136..d8be9be 100644
          input=joined;
      }
      Output out={job->outputs,job->output_count,0,0};
+diff --git a/src/runtime_audio.c b/src/runtime_audio.c
+index 2563dfa..03b7ea8 100644
+--- a/src/runtime_audio.c
++++ b/src/runtime_audio.c
+@@ -3,9 +3,13 @@
+  * reads 256-frame slots out of its mixer's 512-frame ring, and returning in
+  * bursts (whenever the device pulls a quantum) lets it overtake the mixer and
+  * play stale halves - a click every 10.7 ms. The lowest SDL queue level of
+- * each window is steered to two buffers (silence prefill on underrun, ±3%
+- * cadence corrections), which also absorbs device clock drift. Without an audio device (headless runs, BB_AUDIO=none)
+- * ports only follow the clock. */
++ * each window is steered to two buffers (silence prefill on underrun, cadence
++ * corrections), which also absorbs device clock drift. Without an audio device (headless runs, BB_AUDIO=none)
++ * ports only follow the clock.
++ * bbport: some devices take noticeably less than 48 kHz of what they are given (89-91% seen on
++ * one PC): the correction is proportional (up to 25% slower) instead of a fixed 3%, which let
++ * the queue - the sound's delay - grow by a second every minute, and a queue far over the
++ * target is dropped back to it at once. */
+ #define _GNU_SOURCE
+ #include "runtime.h"
+ #include <stdio.h>
+@@ -40,6 +44,8 @@ typedef struct {
+     int stats;
+     uint64_t stat_start_ns, stat_last_ns, stat_max_gap_ns; /* BB_AUDIO_STATS */
+     unsigned stat_starved, stat_buffers; int stat_min_queued;
++    int stat_start_queued; uint64_t stat_bytes; /* the device's rate: what it took of what was given */
++    unsigned resets;                /* queues dropped back to the target */
+ } Port;
+ typedef struct { uint16_t output; uint8_t channel, reserved; int16_t volume; uint16_t reroute; uint64_t flag, reserved64[2]; } PortState;
+ _Static_assert(sizeof(PortState)==32,"AudioOut port state layout");
+@@ -56,6 +62,10 @@ static int sdl_audio(void) {
+         const char *mode=getenv("BB_AUDIO");
+         sdl_ready = (!mode || strcmp(mode,"none")) && SDL_InitSubSystem(SDL_INIT_AUDIO);
+         printf("Runtime: audio backend %s\n", sdl_ready ? SDL_GetCurrentAudioDriver() : "timer (silent)");
++        SDL_AudioSpec device; int device_frames=0;
++        if (sdl_ready && SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,&device_frames))
++            printf("Runtime: audio device %d Hz, %d channels, %d-frame buffer (the game: 48000 Hz, converted)\n",
++                   device.freq,device.channels,device_frames);
+     }
+     return sdl_ready;
+ }
+@@ -162,19 +172,28 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
+         if (p->dump) fwrite(converted,1,bytes,p->dump);
+         if (p->stats) {
+             uint64_t now=now_ns();
+-            if (!p->stat_start_ns) { p->stat_start_ns=now; p->stat_min_queued=1<<30; }
++            if (!p->stat_start_ns) {
++                p->stat_start_ns=now; p->stat_min_queued=1<<30;
++                p->stat_start_queued=p->stream ? SDL_GetAudioStreamQueued(p->stream) : 0; p->stat_bytes=0;
++            }
+             else if (now-p->stat_last_ns>p->stat_max_gap_ns) p->stat_max_gap_ns=now-p->stat_last_ns;
+-            p->stat_last_ns=now; ++p->stat_buffers;
++            p->stat_last_ns=now; ++p->stat_buffers; p->stat_bytes+=bytes;
+             if (p->stream) {
+                 int queued=SDL_GetAudioStreamQueued(p->stream);
+                 if (queued<p->stat_min_queued) p->stat_min_queued=queued;
+                 if (queued==0) ++p->stat_starved;
+             }
+             if (now-p->stat_start_ns>=5000000000u) {
+-                printf("Audio stats port %d: %u buffers/5s (expected %u), max gap %.2f ms, min queued %d bytes, starved %u\n",
++                /* What the device took in this window, against 48 kHz (100%: it keeps up). */
++                const int queued_now=p->stream ? SDL_GetAudioStreamQueued(p->stream) : 0;
++                const double taken=(double)p->stat_bytes-(double)(queued_now-p->stat_start_queued);
++                const double nominal=(double)(now-p->stat_start_ns)/1e9*48000.0*p->channels*p->sample_bytes;
++                printf("Audio stats port %d: %u buffers/5s (expected %u), max gap %.2f ms, min queued %d bytes, starved %u, "
++                       "device took %.1f%% of 48 kHz, queue resets %u\n",
+                        (int)(p-ports),p->stat_buffers,(unsigned)(5u*48000u/(unsigned)p->frames),p->stat_max_gap_ns/1e6,
+-                       p->stat_min_queued,p->stat_starved);
++                       p->stat_min_queued,p->stat_starved,p->stream ? 100.0*taken/nominal : 0.0,p->resets);
+                 p->stat_start_ns=now; p->stat_max_gap_ns=0; p->stat_starved=0; p->stat_buffers=0; p->stat_min_queued=1<<30;
++                p->stat_start_queued=queued_now; p->stat_bytes=0;
+             }
+         }
+         if (pace) {
+@@ -186,15 +205,31 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
+         if (p->stream) {
+             /* The device drains the queue in quanta (21 ms on PipeWire), so the level
+                is a sawtooth: its minimum over ~32 buffers is what gets controlled. */
++            static const unsigned char silence[2048*8*4];
+             int low=2*(int)bytes, queued=SDL_GetAudioStreamQueued(p->stream);
+             if (queued<(int)bytes) {
+-                static const unsigned char silence[2048*8*4];
+                 SDL_PutAudioStreamData(p->stream,silence,low-queued<(int)bytes ? low-queued : (int)bytes);
+                 queued=low;
+             }
++            /* Far over the target (a device taking less than the correction covers, or a burst):
++               the delay would only grow. Back to the target at once: one skip, not seconds of lag. */
++            if (queued>low+32*(int)bytes) {
++                SDL_ClearAudioStream(p->stream);
++                SDL_PutAudioStreamData(p->stream,silence,(int)bytes);
++                SDL_PutAudioStreamData(p->stream,silence,(int)bytes);
++                queued=low; p->window_count=0;
++                if (++p->resets<=4)
++                    printf("Runtime: audio port %d: the device took far less than it was given; queue dropped back to %d bytes\n",
++                           (int)(p-ports),low);
++            }
+             if (!p->window_count || queued<p->window_min) p->window_min=queued;
+             if (++p->window_count==32) {
+-                p->adjust_ns=p->window_min>low+2*(int)bytes ? (int64_t)(period/32) : p->window_min<low ? -(int64_t)(period/32) : 0;
++                /* Proportional to the excess (a 32nd of a period per buffer of it, at most a quarter
++                   slower): a device at 90% settles about 3.5 buffers over the target. */
++                const int excess=p->window_min-(low+2*(int)bytes);
++                int64_t adjust=excess>0 ? (int64_t)period*excess/(32*(int64_t)bytes) : p->window_min<low ? -(int64_t)(period/32) : 0;
++                if (adjust>(int64_t)(period/4)) adjust=(int64_t)(period/4);
++                p->adjust_ns=adjust;
+                 p->window_count=0;
+             }
+             p->next_deadline_ns+=(uint64_t)p->adjust_ns;
 diff --git a/src/runtime_content.c b/src/runtime_content.c
 index 59a683b..673a2de 100644
 --- a/src/runtime_content.c
@@ -8259,6 +9000,127 @@ index 0000000..8db00a1
 +  when an upscaler runs; the map is interpolated to the output.
 +- `BB_UPSCALER=none` disables the frame analysis the passes rely on: native mode shows every frame
 +  as SDR (use expand mode instead).
+diff --git a/docs/pipeline_compiles.md b/docs/pipeline_compiles.md
+new file mode 100644
+index 0000000..dfb8088
+--- /dev/null
++++ b/docs/pipeline_compiles.md
+@@ -0,0 +1,115 @@
++# Pipeline compiles and the waits behind them
++
++A pipeline first seen during play is compiled on the compile threads (`BB_ASYNC_PIPELINES`,
++default on). With a cold NVIDIA cache a compile takes 100-300 ms; entering an area brings
++20-90 at once. Pipelines known from the shader database are created at start (preload) and
++come out of the driver cache (`<serial>.vkcache`) quickly.
++
++## What a draw does with a pipeline still compiling
++
++Before (0.9.10 beta 1) the draw recording thread (stage B of the draw pipe) waited for it when
++it recorded the bind: every new pipeline stalled the frame by its compile time (user logs, RTX
++5060: `2 compiles 594 ms` -> a 607 ms frame, `18 compiles 1110 ms` -> 1665 ms), and the GPU
++command thread and the guest threads that waited for stage B (drains, see below) stalled with
++it. Now (`Rasterizer::DrawRecord`, `HandleIfReady`):
++
++- **Scene geometry is left out** while its pipeline compiles (`SkipUncompiledDraw`): draws with
++  the scene depth (the G-buffer pass's, which was also the scene depth the frame before) that
++  are not full-screen passes (more than 6 indices or instanced) - the draws the upscaler
++  jitters. G-buffer, light volumes, forward/transparent draws and effects drawn with the scene
++  depth. The frame draws these targets again from a clear, so the object is missing for the
++  frames the compile takes (pop-in), nothing more. Everything else of the draw runs as before
++  (targets, barriers, render pass, resources): only `vkCmdDraw` is not recorded. Never left
++  out: draws the game measures (occlusion queries: zero samples would hide their predicated
++  draws), indirect draws, compute dispatches, shadow maps, half-resolution effects,
++  post-processing and UI (what they draw may be kept over frames or read as a whole), and
++  draws during a frame capture. A pipeline's draws are left out for at most
++  `BB_SKIP_UNCOMPILED_MS` (1000) from its first left-out draw; then they wait for it. "A few
++  frames" at 120 FPS is 25-40 ms, below every compile measured, so the bound is in time.
++  `BB_SKIP_UNCOMPILED=0`: never left out.
++- **Everything else binds the pipeline on a recording thread** (`BindWhenCompiled`): the bind
++  becomes a command of its own, and the recording thread that records it into the command
++  buffer waits for the compile there. Stage B goes on with the next draws, so drains of the
++  GPU command thread (and the guest threads behind them) do not wait for the compile. The
++  frame itself still waits for it (its submission needs the command). `BB_LATE_PIPELINE_BIND=0`
++  (or commands recorded on the calling thread: `BB_VK_RECORD_THREAD=0`, direct segments):
++  stage B waits, as before.
++- **A thread that must wait compiles the pipeline itself** when no compile thread has started
++  it (`Pipeline::WaitReady`, `TakePipelineJob`): in a burst it was queued behind the other
++  pipelines first. `BB_PIPELINE_TAKE=0`: waits for the compile threads.
++
++An already compiled pipeline costs what it did: `HandleIfReady` is the load and branch
++`Handle()` was. The draw command gained a branch on the recording thread (bind or not).
++
++## Why not VK_EXT_graphics_pipeline_library
++
++DXVK links pipelines from libraries compiled when the game creates its shaders, long before the
++draws. Here (measured on the user's shader database, 855 graphics pipelines):
++
++- Shaders reach the port at the draw that needs them: the guest binary is translated there.
++  Libraries would be compiled at that draw too; only linking is fast.
++- All stages of a pipeline share descriptor set 0 (one push descriptor set; the vertex stage's
++  bindings follow the fragment stage's, and the vertex module is specialized on that offset).
++  Libraries need identically defined layouts, so they are shared only between pipelines with
++  the same stage modules: 780 distinct stage sets among the 855 pipelines (75, 9%, would reuse
++  libraries). Separate sets per stage would end push descriptors for one of them: a descriptor
++  set write per draw on the thread that limits the frame rate.
++- NVIDIA compiles each library stage about as fully as in a pipeline: a draw would wait for
++  the slower of the vertex and fragment libraries instead of both (perhaps 30-40% less), at
++  about twice the compile work (libraries and the optimized pipeline after them).
++
++The start line reports whether the device offers it (`graphics pipeline library offered (fast
++linking)`) for later work, e.g. if shader translation could run ahead of the draws.
++
++## Waits behind the draw recording thread (write faults, drains)
++
++`Stall: 335.8 ms frame; ... write faults 324.6 ms; GPU thread on CPU 328.1 ms (kernel 203.1
++ms)`, and from a boss fight `image create 575 ms`, `image refresh 608.6 ms` with `write faults
++605.1 ms`. Two different waits:
++
++- **Guest threads** handle their write faults with locks (`OnWriteFault`, `assume_locks`
++  false); they never drain. `TextureCache::InvalidateMemory` takes the texture cache's lock,
++  which stage B holds through `FindImage` (image creation, page protection) and `UpdateImage`
++  (`RefreshImage`: the upload): 0.5-0.6 s with memory short. Most faults are on buffer pages
++  (the game rewriting constants and vertices) that no image watches. The texture cache now
++  counts, per 4 KiB page, the tracked images that protect it (`WatchedPages`, kept with the
++  page manager's watchers, readable without the lock); a fault on a page no image watches
++  updates the buffer tracking only. Images learn of CPU writes through their own page
++  protection alone, so this is what the lock gave them: an untracked image is already dirty,
++  or new (dirty), or hash-checked (MaybeCpuDirty). `BB_FAULT_SKIP_TEXTURES=0`: the lock for
++  every fault. A fault on a page an image watches still waits for the lock (unchanged), and
++  a guest thread's fault on GPU-written data still needs the GPU thread for the readback.
++- **The GPU command thread** (stage A) drains before it handles its own faults (stream order:
++  the queued draws read the old bytes first; a readback records commands) and at many other
++  points. It waited with `SwitchToThread` in a loop for as long as stage B took: a core burnt
++  in the kernel while stage B (or a compile thread) needed it. Its waits (`Drain`,
++  `WaitForPacket`, a full ring) now spin, yield for `BB_DRAIN_SPIN_US` (500), then sleep until
++  stage B has run the packet they need (stage B checks after each packet whether stage A
++  sleeps for it: a load and a branch). `BB_DRAIN_SLEEP=0`: spin and yield as before. The wait
++  itself is as long as stage B's work: with compiles off stage B that is now mostly image
++  creation and uploads (memory pressure).
++
++## Statistics and log lines
++
++At start:
++
++    Pipelines: new ones compiled on 4 threads; draws of one still compiling: scene geometry left out for up to 1000 ms, other draws bind it on the recording threads (they wait for it) (BB_SKIP_UNCOMPILED, BB_LATE_PIPELINE_BIND); graphics pipeline library offered (fast linking), not used
++    Waits: GPU command thread drains sleep after a spin (stage B wakes them); write faults on pages no image watches leave the texture cache alone (BB_DRAIN_SLEEP, BB_FAULT_SKIP_TEXTURES)
++
++`BB_FRAME_STATS`, every 5 s when anything happened:
++
++    Pipelines: 18 compiled in the background (2 by the thread that needed them); 340 draws of 12 pipelines left out while compiling; 6 draws/dispatches bound on the recording threads; 3 waits, 210.4 ms, longest 120.3 ms
++
++and `(N/s slept)` in the `Draw pipe:` line. The `shader/pipeline compiles, ms` figure of
++`Frame stats` still adds the waits (now on recording threads too) to the translation time.
++
++## Risks
++
++- Left-out scene draws: an object (or light volume, decal, particle) appears a few frames
++  late the first time its pipeline is needed. A transparent layer whose pipeline is ready
++  over an opaque one still compiling shows over the background for those frames.
++- A recording thread waiting for a compile delays its segment, the submission and the guest's
++  fences after it, as stage B's wait did; ordered tasks (guest copies, fence signals) queue
++  behind it.
++- `ReplaceShader` (shader patching from the debug UI) destroys pipelines at once; a late bind
++  still queued for one would use it after that.
 diff --git a/gpu/shadps4/video_core/host_shaders/hdr_native.comp b/gpu/shadps4/video_core/host_shaders/hdr_native.comp
 new file mode 100644
 index 0000000..048efd8
@@ -9087,6 +9949,122 @@ index 0000000..930b227
 +};
 +
 +} // namespace OcclusionModel
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/pipeline_compile_queue.h b/gpu/shadps4/video_core/renderer_vulkan/pipeline_compile_queue.h
+new file mode 100644
+index 0000000..766462b
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/pipeline_compile_queue.h
+@@ -0,0 +1,110 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: pipelines first seen during play (docs/pipeline_compiles.md). The compile threads'
++// job queue, from which a thread that needs a pipeline right away takes its job, the rule for
++// how long draws of a pipeline still compiling may be left out, and the statistics of both
++// (BB_FRAME_STATS "Pipelines:" line). No Vulkan here: tests/test_pipeline_compile.cpp.
++
++#pragma once
++
++#include <algorithm>
++#include <atomic>
++#include <condition_variable>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <functional>
++#include <mutex>
++#include <utility>
++
++namespace Vulkan {
++
++/// Compile jobs, first in, first out (the order the draws need them in), each with the object
++/// it creates (`owner`). A thread about to wait for that object takes its job when no compile
++/// thread has started it yet (Take) and runs it itself, instead of waiting behind the jobs
++/// queued before it (20-90 pipelines at once entering an area).
++class PipelineJobQueue {
++public:
++    using Job = std::function<void()>;
++
++    void Push(const void* owner, Job job) {
++        {
++            std::scoped_lock lk{mutex};
++            jobs.push_back({owner, std::move(job)});
++        }
++        cv.notify_one();
++    }
++
++    /// A compile thread: the oldest job (waits for one).
++    Job Pop() {
++        std::unique_lock lk{mutex};
++        cv.wait(lk, [this] { return !jobs.empty(); });
++        Job job = std::move(jobs.front().job);
++        jobs.pop_front();
++        return job;
++    }
++
++    /// `owner`'s job, taken out of the queue, when no thread has started it; else empty.
++    Job Take(const void* owner) {
++        std::scoped_lock lk{mutex};
++        const auto it =
++            std::find_if(jobs.begin(), jobs.end(), [owner](const Entry& e) { return e.owner == owner; });
++        if (it == jobs.end()) {
++            return {};
++        }
++        Job job = std::move(it->job);
++        jobs.erase(it);
++        return job;
++    }
++
++    [[nodiscard]] std::size_t Size() {
++        std::scoped_lock lk{mutex};
++        return jobs.size();
++    }
++
++private:
++    struct Entry {
++        const void* owner;
++        Job job;
++    };
++    std::mutex mutex;
++    std::condition_variable cv;
++    std::deque<Entry> jobs;
++};
++
++/// Whether a draw of a pipeline still compiling may be left out now. `first_skip_ns`: when one
++/// of its draws was first left out (0: none yet; set here), `budget_ns`: for how long its draws
++/// may be left out. Past that they wait for it: a compile that never ends (or a queue that does
++/// not move) shows as a stall, not as geometry missing for good.
++inline bool WithinSkipBudget(std::uint64_t& first_skip_ns, std::uint64_t now_ns,
++                             std::uint64_t budget_ns) noexcept {
++    if (first_skip_ns == 0) {
++        first_skip_ns = now_ns != 0 ? now_ns : 1;
++        return budget_ns != 0;
++    }
++    return now_ns - first_skip_ns < budget_ns;
++}
++
++/// Counted since the last statistics window (BB_FRAME_STATS), exchanged to 0 when printed.
++struct PipelineCompileStats {
++    std::atomic<std::uint64_t> background{0};        ///< pipelines handed to the compile threads
++    std::atomic<std::uint64_t> taken{0};             ///< compiled by the thread that needed them
++    std::atomic<std::uint64_t> skipped_draws{0};     ///< draws left out, their pipeline compiling
++    std::atomic<std::uint64_t> skipped_pipelines{0}; ///< pipelines whose draws were left out
++    std::atomic<std::uint64_t> late_binds{0};        ///< draws bound on the recording threads
++    std::atomic<std::uint64_t> waits{0};             ///< threads that waited for a compile
++    std::atomic<std::uint64_t> wait_ns{0};
++    std::atomic<std::uint64_t> longest_wait_ns{0};
++
++    void NoteWait(std::uint64_t ns) noexcept {
++        waits.fetch_add(1, std::memory_order_relaxed);
++        wait_ns.fetch_add(ns, std::memory_order_relaxed);
++        std::uint64_t longest = longest_wait_ns.load(std::memory_order_relaxed);
++        while (ns > longest &&
++               !longest_wait_ns.compare_exchange_weak(longest, ns, std::memory_order_relaxed)) {
++        }
++    }
++};
++
++inline PipelineCompileStats pipeline_compile_stats;
++
++} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_hdr_native.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_hdr_native.cpp
 new file mode 100644
 index 0000000..571167a
@@ -10382,10 +11360,10 @@ index 0000000..1cdcd2d
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
 new file mode 100644
-index 0000000..55cdec0
+index 0000000..da1ac39
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,178 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: real occlusion query results (BB_OCCLUSION, default on; 0: the old fake counts).
 +//
@@ -10517,6 +11495,12 @@ index 0000000..55cdec0
 +        }
 +        return AllocateQuery(scene_size);
 +    }
++    /// bbport: whether BeginDraw would measure the next draw. A draw the game measures is never
++    /// left out while its pipeline compiles (Rasterizer::SkipUncompiledDraw): zero samples
++    /// would read as occluded and its predicated draws would vanish too.
++    [[nodiscard]] bool Measuring() const noexcept {
++        return interval.open && interval.queries < interval.cap;
++    }
 +
 +private:
 +    Occlusion(const Instance& instance, Scheduler& scheduler, Rasterizer& rasterizer);
@@ -10558,6 +11542,100 @@ index 0000000..55cdec0
 +};
 +
 +} // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/texture_cache/watched_pages.h b/gpu/shadps4/video_core/texture_cache/watched_pages.h
+new file mode 100644
+index 0000000..2336643
+--- /dev/null
++++ b/gpu/shadps4/video_core/texture_cache/watched_pages.h
+@@ -0,0 +1,88 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: how many tracked images watch each guest page, readable without the texture cache's
++// lock (docs/pipeline_compiles.md, "Write faults"). No Vulkan here: tests/test_pipeline_compile.cpp.
++
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++namespace VideoCore {
++
++/// The pages each tracked image protects (TextureCache::TrackImage and the Untrack functions:
++/// the same ranges, counted per page as the page manager counts them), per 4 KiB page. A write
++/// fault on a page no tracked image watches (a buffer's page, most faults) needs nothing from
++/// the texture cache: the guest thread then does not take its lock, which the draw recording
++/// thread holds while it creates an image or uploads one (0.5-0.6 s each with memory short).
++///
++/// Writers hold the texture cache's lock (one at a time); readers may be any thread. A reader
++/// that races with a track sees the page either way: unwatched, its write lands before the
++/// image's upload reads the memory; watched, it takes the lock as before. Counts go up before
++/// the pages are protected and down after they are unprotected.
++class WatchedPages {
++public:
++    static constexpr std::uint32_t PageBits = 12;      ///< the page manager's 4 KiB pages
++    static constexpr std::uint32_t ChunkPageBits = 16; ///< 256 MiB of guest memory per chunk
++    static constexpr std::uint32_t AddressBits = 40;   ///< guest addresses (page manager)
++
++    /// `delta` (+1/-1) for every page of [address, address + size), as
++    /// PageManager::UpdatePageWatchers counts them. Writers hold the texture cache's lock.
++    void Add(std::uint64_t address, std::uint64_t size, int delta) {
++        const std::uint64_t first = address >> PageBits;
++        const std::uint64_t end = (address + size + PageSize - 1) >> PageBits;
++        for (std::uint64_t page = first; page < end; ++page) {
++            const std::uint64_t chunk = page >> ChunkPageBits;
++            if (chunk >= NumChunks) {
++                return;
++            }
++            Count* counts = chunks[chunk].load(std::memory_order_relaxed);
++            if (!counts) {
++                if (delta < 0) {
++                    continue;
++                }
++                owned.push_back(std::make_unique<Count[]>(ChunkPages));
++                counts = owned.back().get();
++                chunks[chunk].store(counts, std::memory_order_release);
++            }
++            Count& count = counts[page & (ChunkPages - 1)];
++            const std::uint32_t now = count.load(std::memory_order_relaxed);
++            // One writer: a plain read-modify-write (no locked instruction per page).
++            count.store(static_cast<std::uint16_t>(delta < 0 ? (now ? now - 1 : 0) : now + 1),
++                        std::memory_order_release);
++        }
++    }
++
++    /// Whether a tracked image watches a page of [address, address + size). Any thread.
++    [[nodiscard]] bool Any(std::uint64_t address, std::uint64_t size) const noexcept {
++        const std::uint64_t first = address >> PageBits;
++        const std::uint64_t end = (address + std::max<std::uint64_t>(size, 1) + PageSize - 1) >>
++                                  PageBits;
++        for (std::uint64_t page = first; page < end; ++page) {
++            const std::uint64_t chunk = page >> ChunkPageBits;
++            if (chunk >= NumChunks) {
++                return true; // outside the table: assume watched (the locked path)
++            }
++            const Count* counts = chunks[chunk].load(std::memory_order_acquire);
++            if (counts && counts[page & (ChunkPages - 1)].load(std::memory_order_acquire) != 0) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++private:
++    using Count = std::atomic<std::uint16_t>;
++    static constexpr std::uint64_t PageSize = std::uint64_t{1} << PageBits;
++    static constexpr std::size_t ChunkPages = std::size_t{1} << ChunkPageBits;
++    static constexpr std::size_t NumChunks = std::size_t{1}
++                                             << (AddressBits - PageBits - ChunkPageBits);
++    std::array<std::atomic<Count*>, NumChunks> chunks{};
++    std::vector<std::unique_ptr<Count[]>> owned; ///< writers only
++};
++
++} // namespace VideoCore
 diff --git a/gpu/shim/bbport_menu_i18n.cpp b/gpu/shim/bbport_menu_i18n.cpp
 new file mode 100644
 index 0000000..16a69e0
@@ -13799,5 +14877,242 @@ index 0000000..89dd2e5
 +    }
 +
 +    std::printf("occlusion model: ok\n");
++    return 0;
++}
+diff --git a/tests/test_pipeline_compile.cpp b/tests/test_pipeline_compile.cpp
+new file mode 100644
+index 0000000..b14cae2
+--- /dev/null
++++ b/tests/test_pipeline_compile.cpp
+@@ -0,0 +1,231 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Pipeline compiles off the frame path (docs/pipeline_compiles.md): the compile job queue a
++// waiting thread takes its job from, the bound on leaving draws out, the texture cache's
++// lock-free page watch counts, and the draw pipe's sleeping waits (no Vulkan device).
++#include <atomic>
++#include <cassert>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <thread>
++#include <vector>
++
++#include "bbport_platform.h"
++#include "video_core/renderer_vulkan/pipeline_compile_queue.h"
++#include "video_core/renderer_vulkan/vk_draw_pipe.h"
++#include "video_core/texture_cache/watched_pages.h"
++
++using namespace std::chrono_literals;
++
++namespace {
++
++void TestJobQueue() {
++    Vulkan::PipelineJobQueue queue;
++    int a = 0, b = 0, c = 0;
++    std::vector<char> order;
++    queue.Push(&a, [&] { order.push_back('a'); });
++    queue.Push(&b, [&] { order.push_back('b'); });
++    queue.Push(&c, [&] { order.push_back('c'); });
++    assert(queue.Size() == 3);
++    // A thread that needs b takes it out of the queue and runs it itself.
++    auto job = queue.Take(&b);
++    assert(job);
++    job();
++    assert(!queue.Take(&b)); // gone: a second waiter waits for the first one's result
++    assert(queue.Size() == 2);
++    // The compile threads go on first in, first out with the rest.
++    queue.Pop()();
++    queue.Pop()();
++    assert((order == std::vector<char>{'b', 'a', 'c'}));
++    assert(!queue.Take(&a) && queue.Size() == 0);
++
++    // A compile thread and takers at once: every job runs exactly once.
++    constexpr int Jobs = 2000;
++    std::vector<int> owners(Jobs);
++    std::vector<std::atomic<int>> runs(Jobs);
++    for (int i = 0; i < Jobs; ++i) {
++        queue.Push(&owners[i], [&, i] {
++            runs[i].fetch_add(1);
++            std::this_thread::yield();
++        });
++    }
++    std::atomic<bool> stop{false};
++    std::thread worker([&] {
++        while (!stop.load()) {
++            queue.Pop()();
++        }
++    });
++    for (int i = Jobs - 1; i >= 0; i -= 3) {
++        if (auto j = queue.Take(&owners[i])) {
++            j();
++        }
++    }
++    // Last in the queue: the compile thread has run every job left before it.
++    queue.Push(nullptr, [&] { stop.store(true); });
++    worker.join();
++    assert(queue.Size() == 0);
++    for (int i = 0; i < Jobs; ++i) {
++        assert(runs[i].load() == 1);
++    }
++}
++
++void TestSkipBudget() {
++    using Vulkan::WithinSkipBudget;
++    constexpr std::uint64_t Ms = 1'000'000;
++    std::uint64_t first = 0;
++    assert(WithinSkipBudget(first, 5 * Ms, 1000 * Ms) && first == 5 * Ms);
++    assert(WithinSkipBudget(first, 500 * Ms, 1000 * Ms) && first == 5 * Ms);
++    assert(WithinSkipBudget(first, 1004 * Ms, 1000 * Ms));
++    assert(!WithinSkipBudget(first, 1005 * Ms, 1000 * Ms)); // waits from then on
++    assert(!WithinSkipBudget(first, 9000 * Ms, 1000 * Ms));
++    std::uint64_t never = 0;
++    assert(!WithinSkipBudget(never, 7 * Ms, 0)); // BB_SKIP_UNCOMPILED=0
++    std::uint64_t at_zero = 0;
++    assert(WithinSkipBudget(at_zero, 0, 10) && at_zero != 0);
++}
++
++void TestWatchedPages() {
++    auto pages = std::make_unique<VideoCore::WatchedPages>();
++    constexpr std::uint64_t P = 4096;
++    const std::uint64_t base = 0x2'4000'0000ull; // another chunk than below
++    assert(!pages->Any(base, 8));
++    // An image over three pages, not page aligned (TrackImage: the whole image).
++    const std::uint64_t begin = base + 0x800, end = base + 2 * P + 0x100;
++    pages->Add(begin, end - begin, 1);
++    assert(pages->Any(base, 8) && pages->Any(base + P, 8) && pages->Any(base + 2 * P + 0xff0, 8));
++    assert(!pages->Any(base + 3 * P, 8) && !pages->Any(base - 8, 8));
++    // UntrackImageHead: [begin, next page), then UntrackImageTail: [page of end, end): the
++    // counts follow the page manager's (each sub-range's own pages).
++    pages->Add(begin, base + P - begin, -1);
++    assert(!pages->Any(base + 0x900, 8) && pages->Any(base + P, 8));
++    pages->Add(base + 2 * P, end - (base + 2 * P), -1);
++    assert(!pages->Any(base + 2 * P + 8, 8) && pages->Any(base + P + 8, 8));
++    // A second image sharing the middle page keeps it watched after the first one goes.
++    pages->Add(base + P + 0x200, 0x100, 1);
++    pages->Add(base + P, P, -1); // UntrackImage of what is left of the first
++    assert(pages->Any(base + P, 8));
++    pages->Add(base + P + 0x200, 0x100, -1);
++    assert(!pages->Any(base, 3 * P));
++    // A range across pages, and a page-aligned tail of size 0 (no page), as the page manager.
++    pages->Add(base + 5 * P, 0, -1);
++    assert(!pages->Any(base + 5 * P, 1));
++    // Addresses past the table count as watched (the locked path).
++    assert(pages->Any(std::uint64_t{1} << 41, 8));
++    // Untracking more than tracked stays at zero instead of wrapping.
++    pages->Add(base + 9 * P, P, -1);
++    assert(!pages->Any(base + 9 * P, 8));
++}
++
++// The draw pipe's stage A waits: packets that run long (a pipeline compile, an image created
++// with memory short) must not keep stage A spinning, and a wake-up must never be lost.
++std::atomic<int> long_packets{0};
++std::atomic<std::uint64_t> handled{0};
++void Handler(void*, const u8* packet, u32 size) {
++    u32 sleep_ms = 0;
++    std::memcpy(&sleep_ms, packet, sizeof(sleep_ms));
++    if (sleep_ms) {
++        long_packets.fetch_add(1);
++        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
++    }
++    assert(size == sizeof(u32));
++    handled.fetch_add(1, std::memory_order_relaxed);
++}
++
++void Post(Vulkan::DrawPipe& pipe, u32 sleep_ms) {
++    u8* out = pipe.Begin(sizeof(u32));
++    std::memcpy(out, &sleep_ms, sizeof(sleep_ms));
++    pipe.Commit(sizeof(u32));
++}
++
++std::uint64_t ThreadCpuUs() {
++    BbPlatform::Usage usage;
++    return BbPlatform::GetUsage(true, usage) ? usage.user_us + usage.sys_us : 0;
++}
++
++void TestDrawPipeWaits() {
++    Vulkan::DrawPipe pipe(&Handler, nullptr);
++    // A drain behind a 300 ms packet: stage A sleeps (stage B wakes it), using little CPU.
++    Post(pipe, 0);
++    Post(pipe, 300);
++    const std::uint64_t cpu_before = ThreadCpuUs();
++    const auto start = std::chrono::steady_clock::now();
++    pipe.Drain();
++    const auto waited = std::chrono::steady_clock::now() - start;
++    const std::uint64_t cpu_us = ThreadCpuUs() - cpu_before;
++    assert(pipe.Idle() && handled.load() == 2);
++    assert(waited >= 250ms);
++    std::printf("drain behind a 300 ms packet: waited %lld ms, %llu us on the CPU, %llu sleeps\n",
++                static_cast<long long>(
++                    std::chrono::duration_cast<std::chrono::milliseconds>(waited).count()),
++                static_cast<unsigned long long>(cpu_us),
++                static_cast<unsigned long long>(pipe.sleeps));
++    if (Vulkan::DrawPipe::SleepEnabled()) {
++        assert(pipe.sleeps >= 1);
++        // Spin (4096 pauses) and yield for 0.5 ms, then asleep: far below the 300 ms.
++        assert(cpu_us < 60'000);
++    }
++
++    // WaitForPacket for one in the middle of long ones.
++    const u64 number = pipe.NextPacket() + 1;
++    Post(pipe, 20);
++    Post(pipe, 20);
++    Post(pipe, 200);
++    pipe.WaitForPacket(number, Vulkan::DrawPipe::ReasonConstRam);
++    assert(pipe.ReachedPacket(number));
++    pipe.Drain();
++
++    // Many short packets with drains and packet waits in between, a watchdog for a lost
++    // wake-up (stage A asleep with nothing left for stage B to run: a hang).
++    std::atomic<bool> finished{false};
++    std::thread watchdog([&] {
++        std::uint64_t last = handled.load();
++        for (int quiet = 0; !finished.load(); std::this_thread::sleep_for(100ms)) {
++            const std::uint64_t now = handled.load();
++            quiet = now == last ? quiet + 1 : 0;
++            last = now;
++            if (quiet > 100) {
++                std::fprintf(stderr, "draw pipe wait hung (lost wake-up)\n");
++                std::abort();
++            }
++        }
++    });
++    std::uint64_t rng = 0x9e3779b97f4a7c15ull;
++    for (int i = 0; i < 20000; ++i) {
++        rng ^= rng << 13;
++        rng ^= rng >> 7;
++        rng ^= rng << 17;
++        Post(pipe, (rng & 1023) == 0 ? 2 : 0);
++        switch (rng >> 61) {
++        case 0:
++            pipe.Drain();
++            assert(pipe.Idle());
++            break;
++        case 1:
++            pipe.WaitForPacket(pipe.NextPacket() - 1, Vulkan::DrawPipe::ReasonRasterizer);
++            break;
++        default:
++            break;
++        }
++    }
++    pipe.Drain();
++    finished.store(true);
++    watchdog.join();
++    assert(pipe.Idle() && handled.load() == pipe.packets);
++    std::printf("%llu packets, %llu drains that waited, %llu slept, %d long packets\n",
++                static_cast<unsigned long long>(pipe.packets),
++                static_cast<unsigned long long>(pipe.drains),
++                static_cast<unsigned long long>(pipe.sleeps), long_packets.load());
++}
++
++} // namespace
++
++int main() {
++    TestJobQueue();
++    TestSkipBudget();
++    TestWatchedPages();
++    TestDrawPipeWaits();
++    std::printf("pipeline compile tests passed\n");
 +    return 0;
 +}

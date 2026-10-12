@@ -75,6 +75,16 @@ namespace BloodborneLauncher.Core
                 env["BB_SUBMIT_END_TASKS"] = "0";
                 env["BB_MEMO_REVALIDATE"] = "0";
                 env["BB_SAMPLER_MEMO"] = "0";
+                env["BB_DRAIN_SLEEP"] = "0";
+                env["BB_FAULT_SKIP_TEXTURES"] = "0";
+            }
+            // Sound threads first (CPUs with many slower cores): off unless chosen.
+            if (!s.Bool("audio_priority") || s.Bool("safe_mode_next")) env["BB_AUDIO_THREAD_PRIORITY"] = "0";
+            if (!s.Bool("exp_compile_skip"))
+            {
+                env["BB_SKIP_UNCOMPILED"] = "0";
+                env["BB_LATE_PIPELINE_BIND"] = "0";
+                env["BB_PIPELINE_TAKE"] = "0";
             }
             if (s.Bool("section_stats")) env["BB_SECTIONS"] = "1";
             if (s.Bool("safe_mode_next"))
@@ -91,6 +101,11 @@ namespace BloodborneLauncher.Core
                 env["BB_SUBMIT_END_TASKS"] = "0";
                 env["BB_MEMO_REVALIDATE"] = "0";
                 env["BB_SAMPLER_MEMO"] = "0";
+                env["BB_DRAIN_SLEEP"] = "0";
+                env["BB_FAULT_SKIP_TEXTURES"] = "0";
+                env["BB_SKIP_UNCOMPILED"] = "0";
+                env["BB_LATE_PIPELINE_BIND"] = "0";
+                env["BB_PIPELINE_TAKE"] = "0";
                 env["BB_MODS_ENABLED"] = "0";
             }
             // The account password never goes to bbport.ini; the engine takes it from here.

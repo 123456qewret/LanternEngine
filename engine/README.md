@@ -16,10 +16,13 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Render threads at above-normal priority | `BB_GPU_THREAD_PRIORITY=0` off |
 | Shorter spin at the end of the game's sleeps | `BB_SLEEP_SPIN_US=600` off |
 | Audio threads (FMOD, PS4 priority 256-300) above the game's other threads on Windows | `BB_AUDIO_THREAD_PRIORITY=0` off |
+| Audio output follows the device's real rate (proportional correction, queue capped), so sound can't drift behind | |
 | Pipelines created on compile threads (shorter hitches in new areas) | `BB_ASYNC_PIPELINES=0` off |
 | Occlusion culling: real occlusion query results, so the game skips hidden objects; a block reads hidden only after three empty results (no flicker) | `BB_OCCLUSION=0` off |
 | Cached texture, sampler and render target lookups kept across image (un)registration | `BB_MEMO_REVALIDATE=0`, `BB_SAMPLER_MEMO=0` off |
 | End of each submission handed to the draw recording thread instead of draining it | `BB_SUBMIT_END_TASKS=0` off |
+| Draws whose shader is still compiling are skipped for a moment instead of freezing the game; pipelines bound once compiled | `BB_SKIP_UNCOMPILED=0`, `BB_LATE_PIPELINE_BIND=0`, `BB_PIPELINE_TAKE=0` off |
+| Game threads no longer wait behind texture work on write faults | `BB_FAULT_SKIP_TEXTURES=0`, `BB_DRAIN_SLEEP=0` off |
 | Working profile-guided builds with clang (`BB_PGO=generate`, then `use`) | |
 | In-game menu in Spanish, Portuguese (Brazil), French, German, Italian, Polish, Turkish | `menu_language` |
 | Controller: the pad in use takes over; swap sticks, invert camera, dead zone | `pad_swap_sticks`, `pad_invert_look_x/y`, `pad_deadzone` |
