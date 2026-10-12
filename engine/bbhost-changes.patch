@@ -6385,14 +6385,15 @@ index f9d2884..caf3e6c 100644
          std::unique_lock lk{mutex};
          while (true) {
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..a0623ca 100644
+index 83e5538..946ff93 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
-@@ -12,12 +12,14 @@
+@@ -12,12 +12,15 @@
  
  #include <SDL3/SDL.h>
  #include "bbport_settings.h"
 +#include "engine/cheats.h"
++#include "engine/graphics.h"
  #include "imgui.h"
  #include "imgui_impl_vulkan.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
@@ -6404,7 +6405,7 @@ index 83e5538..a0623ca 100644
  #ifdef _WIN32
  // PE/COFF assemblers have no .hidden/.previous: the compiler embeds the file (#embed, a GCC
  // extension in C++).
-@@ -156,12 +158,45 @@ void Checkbox(const char* label, std::atomic<bool>& value) {
+@@ -156,12 +159,45 @@ void Checkbox(const char* label, std::atomic<bool>& value) {
      Store(value, v, changed);
  }
  
@@ -6452,7 +6453,7 @@ index 83e5538..a0623ca 100644
  void Hint(const char* text) {
      ImGui::SameLine();
      ImGui::TextDisabled("(?)");
-@@ -173,6 +208,138 @@ void Hint(const char* text) {
+@@ -173,6 +209,184 @@ void Hint(const char* text) {
      }
  }
  
@@ -6588,10 +6589,84 @@ index 83e5538..a0623ca 100644
 +        "1 — весь (до пика). Меняются сразу. Ctrl+клик по ползунку — ввести точное значение."));
 +}
 +
++// The game's own picture for each area (engine/graphics.cpp), changed live once the hooks are in:
++// Picture tuning is read at startup.
++void PictureSection() {
++    auto& s = BbSettings::Get();
++    ImGui::SeparatorText(BbSettings::MenuText("Picture", "Изображение"));
++    Checkbox(BbSettings::MenuText("Picture tuning (restart required)", "Настройка изображения (после перезапуска)"),
++             s.graphics_controls);
++    const bool live = BbEngine::Graphics::Enabled();
++    if (!live) {
++        ImGui::TextDisabled("%s", BbSettings::MenuText("Turn on Picture tuning and restart the game to use these.",
++                                                       "Включите настройку изображения и перезапустите игру."));
++    }
++    ImGui::BeginDisabled(!live);
++    Slider(BbSettings::MenuText("Brightness", "Яркость"), s.graphics_brightness, 0.5f, 1.5f);
++    Slider(BbSettings::MenuText("Contrast", "Контраст"), s.graphics_contrast, 0.95f, 1.05f);
++    Slider(BbSettings::MenuText("Saturation", "Насыщенность"), s.graphics_saturation, 0.0f, 2.0f);
++    Slider(BbSettings::MenuText("Hue", "Оттенок"), s.graphics_hue, -20.0f, 20.0f, "%.0f");
++    Slider(BbSettings::MenuText("Fog", "Туман"), s.graphics_fog, 0.0f, 1.0f);
++    Slider("Bloom", s.graphics_bloom, 0.0f, 1.0f);
++    Checkbox(BbSettings::MenuText("Vignette", "Виньетка"), s.graphics_vignette);
++    Slider(BbSettings::MenuText("Ambient occlusion strength", "Сила затенения (AO)"), s.graphics_ao_strength, 0.0f,
++           2.0f);
++    Slider(BbSettings::MenuText("Shadow distance", "Дальность теней"), s.graphics_shadow_scale, 1.0f, 3.0f);
++    if (ImGui::Button(BbSettings::MenuText("Game's own picture", "Как в игре"))) {
++        Store(s.graphics_brightness, 1.0f, true);
++        Store(s.graphics_contrast, 1.0f, true);
++        Store(s.graphics_saturation, 1.0f, true);
++        Store(s.graphics_hue, 0.0f, true);
++        Store(s.graphics_fog, 1.0f, true);
++        Store(s.graphics_bloom, 1.0f, true);
++        Store(s.graphics_vignette, true, true);
++        Store(s.graphics_ao_strength, 1.0f, true);
++        Store(s.graphics_shadow_scale, 1.0f, true);
++    }
++    ImGui::EndDisabled();
++    Hint(BbSettings::MenuText(
++        "Changes apply live, to the game's own colour, fog and lighting of each area (the HUD and menus "
++        "keep theirs). 1.00 and Hue 0 are the game's. Fog 0 clears the haze over distant streets. The "
++        "same settings are in the game's System menu (PC Graphics, PC Effects, PC Colour) and the "
++        "launcher. Ctrl+click a slider to type a value.",
++        "Меняются сразу: собственные цвет, туман и освещение каждой области (интерфейс и меню не "
++        "меняются). 1.00 и оттенок 0 — как в игре. Туман 0 убирает дымку над дальними улицами. Те же "
++        "настройки есть в системном меню игры (PC Graphics, PC Effects, PC Colour) и в лаунчере. "
++        "Ctrl+клик по ползунку — ввести точное значение."));
++}
++
  void Menu() {
      auto& s = BbSettings::Get();
      const ImGuiViewport* viewport = ImGui::GetMainViewport();
-@@ -206,12 +373,15 @@ void Menu() {
+@@ -185,6 +399,18 @@ void Menu() {
+         pos.y = viewport->WorkPos.y +
+                 std::clamp(s.menu_y * viewport->WorkSize.y, 0.0f, std::max(viewport->WorkSize.y - margin, 0.0f));
+     }
++    // The contents are taller than a 1080p screen: the window ends above the screen's bottom edge
++    // wherever its top is, so its scroll bar and resize corner stay in reach, and it opens as tall
++    // as that allows (the contents' own height when they fit).
++    static int last_frame = -2;
++    static float window_top = 0.0f;
++    const float min_height = 240.0f * base_scale;
++    const float bottom = viewport->WorkPos.y + viewport->WorkSize.y - 8.0f * base_scale;
++    pos.y = std::min(pos.y, std::max(viewport->WorkPos.y, bottom - min_height));
++    const bool appearing = ImGui::GetFrameCount() != last_frame + 1;
++    const float top = appearing ? pos.y : window_top;
++    ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f * base_scale, min_height),
++                                        ImVec2(FLT_MAX, std::max(min_height, bottom - top)));
+     ImGui::SetNextWindowPos(pos, ImGuiCond_Appearing);
+     ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
+     bool keep_open = true;
+@@ -195,6 +421,8 @@ void Menu() {
+         ImGui::End();
+         return;
+     }
++    last_frame = ImGui::GetFrameCount();
++    window_top = ImGui::GetWindowPos().y;
+     // Moved: remembered (saved with the settings when the menu closes).
+     if (!ImGui::IsWindowAppearing() && viewport->WorkSize.x > 0.0f && viewport->WorkSize.y > 0.0f) {
+         const ImVec2 at = ImGui::GetWindowPos();
+@@ -206,12 +434,15 @@ void Menu() {
              dirty = true;
          }
      }
@@ -6612,25 +6687,27 @@ index 83e5538..a0623ca 100644
          BbSettings::Save();
      }
      ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-@@ -439,6 +609,7 @@ void Menu() {
+@@ -439,6 +670,8 @@ void Menu() {
          "остаётся в 1080p — на Steam Deck и старых видеокартах это заметно медленнее. "
          "Выключена: всё рисуется в разрешении пресета, смена — через перезапуск. Авто включает "
          "её на мощных дискретных видеокартах. Применяется после перезапуска игры."));
 +    HdrSection();
++    PictureSection();
      ImGui::SeparatorText(BbSettings::MenuText("Game effects (restart required)",
                                                "Эффекты игры (после перезапуска)"));
      const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
-@@ -478,7 +649,8 @@ void Menu() {
+@@ -478,7 +711,9 @@ void Menu() {
  
      bool restart =
          s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
 -        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
 +        s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
++        s.graphics_controls != s.startup_graphics_controls ||
 +        BbSettings::ResolutionNeedsRestart();
      for (int e = 0; e < BbSettings::EffectCount; ++e) {
          restart |= s.effects[e] != s.startup_effects[e];
      }
-@@ -499,6 +671,81 @@ void Menu() {
+@@ -499,6 +734,81 @@ void Menu() {
      Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
      Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
  
@@ -6712,7 +6789,7 @@ index 83e5538..a0623ca 100644
      ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
      Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
  
-@@ -587,6 +834,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -587,6 +897,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -6873,7 +6950,7 @@ index f88cc52..e4fee68 100644
  } // namespace BbSections
  
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..6b742f5 100644
+index cf4fbd8..37f0600 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -7076,15 +7153,16 @@ index cf4fbd8..6b742f5 100644
      };
      for (const auto& [env, key] : env_keys) {
          if (const char* value = std::getenv(env)) {
-@@ -211,6 +335,7 @@ void Load() {
+@@ -211,6 +335,8 @@ void Load() {
      v.startup_model_lod = v.model_lod;
      v.startup_output_res = v.output_res;
      v.startup_live_resolution = v.live_resolution;
 +    v.startup_hdr = v.hdr;
++    v.startup_graphics_controls = v.graphics_controls;
  }
  
  void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
-@@ -264,7 +389,7 @@ void Save() {
+@@ -264,7 +390,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -7093,7 +7171,7 @@ index cf4fbd8..6b742f5 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -284,12 +409,21 @@ void Save() {
+@@ -284,12 +410,21 @@ void Save() {
          put(Effects[e].key, flag(v.effects[e]));
      }
      put("fullscreen", flag(v.fullscreen));
@@ -7115,7 +7193,7 @@ index cf4fbd8..6b742f5 100644
      put("camera_controls", flag(v.camera_controls));
      put("widescreen",flag(v.widescreen));
      put("pc_controls",flag(v.pc_controls));
-@@ -305,6 +439,15 @@ void Save() {
+@@ -305,6 +440,15 @@ void Save() {
      put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
      put("camera_height_scale", fixed(v.camera_height_scale, 2));
      put("model_lod", std::to_string(v.model_lod.load()));
@@ -7132,7 +7210,7 @@ index cf4fbd8..6b742f5 100644
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..3d614ce 100644
+index c0e8a94..87bf30e 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -7212,11 +7290,12 @@ index c0e8a94..3d614ce 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +149,12 @@ struct Values {
+@@ -100,10 +149,13 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
 +    bool startup_hdr = false;
++    bool startup_graphics_controls = false;  ///< the picture hooks are installed at startup
  };
  
  Values& Get();
@@ -12059,10 +12138,10 @@ index 0000000..2336643
 +} // namespace VideoCore
 diff --git a/gpu/shim/bbport_menu_i18n.cpp b/gpu/shim/bbport_menu_i18n.cpp
 new file mode 100644
-index 0000000..16a69e0
+index 0000000..2de3468
 --- /dev/null
 +++ b/gpu/shim/bbport_menu_i18n.cpp
-@@ -0,0 +1,1087 @@
+@@ -0,0 +1,1255 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: the in-game menu (bbport_overlay.cpp) in the languages other than English and
 +// Russian, which MenuText takes at its call sites. Each table maps the English text, exactly as
@@ -12088,6 +12167,30 @@ index 0000000..16a69e0
 +
 +// Spanish (es)
 +constexpr Entry kSpanish[] = {
++    {"Picture",
++     "Imagen"},
++    {"Picture tuning (restart required)",
++     "Ajuste de imagen (requiere reinicio)"},
++    {"Turn on Picture tuning and restart the game to use these.",
++     "Activa el ajuste de imagen y reinicia el juego para usarlos."},
++    {"Brightness",
++     "Brillo"},
++    {"Contrast",
++     "Contraste"},
++    {"Saturation",
++     "Saturación"},
++    {"Hue",
++     "Tono"},
++    {"Fog",
++     "Niebla"},
++    {"Vignette",
++     "Viñeta"},
++    {"Ambient occlusion strength",
++     "Intensidad de la oclusión ambiental"},
++    {"Shadow distance",
++     "Distancia de sombras"},
++    {"Game's own picture",
++     "Imagen original del juego"},
 +    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
 +     "Bloodborne - Gráficos  (Insert / L3+R3)###bbport_settings"},
 +    {"%.0f FPS  (%.1f ms)",
@@ -12235,6 +12338,30 @@ index 0000000..16a69e0
 +
 +// Portuguese, Brazil (pt_BR)
 +constexpr Entry kPortugueseBrazil[] = {
++    {"Picture",
++     "Imagem"},
++    {"Picture tuning (restart required)",
++     "Ajuste de imagem (requer reinício)"},
++    {"Turn on Picture tuning and restart the game to use these.",
++     "Ative o ajuste de imagem e reinicie o jogo para usá-los."},
++    {"Brightness",
++     "Brilho"},
++    {"Contrast",
++     "Contraste"},
++    {"Saturation",
++     "Saturação"},
++    {"Hue",
++     "Matiz"},
++    {"Fog",
++     "Névoa"},
++    {"Vignette",
++     "Vinheta"},
++    {"Ambient occlusion strength",
++     "Intensidade da oclusão de ambiente"},
++    {"Shadow distance",
++     "Distância das sombras"},
++    {"Game's own picture",
++     "Imagem original do jogo"},
 +    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
 +     "Bloodborne - Gráficos  (Insert / L3+R3)###bbport_settings"},
 +    {"%.0f FPS  (%.1f ms)",
@@ -12381,6 +12508,30 @@ index 0000000..16a69e0
 +
 +// French (fr)
 +constexpr Entry kFrench[] = {
++    {"Picture",
++     "Image"},
++    {"Picture tuning (restart required)",
++     "Réglage de l'image (redémarrage requis)"},
++    {"Turn on Picture tuning and restart the game to use these.",
++     "Activez le réglage de l'image et redémarrez le jeu pour les utiliser."},
++    {"Brightness",
++     "Luminosité"},
++    {"Contrast",
++     "Contraste"},
++    {"Saturation",
++     "Saturation"},
++    {"Hue",
++     "Teinte"},
++    {"Fog",
++     "Brouillard"},
++    {"Vignette",
++     "Vignettage"},
++    {"Ambient occlusion strength",
++     "Intensité de l'occlusion ambiante"},
++    {"Shadow distance",
++     "Distance des ombres"},
++    {"Game's own picture",
++     "Image d'origine du jeu"},
 +    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
 +     "Bloodborne - Graphismes  (Insert / L3+R3)###bbport_settings"},
 +    {"%.0f FPS  (%.1f ms)",
@@ -12529,6 +12680,30 @@ index 0000000..16a69e0
 +
 +// German (de)
 +constexpr Entry kGerman[] = {
++    {"Picture",
++     "Bild"},
++    {"Picture tuning (restart required)",
++     "Bildanpassung (Neustart nötig)"},
++    {"Turn on Picture tuning and restart the game to use these.",
++     "Bildanpassung einschalten und das Spiel neu starten, um sie zu nutzen."},
++    {"Brightness",
++     "Helligkeit"},
++    {"Contrast",
++     "Kontrast"},
++    {"Saturation",
++     "Sättigung"},
++    {"Hue",
++     "Farbton"},
++    {"Fog",
++     "Nebel"},
++    {"Vignette",
++     "Vignette"},
++    {"Ambient occlusion strength",
++     "Stärke der Umgebungsverdeckung"},
++    {"Shadow distance",
++     "Schattenweite"},
++    {"Game's own picture",
++     "Originalbild des Spiels"},
 +    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
 +     "Bloodborne - Grafik  (Insert / L3+R3)###bbport_settings"},
 +    {"%.0f FPS  (%.1f ms)",
@@ -12677,6 +12852,30 @@ index 0000000..16a69e0
 +
 +// Italian (it)
 +constexpr Entry kItalian[] = {
++    {"Picture",
++     "Immagine"},
++    {"Picture tuning (restart required)",
++     "Regolazione immagine (riavvio richiesto)"},
++    {"Turn on Picture tuning and restart the game to use these.",
++     "Attiva la regolazione immagine e riavvia il gioco per usarle."},
++    {"Brightness",
++     "Luminosità"},
++    {"Contrast",
++     "Contrasto"},
++    {"Saturation",
++     "Saturazione"},
++    {"Hue",
++     "Tonalità"},
++    {"Fog",
++     "Nebbia"},
++    {"Vignette",
++     "Vignettatura"},
++    {"Ambient occlusion strength",
++     "Intensità dell'occlusione ambientale"},
++    {"Shadow distance",
++     "Distanza delle ombre"},
++    {"Game's own picture",
++     "Immagine originale del gioco"},
 +    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
 +     "Bloodborne - Grafica  (Insert / L3+R3)###bbport_settings"},
 +    {"%.0f FPS  (%.1f ms)",
@@ -12825,6 +13024,30 @@ index 0000000..16a69e0
 +
 +// Polish (pl)
 +constexpr Entry kPolish[] = {
++    {"Picture",
++     "Obraz"},
++    {"Picture tuning (restart required)",
++     "Strojenie obrazu (wymaga restartu)"},
++    {"Turn on Picture tuning and restart the game to use these.",
++     "Włącz strojenie obrazu i uruchom grę ponownie, aby ich użyć."},
++    {"Brightness",
++     "Jasność"},
++    {"Contrast",
++     "Kontrast"},
++    {"Saturation",
++     "Nasycenie"},
++    {"Hue",
++     "Odcień"},
++    {"Fog",
++     "Mgła"},
++    {"Vignette",
++     "Winieta"},
++    {"Ambient occlusion strength",
++     "Siła okluzji otoczenia"},
++    {"Shadow distance",
++     "Zasięg cieni"},
++    {"Game's own picture",
++     "Oryginalny obraz gry"},
 +    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
 +     "Bloodborne - Grafika  (Insert / L3+R3)###bbport_settings"},
 +    {"%.0f FPS  (%.1f ms)",
@@ -12970,6 +13193,30 @@ index 0000000..16a69e0
 +
 +// Turkish (tr)
 +constexpr Entry kTurkish[] = {
++    {"Picture",
++     "Görüntü"},
++    {"Picture tuning (restart required)",
++     "Görüntü ayarı (yeniden başlatma gerekir)"},
++    {"Turn on Picture tuning and restart the game to use these.",
++     "Bunları kullanmak için görüntü ayarını açın ve oyunu yeniden başlatın."},
++    {"Brightness",
++     "Parlaklık"},
++    {"Contrast",
++     "Kontrast"},
++    {"Saturation",
++     "Doygunluk"},
++    {"Hue",
++     "Renk tonu"},
++    {"Fog",
++     "Sis"},
++    {"Vignette",
++     "Vinyet"},
++    {"Ambient occlusion strength",
++     "Ortam kapatma gücü"},
++    {"Shadow distance",
++     "Gölge mesafesi"},
++    {"Game's own picture",
++     "Oyunun kendi görüntüsü"},
 +    {"Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
 +     "Bloodborne - Grafik  (Insert / L3+R3)###bbport_settings"},
 +    {"%.0f FPS  (%.1f ms)",
