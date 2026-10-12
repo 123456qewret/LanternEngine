@@ -58,6 +58,7 @@ namespace BloodborneLauncher.Core
             ["exp_thread_priority"] = false,
             ["exp_sleep_spin"] = false,
             ["exp_async_pipelines"] = true,
+            ["exp_occlusion"] = true,
             ["section_stats"] = false,
             ["trophy_notifications"] = true,
             ["trophy_sound"] = true,

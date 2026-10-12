@@ -69,6 +69,7 @@ namespace BloodborneLauncher.Core
             if (!s.Bool("exp_thread_priority")) env["BB_GPU_THREAD_PRIORITY"] = "0";
             if (!s.Bool("exp_sleep_spin")) env["BB_SLEEP_SPIN_US"] = "600";
             if (!s.Bool("exp_async_pipelines")) env["BB_ASYNC_PIPELINES"] = "0";
+            if (!s.Bool("exp_occlusion")) env["BB_OCCLUSION"] = "0";
             if (s.Bool("section_stats")) env["BB_SECTIONS"] = "1";
             if (s.Bool("safe_mode_next"))
             {
@@ -80,6 +81,7 @@ namespace BloodborneLauncher.Core
                 env["BB_GPU_THREAD_PRIORITY"] = "0";
                 env["BB_SLEEP_SPIN_US"] = "600";
                 env["BB_ASYNC_PIPELINES"] = "0";
+                env["BB_OCCLUSION"] = "0";
                 env["BB_MODS_ENABLED"] = "0";
             }
             // The account password never goes to bbport.ini; the engine takes it from here.

@@ -16,6 +16,7 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | Render threads at above-normal priority | `BB_GPU_THREAD_PRIORITY=0` off |
 | Shorter spin at the end of the game's sleeps | `BB_SLEEP_SPIN_US=600` off |
 | Pipelines created on compile threads (shorter hitches in new areas) | `BB_ASYNC_PIPELINES=0` off |
+| Occlusion culling: real occlusion query results, so the game skips hidden objects | `BB_OCCLUSION=0` off |
 | Working profile-guided builds with clang (`BB_PGO=generate`, then `use`) | |
 | In-game menu in Spanish, Portuguese (Brazil), French, German, Italian, Polish, Turkish | `menu_language` |
 | Controller: the pad in use takes over; swap sticks, invert camera, dead zone | `pad_swap_sticks`, `pad_invert_look_x/y`, `pad_deadzone` |

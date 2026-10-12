@@ -60,20 +60,23 @@ namespace BloodborneLauncher.Views
                 "Frees video memory held by textures the GPU drew, so long sessions don't fill up VRAM and slow down. Recommended: on",
                 "exp_vram_cleanup");
             SettingToggle(SymbolRegular.Timer24, "Precise frame pacing",
-                "A high-resolution timer and even spacing between frames: steadier frame times and less VRR flicker. Uses a little CPU. Off by default while it is tested",
+                "A high-resolution timer and even spacing between frames: steadier frame times and less VRR flicker. Uses a little CPU. Off by default",
                 "exp_frame_pacing");
             SettingToggle(SymbolRegular.Storage24, "Use more VRAM for textures",
                 "Keeps textures in video memory up to 80% of the card instead of about 40%, so they aren't thrown out and loaded again (the cause of most stutters on 8 GB cards). Off by default while it is tested",
                 "exp_vram_budget");
             SettingToggle(SymbolRegular.TopSpeed24, "Graphics threads first",
-                "Runs the engine's graphics threads at a higher CPU priority than the game's other threads, so a frame isn't held up behind them. Off by default while it is tested",
+                "Runs the engine's graphics threads at a higher CPU priority than the game's other threads, so a frame isn't held up behind them. Off by default",
                 "exp_thread_priority");
             SettingToggle(SymbolRegular.Sleep24, "Shorter sleep spin",
-                "The game's many short sleeps busy-wait less at the end (0.2 ms instead of 0.6 ms), leaving that CPU time to the graphics threads. Off by default while it is tested",
+                "The game's many short sleeps busy-wait only as long as the timer needs (about 0.2–0.4 ms instead of 0.6 ms), leaving that CPU time to the graphics threads. Off by default",
                 "exp_sleep_spin");
             SettingToggle(SymbolRegular.FlashFlow24, "Background shader compiling",
                 "New shaders compile on helper threads instead of freezing the frame: much shorter hitches when you reach a new area. On by default",
                 "exp_async_pipelines");
+            SettingToggle(SymbolRegular.EyeOff24, "Occlusion culling",
+                "The game skips objects hidden behind walls instead of drawing them all: much higher FPS in dense areas. An object coming round a corner can appear a frame late",
+                "exp_occlusion");
             SettingToggle(SymbolRegular.Run24, "Sharper motion (FSR 4)",
                 "Uses FSR 4's balanced model at Performance and Ultra Performance: fewer trails behind moving characters, a little more GPU time",
                 "fsr4_balanced");

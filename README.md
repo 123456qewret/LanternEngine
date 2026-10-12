@@ -18,7 +18,7 @@ The launcher updates itself from the Releases page.
 
 - **Play**: game folder check, player profiles (each with its own saves and trophies), automatic save backups with restore, session summary.
 - **Display**: resolution, fullscreen, widescreen (21:9, 32:9), 30 to 144 FPS or uncapped, in-game menu in 9 languages.
-- **Graphics**: FSR 4, FSR 3, DLSS and DLAA, TAA, sharpening, picture and camera tuning, best settings for your PC.
+- **Graphics**: FSR 4, FSR 3, DLSS and DLAA, TAA, sharpening, occlusion culling, picture and camera tuning, best settings for your PC.
 - **Controls**: keyboard and mouse for every action, controller remapping, stick options, live controller detection, shareable profiles.
 - **Cheats**: infinite or a set amount of Blood Vials and Quicksilver Bullets, each can be turned off.
 - **Trophies**: all 40, completion rate, in-game notification, reset.
@@ -68,7 +68,7 @@ steps are in [engine/](engine/).
 | Engine base | [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc) (built on [bbport](https://github.com/deadinside28/bloodborne_pc) and [shadPS4](https://github.com/shadps4-emu/shadPS4)) |
 | VRAM cleanup | adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR) |
 | Crash and controller fixes | adapted from [AwesomeObserver](https://github.com/AwesomeObserver/bloodborne_pc), [Supermedo](https://github.com/Supermedo/bloodborne_pc) and [deadinside28](https://github.com/deadinside28/bloodborne_pc) |
-| Cheats research | [droogie/bbhost](https://github.com/droogie/bbhost) |
+| Cheats and occlusion culling research | [droogie/bbhost](https://github.com/droogie/bbhost) |
 | Controller mappings | [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) |
 | Trophy list | [pyL1nx/bloodborne_pc](https://github.com/pyL1nx/bloodborne_pc) |
 | UI library | [WPF-UI](https://github.com/lepoco/wpfui) |

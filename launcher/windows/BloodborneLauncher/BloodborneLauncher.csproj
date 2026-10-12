@@ -9,7 +9,7 @@
     <AssemblyName>Bloodborne Launcher</AssemblyName>
     <RootNamespace>BloodborneLauncher</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.9.8</Version>
+    <Version>0.9.9</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 

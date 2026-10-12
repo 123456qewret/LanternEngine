@@ -1,3 +1,20 @@
+diff --git a/.github/workflows/windows-offline-build.yml b/.github/workflows/windows-offline-build.yml
+index 267b5c1..6ef1bf1 100644
+--- a/.github/workflows/windows-offline-build.yml
++++ b/.github/workflows/windows-offline-build.yml
+@@ -84,10 +84,11 @@ jobs:
+         shell: msys2 {0}
+         run: |
+           set -e
+-          ninja -C out/gpu pipeline-cache-blob-test pipeline-archive-test motion-history-test motion-shader-test image-overlap-test settings-test ui-composition-test engine-hooks-test engine-menu-memory-test rebirth-refund-test pc-input-test widescreen-test
++          ninja -C out/gpu pipeline-cache-blob-test pipeline-archive-test motion-history-test occlusion-test motion-shader-test image-overlap-test settings-test ui-composition-test engine-hooks-test engine-menu-memory-test rebirth-refund-test pc-input-test widescreen-test
+           out/gpu/pipeline-cache-blob-test.exe
+           out/gpu/pipeline-archive-test.exe
+           out/gpu/motion-history-test.exe
++          out/gpu/occlusion-test.exe
+           out/gpu/motion-shader-test.exe
+           out/gpu/image-overlap-test.exe
+           out/gpu/settings-test.exe
 diff --git a/build.sh b/build.sh
 index 7a41a21..8114a20 100644
 --- a/build.sh
@@ -44,7 +61,7 @@ index 7a41a21..8114a20 100644
  if ! ninja -C out/gpu bbgpu bb-engine-assets > out/gpu-build.log 2>&1; then
      grep -v '^\[' out/gpu-build.log | tail -40 >&2
 diff --git a/gpu/CMakeLists.txt b/gpu/CMakeLists.txt
-index f51df72..f57a519 100644
+index f51df72..fdcf4ff 100644
 --- a/gpu/CMakeLists.txt
 +++ b/gpu/CMakeLists.txt
 @@ -16,6 +16,14 @@ add_compile_options(-fno-omit-frame-pointer)
@@ -95,7 +112,17 @@ index f51df72..f57a519 100644
      # bb-probe.exe links libbbgpu.a with these (out/gpu/bbgpu_link.txt, one argument per line,
      # in link order): the static library's transitive dependencies.
      include(cmake/LinkClosure.cmake)
-@@ -252,7 +276,8 @@ endif()
+@@ -242,6 +266,9 @@ target_link_libraries(pipeline-archive-test PRIVATE fmt::fmt)
+ add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
+ target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+ target_include_directories(motion-history-test PRIVATE ..)
++add_executable(occlusion-test EXCLUDE_FROM_ALL ../tests/test_occlusion.cpp)
++target_compile_options(occlusion-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
++target_include_directories(occlusion-test PRIVATE ..)
+ add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
+ target_compile_options(motion-shader-test PRIVATE -UNDEBUG)
+ target_include_directories(motion-shader-test PRIVATE shim shadps4 third_party/gcn/include)
+@@ -252,7 +279,8 @@ endif()
  add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
  target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(ui-composition-test PRIVATE ..)
@@ -105,7 +132,7 @@ index f51df72..f57a519 100644
  target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(settings-test PRIVATE .. shim)
  
-@@ -280,7 +305,7 @@ add_dependencies(camera-motion-test host_shaders)
+@@ -280,7 +308,7 @@ add_dependencies(camera-motion-test host_shaders)
  
  # bbport: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
  add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
@@ -114,7 +141,7 @@ index f51df72..f57a519 100644
  target_include_directories(upscaler-support-test PRIVATE shim)
  target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
  
-@@ -315,6 +340,7 @@ target_include_directories(pc-input-test PRIVATE shim)
+@@ -315,6 +343,7 @@ target_include_directories(pc-input-test PRIVATE shim)
  target_link_libraries(pc-input-test PRIVATE PkgConfig::SDL3)
  target_compile_options(pc-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  add_executable(widescreen-test EXCLUDE_FROM_ALL ../tests/test_widescreen.cpp
@@ -124,19 +151,20 @@ index f51df72..f57a519 100644
  target_include_directories(widescreen-test PRIVATE shim)
  target_compile_options(widescreen-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 diff --git a/gpu/shadps4/common/thread.cpp b/gpu/shadps4/common/thread.cpp
-index e2061f7..d03f6eb 100644
+index e2061f7..724dbe2 100644
 --- a/gpu/shadps4/common/thread.cpp
 +++ b/gpu/shadps4/common/thread.cpp
-@@ -3,6 +3,8 @@
+@@ -3,6 +3,9 @@
  // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
 +#include <algorithm>
++#include <atomic>
 +#include <cstdlib>
  #include <ctime>
  #include <string>
  #include <thread>
-@@ -35,8 +37,28 @@
+@@ -35,8 +38,41 @@
  #define cpu_set_t cpuset_t
  #endif
  
@@ -147,6 +175,19 @@ index e2061f7..d03f6eb 100644
 +
  namespace Common {
  
++namespace {
++// Lateness of AccurateSleep's timer wakeups (ns), averaged over the last ~16 precise sleeps.
++std::atomic<s64> g_timer_late_ns{300'000};
++} // namespace
++
++std::chrono::nanoseconds PreciseSpin(std::chrono::nanoseconds cap) {
++    const auto spin = std::chrono::nanoseconds(g_timer_late_ns.load(std::memory_order_relaxed) +
++                                               100'000);
++    return std::clamp<std::chrono::nanoseconds>(spin, std::chrono::microseconds(100),
++                                                std::max<std::chrono::nanoseconds>(
++                                                    cap, std::chrono::microseconds(100)));
++}
++
 +bool PrecisePacingEnabled() {
 +    static const bool value = [] {
 +        const char* v = std::getenv("BB_PRECISE_PACING");
@@ -165,7 +206,7 @@ index e2061f7..d03f6eb 100644
  #ifdef __APPLE__
  
  void SetCurrentThreadRealtime(const std::chrono::nanoseconds period_ns) {
-@@ -109,6 +131,49 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
+@@ -109,6 +145,58 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
  
  bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
                     const bool interruptible) {
@@ -202,6 +243,15 @@ index e2061f7..d03f6eb 100644
 +                          : WAIT_IO_COMPLETION;
 +            }
 +        }
++        if (duration.count() > 0 && ret == WAIT_OBJECT_0) {
++            // How late the timer woke (for PreciseSpin): a running average, outliers clamped.
++            const auto late = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                  std::chrono::steady_clock::now() - begin - duration)
++                                  .count();
++            const s64 sample = std::clamp<s64>(late, 0, 2'000'000);
++            const s64 old = g_timer_late_ns.load(std::memory_order_relaxed);
++            g_timer_late_ns.store(old + (sample - old) / 16, std::memory_order_relaxed);
++        }
 +        if (remaining) {
 +            const auto slept = std::chrono::steady_clock::now() - begin;
 +            *remaining = duration > slept
@@ -215,7 +265,7 @@ index e2061f7..d03f6eb 100644
      const auto begin_sleep = std::chrono::high_resolution_clock::now();
  
      LARGE_INTEGER interval{
-@@ -230,7 +295,24 @@ AccurateTimer::AccurateTimer(std::chrono::nanoseconds target_interval)
+@@ -230,7 +318,24 @@ AccurateTimer::AccurateTimer(std::chrono::nanoseconds target_interval)
  void AccurateTimer::Start() {
      const auto begin_sleep = std::chrono::high_resolution_clock::now();
      if (total_wait.count() > 0) {
@@ -225,9 +275,9 @@ index e2061f7..d03f6eb 100644
 +            // OS timers wake up late. This timer paces vblank and therefore the frames a
 +            // variable refresh rate display shows, so sleep most of the wait and spin the rest
 +            // to keep every interval even (at most 1.5 ms, and 1/8 of the interval).
-+            const std::chrono::nanoseconds spin =
++            const std::chrono::nanoseconds spin = PreciseSpin(
 +                std::min<std::chrono::nanoseconds>(std::chrono::microseconds(1500),
-+                                                   target_interval / 8);
++                                                   target_interval / 8));
 +            if (total_wait > spin) {
 +                AccurateSleep(total_wait - spin, nullptr, false);
 +            }
@@ -242,10 +292,10 @@ index e2061f7..d03f6eb 100644
      start_time = std::chrono::high_resolution_clock::now();
      total_wait -= std::chrono::duration_cast<std::chrono::nanoseconds>(start_time - begin_sleep);
 diff --git a/gpu/shadps4/common/thread.h b/gpu/shadps4/common/thread.h
-index a300d10..d79dd6c 100644
+index a300d10..ae628fd 100644
 --- a/gpu/shadps4/common/thread.h
 +++ b/gpu/shadps4/common/thread.h
-@@ -29,6 +29,11 @@ void SetThreadName(void* thread, const char* name);
+@@ -29,6 +29,16 @@ void SetThreadName(void* thread, const char* name);
  bool AccurateSleep(std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
                     bool interruptible);
  
@@ -254,11 +304,16 @@ index a300d10..d79dd6c 100644
 +/// BB_PRECISE_PACING=0 / =1 overrides.
 +bool PrecisePacingEnabled();
 +
++/// bbport: the spin a precise wait needs after its timer sleep: how late the high-resolution
++/// timer has been waking (a running average of AccurateSleep's lateness) plus 100 us, at least
++/// 100 us and at most `cap`. A fixed spin either burns a core every wait or wakes late.
++std::chrono::nanoseconds PreciseSpin(std::chrono::nanoseconds cap);
++
  class AccurateTimer {
      std::chrono::nanoseconds target_interval{};
      std::chrono::nanoseconds total_wait{};
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
-index 30de04f..25e0c0f 100644
+index 30de04f..6674bb4 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
 +++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
 @@ -813,8 +813,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
@@ -273,7 +328,7 @@ index 30de04f..25e0c0f 100644
  
      const auto receive_request = [this] -> Request {
          std::scoped_lock lk{mutex};
-@@ -831,6 +832,132 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -831,6 +832,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      // next vblank tick.
      const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
  
@@ -318,11 +373,15 @@ index 30de04f..25e0c0f 100644
 +        const std::chrono::nanoseconds pace = frame_limit ? frame_period : vblank_period;
 +        const std::chrono::nanoseconds min_gap = pace * 7 / 8;
 +        const std::chrono::nanoseconds slack = pace - min_gap;
-+        // OS sleeps wake up late: sleep most of the way, spin the rest (at most 1.5 ms, and 1/8
-+        // of the vblank period so 480 Hz ticks do not keep a core busy).
-+        const std::chrono::nanoseconds spin = std::min<std::chrono::nanoseconds>(
++        // OS sleeps wake up late: sleep most of the way, spin the rest. The spin follows how late
++        // the timer actually wakes (Common::PreciseSpin; at most 1.5 ms and 1/8 of the vblank
++        // period), and only flips get it when there is a frame limit: vblank ticks then only
++        // count time, and spinning before each of 480 a second kept a core busy, taken from the
++        // game's own threads on 6-8 core CPUs.
++        const std::chrono::nanoseconds spin_cap = std::min<std::chrono::nanoseconds>(
 +            std::chrono::microseconds(1500), vblank_period / 8);
-+        const auto wait_until = [&](Clock::time_point deadline) {
++        const auto wait_until = [&](Clock::time_point deadline, bool exact) {
++            const auto spin = exact ? Common::PreciseSpin(spin_cap) : std::chrono::nanoseconds(0);
 +            const auto left = deadline - Clock::now();
 +            if (left > spin) {
 +                Common::AccurateSleep(
@@ -333,6 +392,7 @@ index 30de04f..25e0c0f 100644
 +                std::this_thread::yield();
 +            }
 +        };
++        const std::chrono::nanoseconds spin = Common::PreciseSpin(spin_cap);
 +
 +        Clock::time_point next_tick = Clock::now();
 +        next_flip = next_tick;
@@ -344,7 +404,7 @@ index 30de04f..25e0c0f 100644
 +            FRAME_END;
 +        };
 +        const auto end_tick = [&](Clock::time_point tick_deadline) {
-+            wait_until(tick_deadline);
++            wait_until(tick_deadline, !frame_limit);
 +            // Fixed schedule; after a long stall (a breakpoint, a hitch) start again from now.
 +            const auto now = Clock::now();
 +            next_tick = now - tick_deadline > vblank_period ? now : tick_deadline;
@@ -392,7 +452,7 @@ index 30de04f..25e0c0f 100644
 +                if (next_flip >= tick_deadline) {
 +                    break; // its slot is at (or after) the next vblank
 +                }
-+                wait_until(next_flip);
++                wait_until(next_flip, true);
 +                const auto request = receive_request();
 +                if (request) {
 +                    take_flip(request, Clock::now());
@@ -406,7 +466,7 @@ index 30de04f..25e0c0f 100644
      while (!token.stop_requested()) {
          timer.Start();
          const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
-@@ -864,29 +991,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -864,29 +996,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
              }
          }
  
@@ -483,10 +543,18 @@ index 1cf6d2a..43f2e98 100644
              ASSERT_MSG(result, "EOP flip submission failed");
          });
 diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.cpp b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
-index fa7e146..ee3859e 100644
+index fa7e146..5132271 100644
 --- a/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 +++ b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
-@@ -122,6 +122,7 @@ void Liverpool::ProcessCommands() {
+@@ -36,6 +36,7 @@
+ #include "bbport_free_check.h"
+ #include "video_core/amdgpu/pm4_cmds.h"
+ #include "video_core/renderdoc.h"
++#include "video_core/renderer_vulkan/vk_occlusion.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
+ 
+ extern "C" int runtime_memory_vma_info(uintptr_t address, int* prot, int* type, uintptr_t* end);
+@@ -122,6 +123,7 @@ void Liverpool::ProcessCommands() {
  
  void Liverpool::Process(std::stop_token stoken) {
      Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
@@ -494,6 +562,75 @@ index fa7e146..ee3859e 100644
      if (const int clock = BbPlatform::ThreadCpuClock(); clock != -1) {
          BbStats::gpu_thread_clock.store(clock);
      }
+@@ -167,7 +169,7 @@ void Liverpool::Process(std::stop_token stoken) {
+                 if (const char* env = std::getenv("BB_GPU_SPIN_US")) {
+                     return std::max(0, std::atoi(env));
+                 }
+-                return BbThreads::Available() >= 12 ? 200 : 0;
++                return int(BbThreads::CapSpinUs(BbThreads::Available() >= 12 ? 200 : 0));
+             }());
+             if (spin_time.count() > 0) {
+                 const auto spin_until = idle_start + spin_time;
+@@ -341,6 +343,11 @@ namespace {
+ /// work on earlier draws (register state, draws it hands over, nested buffers). Every other
+ /// packet first waits for that thread to run dry (Rasterizer::DrainDrawPipe).
+ bool PipelinedOpcode(PM4ItOpcode opcode) {
++    if (opcode == PM4ItOpcode::SetPredication) {
++        // Real occlusion results: handed over in order (Rasterizer::OcclusionPredication).
++        // BB_OCCLUSION=0 keeps the old drain before the ignored packet.
++        return Vulkan::Occlusion::Wanted();
++    }
+     switch (opcode) {
+     case PM4ItOpcode::Nop:
+     case PM4ItOpcode::ContextControl:
+@@ -1009,6 +1016,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+         seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
+     if (draw_prep) {
+         draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum);
++        rasterizer->OcclusionSubmissionStart();
+     }
+     static const bool dcb_stats = EmulatorSettingsImpl::Flag("BB_DCB_STATS", false);
+     const int dcb_depth = g_dcb_depth;
+@@ -1209,6 +1217,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 break; // registers: ApplyGraphicsRegisterPacket
+             }
+             case PM4ItOpcode::SetPredication: {
++                // bbport: with real occlusion results (vk_occlusion.h) the draws up to the clear
++                // are skipped when the block is known to read occluded.
++                if (rasterizer && header->type3.NumWords() >= 2 &&
++                    rasterizer->OcclusionPredication(reinterpret_cast<const u32*>(header) + 1)) {
++                    break;
++                }
+                 LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
+                 break;
+             }
+@@ -1417,6 +1431,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
+                     // registers: ApplyGraphicsRegisterPacket
+                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
++                    // bbport: real sample counts (vk_occlusion.h): the draws after the dump are
++                    // measured and the counts written once the GPU has run them. Nothing is
++                    // written now: the game zeroed the block and reads it as not ready until then.
++                    // BB_OCCLUSION=0 (or no query support): the fake rising count below.
++                    if (event->event_type.Value() == EventType::PixelPipeStatDump && rasterizer &&
++                        rasterizer->OcclusionDump(event->Address<VAddr>(), num_counter_pairs)) {
++                        break;
++                    }
+                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
+                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
+                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
+@@ -1592,6 +1614,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                     if (rasterizer && rasterizer->HasUnsubmittedSignals()) {
+                         rasterizer->Flush();
+                     }
++                    // bbport: occlusion counts are written once the GPU has run their
++                    // submission: a wait on a query block must not hold that submission back.
++                    if (rasterizer && rasterizer->OcclusionUnsubmitted()) {
++                        rasterizer->Flush();
++                    }
+                     YIELD_GFX();
+                 }
+                 break;
 diff --git a/gpu/shadps4/video_core/amdgpu/pixel_format.h b/gpu/shadps4/video_core/amdgpu/pixel_format.h
 index 8b83639..aeac901 100644
 --- a/gpu/shadps4/video_core/amdgpu/pixel_format.h
@@ -563,7 +700,7 @@ index a123982..a9c39b6 100644
  
  } // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
-index 0e80933..99aa389 100644
+index 0e80933..a7375d4 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
 @@ -197,6 +197,7 @@ private:
@@ -574,6 +711,15 @@ index 0e80933..99aa389 100644
          on_stage_b = true;
          BbSections::recording_thread = true;
          stage_b_tid.store(BbPlatform::CurrentThreadId(), std::memory_order_release);
+@@ -212,7 +213,7 @@ private:
+                     if (const char* env = std::getenv("BB_PIPE_SPIN_US")) {
+                         return std::max(0, std::atoi(env));
+                     }
+-                    return BbThreads::Available() >= 12 ? 200 : 50;
++                    return int(BbThreads::CapSpinUs(BbThreads::Available() >= 12 ? 200 : 50));
+                 }());
+                 const auto spin_until = std::chrono::steady_clock::now() + spin_time;
+                 for (u32 spins = 1; available == at; ++spins) {
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
 index 995eb38..d2f9c82 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
@@ -838,6 +984,48 @@ index 87381c5..0470c03 100644
  
  template <typename Attribute, typename Binding>
  void GraphicsPipeline::GetVertexInputs(
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
+index 23d52b9..46b414c 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
+@@ -13,6 +13,7 @@
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+ #include "bbport_toggles.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_occlusion.h"
+ #include "video_core/renderer_vulkan/vk_platform.h"
+ 
+ #include <vk_mem_alloc.h>
+@@ -469,6 +470,8 @@ bool Instance::CreateDevice() {
+                 .wideLines = features.wideLines,
+                 .multiViewport = features.multiViewport,
+                 .samplerAnisotropy = features.samplerAnisotropy,
++                // bbport: the game asks for exact counts (PERFECT_ZPASS_COUNTS), vk_occlusion.
++                .occlusionQueryPrecise = features.occlusionQueryPrecise && Occlusion::Wanted(),
+                 .vertexPipelineStoresAndAtomics = features.vertexPipelineStoresAndAtomics,
+                 .fragmentStoresAndAtomics = features.fragmentStoresAndAtomics,
+                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
+index f1f48b6..5e3a228 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
+@@ -112,6 +112,16 @@ public:
+         return features.samplerAnisotropy;
+     }
+ 
++    /// bbport: occlusion queries with exact sample counts (vk_occlusion.h).
++    bool IsOcclusionQueryPreciseSupported() const {
++        return features.occlusionQueryPrecise;
++    }
++
++    /// bbport: queries reset on the CPU (vk_occlusion.h).
++    bool IsHostQueryResetSupported() const {
++        return vk12_features.hostQueryReset;
++    }
++
+     /// Returns true if depth bounds testing is supported
+     bool IsDepthBoundsSupported() const {
+         return features.depthBounds;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
 index 52778fb..4fdc47a 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_common.cpp
@@ -946,8 +1134,226 @@ index ff89b44..3bc4a14 100644
      const Instance& instance;
      Scheduler& scheduler;
      DescriptorHeap& desc_heap;
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 5fd360b..ac6e1ad 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -30,6 +30,7 @@
+ #include "video_core/buffer_cache/buffer_cache.h"
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_occlusion.h"
+ #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
+ #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
+@@ -80,6 +81,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
+     memory->SetRasterizer(this);
+ 
+     GpuProfiler::Init(instance, scheduler);
++    occlusion = Occlusion::Create(instance, scheduler, *this);
+     if (DrawPipeWanted()) {
+         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
+         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
+@@ -1396,6 +1398,9 @@ bool Rasterizer::FilterDrawPasses() const {
+ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
+     RENDERER_TRACE;
+     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
++    if (occlusion) {
++        occlusion->NoteIssued(); // before anything may drop the draw (vk_occlusion.h)
++    }
+     // bbport debugging: BB_IMAGE_DUMP_TRIGGER=<file> holding hex guest addresses, one per line;
+     // the images registered there are written to BB_CAPTURE_DIR (TextureCache::DumpImagesAt).
+     if (static const char* trigger = std::getenv("BB_IMAGE_DUMP_TRIGGER"); trigger) {
+@@ -1460,6 +1465,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+         FrameCapture::Poll();
+         scheduler.PopPendingOperations();
+     }
++    // bbport: under SET_PREDICATION on a block known to read occluded (vk_occlusion.h).
++    if (occlusion && occlusion->SkipDraw()) {
++        return;
++    }
+     // bbport (BB_PREUPLOAD): once a frame, guest GPU memory the CPU wrote and then left alone is
+     // uploaded ahead of its use, BB_PREUPLOAD_MB (16) at most per frame.
+     if (const u32 frame = BbStats::frame_number.load(std::memory_order_relaxed);
+@@ -1644,13 +1653,23 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+         .program = {vs_info.ProgramBase(), ps_info ? ps_info->ProgramBase() : 0},
+         .count = {num_indices, num_instances, 0},
+     };
++    // bbport: after a ZPASS dump the draw is measured by an occlusion query around just this
++    // vkCmdDraw (inside the open render pass; vk_occlusion.h).
++    const auto query = occlusion ? occlusion->BeginDraw(push_data.scene_size)
++                                 : Occlusion::DrawQuery{};
+     scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
+         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        if (query.pool) {
++            cmdbuf.beginQuery(query.pool, query.index, query.flags);
++        }
+         if (is_indexed) {
+             cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
+         } else {
+             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
+         }
++        if (query.pool) {
++            cmdbuf.endQuery(query.pool, query.index);
++        }
+     });
+     if (FrameCapture::Active()) {
+         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+@@ -1676,6 +1695,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
+                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
+                               u16 instance_sgpr_offset) {
+     RENDERER_TRACE;
++    if (occlusion) {
++        occlusion->NoteIssued();
++    }
+     // bbport: like direct draws, handed to the recording thread after the pipeline selection
+     // (else the GPU thread waited here for a whole frame of queued draws).
+     const bool pipelined = UseDrawPipe() && FilterDrawPasses() &&
+@@ -1711,6 +1733,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+         FrameCapture::Poll();
+         scheduler.PopPendingOperations();
+     }
++    if (occlusion && occlusion->SkipDraw()) {
++        return;
++    }
+     const VAddr count_address = indirect.count;
+     const u32 stride = indirect.stride;
+     const u32 max_count = indirect.max_count;
+@@ -1780,8 +1805,13 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+         .address = indirect.args,
+         .count = {max_count, stride, 0},
+     };
++    const auto query = occlusion ? occlusion->BeginDraw(push_data.scene_size)
++                                 : Occlusion::DrawQuery{};
+     scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
+         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        if (query.pool) {
++            cmdbuf.beginQuery(query.pool, query.index, query.flags);
++        }
+         if (is_indexed) {
+             if (counts) {
+                 cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
+@@ -1794,6 +1824,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+         } else {
+             cmdbuf.drawIndirect(args, args_offset, max_count, stride);
+         }
++        if (query.pool) {
++            cmdbuf.endQuery(query.pool, query.index);
++        }
+     });
+     DebugState.IncDrawCall();
+ 
+@@ -1950,6 +1983,68 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
+     scheduler.KickRecording();
+ }
+ 
++bool Rasterizer::OcclusionDump(VAddr va, u32 pipes) {
++    if (!occlusion || (va & 7) != 0) {
++        return false;
++    }
++    // In order with the draws: the dump closes the interval of draws recorded before it.
++    const auto task = occlusion->MakeDump(va, pipes);
++    RunInOrder(
++        [](Rasterizer& self, const u8* data) {
++            Occlusion::DumpTask dump;
++            std::memcpy(&dump, data, sizeof(dump));
++            self.occlusion->Dump(dump);
++        },
++        &task, sizeof(task), BbToggle::PipelinedTasks, false);
++    return true;
++}
++
++bool Rasterizer::OcclusionPredication(const u32* body) {
++    if (!occlusion) {
++        return false;
++    }
++    // [0] start address lo (16-byte aligned), [1] address hi[7:0] | PRED_BOOL[8] (1: draw if
++    // visible) | HINT[12] | PRED_OP[18:16] (0 clear, 1 ZPASS, 2 primitive count) | CONTINUE[31].
++    // The game: Gnm's setZPassPredicationEnable(block, hint 0, draw if visible) and Disable.
++    const Occlusion::PredicationTask task{
++        .block = (VAddr(body[1] & 0xff) << 32) | (body[0] & ~0xfu),
++        .op = (body[1] >> 16) & 7,
++        .draw_if_visible = u8((body[1] >> 8) & 1),
++        .cont = u8(body[1] >> 31),
++    };
++    static u32 logged = 0;
++    if (logged < 4) {
++        ++logged;
++        std::printf("Occlusion: SET_PREDICATION block %#llx op %u draw-if-visible %u hint %u "
++                    "continue %u\n",
++                    static_cast<unsigned long long>(task.block), task.op, task.draw_if_visible,
++                    (body[1] >> 12) & 1, task.cont);
++    }
++    occlusion->predication_open = task.op != 0;
++    RunInOrder(
++        [](Rasterizer& self, const u8* data) {
++            Occlusion::PredicationTask set;
++            std::memcpy(&set, data, sizeof(set));
++            self.occlusion->SetPredication(set);
++        },
++        &task, sizeof(task), BbToggle::PipelinedTasks, false);
++    return true;
++}
++
++bool Rasterizer::OcclusionUnsubmitted() const {
++    return occlusion && occlusion->HasUnsubmittedDumps(scheduler.CurrentTick());
++}
++
++void Rasterizer::OcclusionSubmissionStart() {
++    if (!occlusion || !occlusion->predication_open) {
++        return;
++    }
++    // The predicate bit is per packet in the command buffer that set it: a region does not
++    // carry over into the next submission.
++    const u32 clear[2] = {0, 0};
++    OcclusionPredication(clear);
++}
++
+ u64 Rasterizer::Flush() {
+     BB_SECTION(Flush);
+     DrainDrawPipe();
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
+index 64f1e31..eb04dd3 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -36,6 +36,7 @@ class MemoryManager;
+ namespace Vulkan {
+ 
+ class GraphicsPipeline;
++class Occlusion;
+ class Runtime;
+ 
+ class Rasterizer {
+@@ -72,6 +73,17 @@ public:
+     void DispatchDirect();
+     void DispatchIndirect(VAddr address, u32 offset, u32 size);
+ 
++    /// bbport (GPU command thread): a ZPASS_DONE dump of `pipes` DBs to `va`, handed to the
++    /// recording side in order; false when the real counts are off (the caller writes the fake).
++    bool OcclusionDump(VAddr va, u32 pipes);
++    /// bbport (GPU command thread): SET_PREDICATION (its two body words); false when off.
++    bool OcclusionPredication(const u32* body);
++    /// bbport (GPU command thread): a guest submission starts: a predication region left open
++    /// by the previous one is closed.
++    void OcclusionSubmissionStart();
++    /// bbport (GPU command thread, drained): dumps wait for the submission being recorded.
++    bool OcclusionUnsubmitted() const;
++
+     void ScopeMarker(fmt::string_view fmt, fmt::format_args args, auto&& func) {
+         if (host_markers_enabled) {
+             ScopeMarkerBegin(fmt::vformat(fmt, args));
+@@ -650,6 +662,9 @@ private:
+     std::unique_ptr<ConstantRing> constant_ring;
+     /// Submissions (prepared draws) kept alive until stage B reaches the position.
+     std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
++    /// bbport: real occlusion query results (vk_occlusion.h); null with BB_OCCLUSION=0. Before
++    /// the draw pipe: its thread (which runs the dumps) stops first.
++    std::unique_ptr<Occlusion> occlusion;
+     std::unique_ptr<DrawPipe> draw_pipe;
+ 
+     /// BB_HONEST_LABELS (SignalAfterGpu). Last: its thread stops before the scheduler goes.
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
-index 06eadfd..4c707fe 100644
+index 06eadfd..068c41e 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 @@ -449,7 +449,7 @@ void Scheduler::KickRecording(bool force) {
@@ -1027,6 +1433,15 @@ index 06eadfd..4c707fe 100644
      Worker& worker = *workers[index];
      std::vector<std::unique_ptr<RecordChunk>> ordered;
      const auto has_work = [&] {
+@@ -687,7 +695,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
+         // take time from guest threads. The others sleep until a new segment reaches them.
+         if (active_worker.load(std::memory_order_relaxed) == index) {
+             static const auto spin_time =
+-                std::chrono::microseconds(BbThreads::Available() >= 12 ? 200 : 20);
++                std::chrono::microseconds(BbThreads::CapSpinUs(BbThreads::Available() >= 12 ? 200 : 20));
+             const auto spin_until = std::chrono::steady_clock::now() + spin_time;
+             for (u32 spins = 1; worker.queued.load(std::memory_order_acquire) == 0 &&
+                                 ordered_queued.load(std::memory_order_acquire) == 0;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
 index a0c6485..7297871 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
@@ -1919,15 +2334,16 @@ index f38aea7..4a7aa7e 100644
          }
      }).detach();
 diff --git a/gpu/shim/bbport_copy.cpp b/gpu/shim/bbport_copy.cpp
-index f9d2884..35a5357 100644
+index f9d2884..caf3e6c 100644
 --- a/gpu/shim/bbport_copy.cpp
 +++ b/gpu/shim/bbport_copy.cpp
-@@ -186,6 +186,8 @@ private:
+@@ -186,6 +186,9 @@ private:
  
      void Loop(unsigned index) {
          Common::SetCurrentThreadName(("bb:Copy" + std::to_string(index)).c_str());
-+        // The GPU command thread waits for these copies (WaitHostCopies, WaitAsync).
-+        BbThreads::MakeCritical();
++        // The GPU command thread waits for these copies (WaitHostCopies, WaitAsync); raised
++        // only with cores to spare (bulk uploads while streaming, see MakeCritical).
++        BbThreads::MakeCritical(/*bulk=*/true);
          u64 seen = 0;
          std::unique_lock lk{mutex};
          while (true) {
@@ -2044,7 +2460,7 @@ index 83e5538..a3c20fd 100644
      font_config.FontDataOwnedByAtlas = false;
      io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
 diff --git a/gpu/shim/bbport_platform.cpp b/gpu/shim/bbport_platform.cpp
-index 8f2e888..b7cd129 100644
+index 8f2e888..e66ea2a 100644
 --- a/gpu/shim/bbport_platform.cpp
 +++ b/gpu/shim/bbport_platform.cpp
 @@ -5,6 +5,7 @@
@@ -2055,7 +2471,7 @@ index 8f2e888..b7cd129 100644
  #include <thread>
  #include <windows.h>
  #include <psapi.h>
-@@ -98,5 +99,20 @@ void MakeBackground() {
+@@ -98,5 +99,30 @@ void MakeBackground() {
      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
  }
  
@@ -2064,14 +2480,24 @@ index 8f2e888..b7cd129 100644
 +// another one's quantum ends (tens of ms), so a render-chain thread queued behind them delays
 +// the frame. Its idle spins are bounded (BB_GPU_SPIN_US, BB_PIPE_SPIN_US, recording: 200 us)
 +// before it sleeps, so the higher priority takes no lasting time from the game's threads.
-+void MakeCritical() {
++namespace {
++bool Raising() {
 +    static const bool enabled = [] {
 +        const char* env = std::getenv("BB_GPU_THREAD_PRIORITY");
 +        return !(env && env[0] == '0');
 +    }();
-+    if (enabled) {
++    return enabled;
++}
++} // namespace
++
++void MakeCritical(bool bulk) {
++    if (Raising() && (!bulk || Available() >= 16)) {
 +        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 +    }
++}
++
++unsigned CapSpinUs(unsigned wanted) {
++    return Raising() && Available() < 16 ? std::min(wanted, 50u) : wanted;
 +}
 +
  } // namespace BbThreads
@@ -2273,19 +2699,26 @@ index c0e8a94..6dbe7a7 100644
  
  /// Reads the file, then the environment overrides. Called once at start.
 diff --git a/gpu/shim/bbport_threads.h b/gpu/shim/bbport_threads.h
-index 50d0422..d856520 100644
+index 50d0422..8336b8d 100644
 --- a/gpu/shim/bbport_threads.h
 +++ b/gpu/shim/bbport_threads.h
-@@ -19,7 +19,12 @@ namespace BbThreads {
+@@ -19,7 +19,19 @@ namespace BbThreads {
  // Windows (bbport_platform.cpp): the process affinity mask; THREAD_PRIORITY_IDLE.
  unsigned Available();
  void MakeBackground();
 +/// The serial render chain (GPU command thread, draw recording, Vulkan recording) runs above
 +/// the game's own threads (THREAD_PRIORITY_ABOVE_NORMAL; BB_GPU_THREAD_PRIORITY=0: normal).
-+void MakeCritical();
++/// `bulk`: threads doing large copies (texture uploads while an area streams in) are raised
++/// only with 16 or more hardware threads; with fewer they took the cores the game's own
++/// threads needed exactly then.
++void MakeCritical(bool bulk = false);
++/// An idle spin of a raised thread before it sleeps, in microseconds: `wanted`, at most 50
++/// with fewer than 16 hardware threads (a raised thread spinning keeps a game thread waiting).
++unsigned CapSpinUs(unsigned wanted);
  #else
 +/// Linux: unchanged (normal priority; raising it needs privileges).
-+inline void MakeCritical() {}
++inline void MakeCritical(bool = false) {}
++inline unsigned CapSpinUs(unsigned wanted) { return wanted; }
  /// Hardware threads available to the process.
  inline unsigned Available() {
      cpu_set_t set;
@@ -2572,10 +3005,10 @@ index b0e7c32..b926998 100644
      printf("Guest thread pointer reads: %" PRIu64 " use TEB TLS slot %u\n", patch_tls_reads(segments, ns), runtime_win_tls_slot());
  #endif
 diff --git a/src/runtime_host.c b/src/runtime_host.c
-index 73f3762..9baefdd 100644
+index 73f3762..f783d21 100644
 --- a/src/runtime_host.c
 +++ b/src/runtime_host.c
-@@ -76,19 +76,22 @@ uint64_t host_realtime_ns(void) {
+@@ -76,29 +76,70 @@ uint64_t host_realtime_ns(void) {
      return (ticks - UINT64_C(116444736000000000)) * 100;
  }
  static __thread HANDLE sleep_timer;
@@ -2584,7 +3017,13 @@ index 73f3762..9baefdd 100644
 -void host_sleep_until_ns(uint64_t deadline) {
 -    enum { SPIN_NS = 600000 };
 +static __thread int sleep_timer_high_resolution;
-+enum { PRECISE_SPIN_NS = 600000 };
++enum { PRECISE_SPIN_NS = 600000, ADAPTIVE_MARGIN_NS = 100000 };
++/* How late the high-resolution timer wakes (ns), a running average over ~16 waits, measured on
++ * every timer wait. The adaptive spin (SPIN_ADAPTIVE) is that plus a margin: a fixed short
++ * spin woke the game's threads late whenever the timer was later than it (~20 sleeps a frame
++ * on the game's critical threads), a fixed long one burns a core. */
++static int64_t timer_late_ns = 300000;
++#define SPIN_ADAPTIVE UINT64_MAX
 +/* High-resolution waitable timers (Windows 10 1803+) wake within ~0.5 ms; the last spin_ns of
 + * a wait is spun (all of it without such a timer). */
 +static void sleep_until_spinning(uint64_t deadline, uint64_t spin_ns) {
@@ -2600,31 +3039,48 @@ index 73f3762..9baefdd 100644
 +        sleep_timer_high_resolution = sleep_timer != NULL;
 +        if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
 +    }
++    if (spin_ns == SPIN_ADAPTIVE) {
++        int64_t late = __atomic_load_n(&timer_late_ns, __ATOMIC_RELAXED);
++        spin_ns = (uint64_t)(late > 0 ? late : 0) + ADAPTIVE_MARGIN_NS;
++        if (spin_ns > PRECISE_SPIN_NS) spin_ns = PRECISE_SPIN_NS;
++    }
 +    if (!sleep_timer_high_resolution && spin_ns < PRECISE_SPIN_NS) spin_ns = PRECISE_SPIN_NS;
 +    if (deadline - now > spin_ns) {
++        const uint64_t due_at = deadline - spin_ns;
          LARGE_INTEGER due;
 -        due.QuadPart = -(LONGLONG)((deadline - now - SPIN_NS) / 100);
-+        due.QuadPart = -(LONGLONG)((deadline - now - spin_ns) / 100);
-         if (sleep_timer && due.QuadPart < 0 && SetWaitableTimer(sleep_timer, &due, 0, NULL, NULL, FALSE))
+-        if (sleep_timer && due.QuadPart < 0 && SetWaitableTimer(sleep_timer, &due, 0, NULL, NULL, FALSE))
++        due.QuadPart = -(LONGLONG)((due_at - now) / 100);
++        if (sleep_timer && due.QuadPart < 0 && SetWaitableTimer(sleep_timer, &due, 0, NULL, NULL, FALSE)) {
              WaitForSingleObject(sleep_timer, INFINITE);
-         else
-@@ -96,9 +99,26 @@ void host_sleep_until_ns(uint64_t deadline) {
+-        else
++            if (sleep_timer_high_resolution) {
++                const uint64_t woke = host_monotonic_ns();
++                int64_t sample = woke > due_at ? (int64_t)(woke - due_at) : 0;
++                if (sample > 2000000) sample = 2000000;
++                const int64_t old = __atomic_load_n(&timer_late_ns, __ATOMIC_RELAXED);
++                __atomic_store_n(&timer_late_ns, old + (sample - old) / 16, __ATOMIC_RELAXED);
++            }
++        } else {
+             Sleep((DWORD)((deadline - now) / 1000000));
++        }
      }
      while (host_monotonic_ns() < deadline) YieldProcessor();
  }
 +/* Frame pacing and audio deadlines: precise. */
 +void host_sleep_until_ns(uint64_t deadline) { sleep_until_spinning(deadline, PRECISE_SPIN_NS); }
 +/* The game's own sleeps (sceKernelUsleep, nanosleep: ~20-26 per frame, ~4 ms each in Central
-+ * Yharnam) only need to last at least as long as asked: a shorter spin tail
-+ * (BB_SLEEP_SPIN_US, default 200; 600 as before) leaves ~0.4 ms of a core per sleep to the
-+ * render threads. Waking a little later than asked is within what a sleep promises. */
++ * Yharnam). By default the spin tail follows the timer (SPIN_ADAPTIVE: as late as it wakes,
++ * plus 0.1 ms; ~0.2-0.4 ms instead of 0.6), so a sleep neither burns a fixed 0.6 ms of a core
++ * nor overruns. BB_SLEEP_SPIN_US sets a fixed tail (600: as before). */
 +static uint64_t guest_sleep_spin_ns(void) {
-+    static uint64_t spin = UINT64_MAX;
++    static uint64_t spin = 0;
 +    uint64_t value = __atomic_load_n(&spin, __ATOMIC_RELAXED);
-+    if (value == UINT64_MAX) {
++    if (value == 0) {
 +        const char *env = getenv("BB_SLEEP_SPIN_US");
-+        value = env && env[0] ? strtoull(env, NULL, 10) * 1000 : 200000;
-+        if (value > PRECISE_SPIN_NS) value = PRECISE_SPIN_NS;
++        value = env && env[0] ? strtoull(env, NULL, 10) * 1000 : SPIN_ADAPTIVE;
++        if (value != SPIN_ADAPTIVE && value > PRECISE_SPIN_NS) value = PRECISE_SPIN_NS;
++        if (value == 0) value = 1;
 +        __atomic_store_n(&spin, value, __ATOMIC_RELAXED);
 +    }
 +    return value;
@@ -4461,3 +4917,767 @@ index 0000000..88d3e93
 +/// Why a cheat cannot run, for the overlay (static text), or nullptr while it can.
 +const char* Unavailable(Which which);
 +} // namespace BbEngine::Cheats
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
+new file mode 100644
+index 0000000..6d3784d
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
+@@ -0,0 +1,68 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: the PS4 depth-block counter model behind real occlusion results (vk_occlusion.h),
++// without Vulkan, so the arithmetic is unit-tested (tests/test_occlusion.cpp).
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++namespace OcclusionModel {
++
++constexpr std::uint64_t ValidBit = 1ull << 63;
++/// What a draw without a usable result adds: plainly visible (the old fake's step), so any
++/// begin/end pair around it reads visible, never occluded.
++constexpr std::uint64_t Unmeasured = 0x2FFFFFFull;
++constexpr std::uint32_t MaxPipes = 16;
++
++/// DB `k`'s share of the running total: the shares sum to `total` and each grows with it, so the
++/// game's sum of end - begin over the DBs is exactly the samples in between.
++constexpr std::uint64_t Share(std::uint64_t total, std::uint32_t pipes, std::uint32_t k) {
++    return total / pipes + (k < total % pipes ? 1 : 0);
++}
++
++enum class Block : std::uint32_t { Occluded = 0, Visible = 1, NotReady = 2 };
++
++/// A Gnm block ({begin, end} per DB, 16 bytes apart) as the game reads it.
++inline Block ReadBlock(const std::uint64_t* words, std::uint32_t pipes) {
++    std::uint64_t sum = 0;
++    for (std::uint32_t k = 0; k < pipes; ++k) {
++        const std::uint64_t b = words[2 * k], e = words[2 * k + 1];
++        if (!(b & ValidBit) || !(e & ValidBit)) {
++            return Block::NotReady;
++        }
++        sum += (e & ~ValidBit) - (b & ~ValidBit);
++    }
++    return sum != 0 ? Block::Visible : Block::Occluded;
++}
++
++/// 16.16 factor taking samples counted at `width` x `height` (reduced scene targets) back to the
++/// PS4's 1920x1080; never below 1.
++constexpr std::uint32_t SampleScale(std::uint32_t width, std::uint32_t height) {
++    const std::uint64_t pixels = std::uint64_t(width) * height;
++    constexpr std::uint64_t native = 1920ull * 1080ull;
++    if (pixels == 0 || pixels >= native) {
++        return 1u << 16;
++    }
++    return static_cast<std::uint32_t>((native << 16) / pixels);
++}
++
++/// One query's contribution: unavailable reads visible; an imprecise device's nonzero result
++/// (0/1 on NVIDIA) reads plainly visible; a precise count is scaled, rounding up.
++constexpr std::uint64_t Samples(std::uint64_t value, bool available, bool precise,
++                                std::uint32_t scale) {
++    if (!available) {
++        return Unmeasured;
++    }
++    if (!precise) {
++        return value ? Unmeasured : 0;
++    }
++    return std::max<std::uint64_t>((value * scale + 0xFFFF) >> 16, value);
++}
++
++/// SET_PREDICATION's outcome for the draws up to its clear: unknown draws (a wrong "occluded"
++/// makes geometry vanish), else draw when the visibility is the one asked for.
++constexpr bool PredicatedDraws(bool visible, bool unknown, bool draw_if_visible) {
++    return unknown || visible == draw_if_visible;
++}
++
++} // namespace OcclusionModel
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
+new file mode 100644
+index 0000000..d85d112
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
+@@ -0,0 +1,426 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: real occlusion query results (vk_occlusion.h). Design after droogie/bbhost b68ed17.
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include "bbport_toggles.h"
++#include "core/memory.h"
++#include "video_core/renderer_vulkan/occlusion_model.h"
++#include "video_core/renderer_vulkan/scene_resolution.h"
++#include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_occlusion.h"
++#include "video_core/renderer_vulkan/vk_rasterizer.h"
++#include "video_core/renderer_vulkan/vk_scheduler.h"
++
++extern "C" void runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
++
++namespace Vulkan {
++
++namespace {
++using OcclusionModel::MaxPipes;
++using OcclusionModel::Share;
++using OcclusionModel::Unmeasured;
++using OcclusionModel::ValidBit;
++
++u64 EnvU64(const char* name, u64 fallback) {
++    const char* env = std::getenv(name);
++    return env && *env ? std::strtoull(env, nullptr, 10) : fallback;
++}
++
++/// Reads guest memory through the runtime's backing view: no page protection (a read fault on
++/// this thread would wait for the GPU thread), zeroes where nothing is mapped.
++void ReadGuest(VAddr address, void* data, u64 size) {
++    runtime_memory_read_backing(address, data, size);
++}
++
++/// A Gnm block as the game reads it now.
++OcclusionModel::Block ReadBlock(VAddr block, u32 pipes) {
++    std::array<u64, 2 * MaxPipes> words{};
++    ReadGuest(block, words.data(), 16ull * pipes);
++    return OcclusionModel::ReadBlock(words.data(), pipes);
++}
++} // namespace
++
++struct Occlusion::Shared {
++    /// The resolver's state and the pool's life (the destructor takes it too).
++    std::mutex mutex;
++    /// Only the queue: the recording side never waits for a resolve in progress.
++    std::mutex queue_mutex;
++    bool alive = true;
++    vk::Device device;
++    vk::QueryPool pool;
++    Rasterizer* rasterizer = nullptr;
++    bool precise = false;
++    u64 max_lag = 3;
++
++    struct Pending {
++        u64 tick;   ///< the submission holding the dump (and every query before it)
++        VAddr va;
++        u64 frame;
++        u64 serial;
++        u64 first;  ///< the interval's first query, as a running count
++        u32 count;  ///< its queries
++        u32 pipes;
++        bool poison; ///< a draw in the interval got no query
++    };
++    std::deque<Pending> pending; ///< under queue_mutex
++    std::vector<Pending> ready;  ///< taken from it by the resolver
++    /// Per query: the sample scale of its draw (16.16; reduced scene targets), written by the
++    /// recording side before the dump is queued under the mutex.
++    std::array<u32, PoolSize> scale{};
++    std::atomic<u64> released{0};        ///< queries read and reset (reusable)
++    std::atomic<u64> resolved_serial{0}; ///< dumps processed, in order
++
++    u64 total = 0; ///< the DBs' running count
++    /// What we last wrote at each dump address: our own value may be overwritten (a block the
++    /// game reuses), anything else that is not zero is not ours to write over.
++    std::unordered_map<VAddr, u64> written;
++    std::vector<u64> results;
++
++    // Statistics (BB_FRAME_STATS), under the mutex except the recording side's atomics.
++    u64 dumps = 0, queries = 0, unavailable = 0, poisoned = 0, visible = 0, occluded = 0;
++    u64 late = 0, foreign = 0, unbacked = 0, written_dumps = 0;
++    std::atomic<u64> pool_full{0}, pred_sets{0}, pred_resolved{0}, pred_skipped{0},
++        pred_drawn{0};
++    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
++    u64 window_frames = 0, window_draws = 0;
++    std::array<u64, 12> last{};
++
++    void Resolve(u64 tick);
++    void Process(const Pending& dump);
++    void WriteBlock(const Pending& dump);
++    void Report();
++};
++
++bool Occlusion::Wanted() {
++    static const bool on = [] {
++        const char* env = std::getenv("BB_OCCLUSION");
++        return !(env && env[0] == '0');
++    }();
++    return on;
++}
++
++Occlusion::Occlusion(const Instance& instance_, Scheduler& scheduler_, Rasterizer& rasterizer_)
++    : instance{instance_}, scheduler{scheduler_}, rasterizer{rasterizer_} {}
++
++std::unique_ptr<Occlusion> Occlusion::Create(const Instance& instance, Scheduler& scheduler,
++                                             Rasterizer& rasterizer) {
++    if (!Wanted()) {
++        std::printf("Occlusion: off (BB_OCCLUSION=0): every query the game makes reads visible\n");
++        return nullptr;
++    }
++    std::unique_ptr<Occlusion> occlusion{new Occlusion(instance, scheduler, rasterizer)};
++    if (!occlusion->Init()) {
++        return nullptr;
++    }
++    return occlusion;
++}
++
++bool Occlusion::Init() {
++    // Results are read and the queries reset on the CPU once the GPU is past them: no reset
++    // commands outside render passes, no waits.
++    if (!instance.IsHostQueryResetSupported()) {
++        std::printf("Occlusion: off - the device has no host query reset; every query the game "
++                    "makes reads visible, as before\n");
++        return false;
++    }
++    const vk::Device device = instance.GetDevice();
++    const vk::QueryPoolCreateInfo info = {
++        .queryType = vk::QueryType::eOcclusion,
++        .queryCount = PoolSize,
++    };
++    const auto [result, pool] = device.createQueryPool(info);
++    if (result != vk::Result::eSuccess) {
++        std::printf("Occlusion: off - no query pool (%s); every query the game makes reads "
++                    "visible, as before\n",
++                    vk::to_string(result).c_str());
++        return false;
++    }
++    device.resetQueryPool(pool, 0, PoolSize);
++    precise = instance.IsOcclusionQueryPreciseSupported();
++    cap = static_cast<u32>(std::clamp<u64>(EnvU64("BB_OCCLUSION_CAP", 64), 1, 1024));
++    shared = std::make_shared<Shared>();
++    shared->device = device;
++    shared->pool = pool;
++    shared->rasterizer = &rasterizer;
++    shared->precise = precise;
++    shared->max_lag = EnvU64("BB_OCCLUSION_MAX_LAG", 3);
++    shared->results.resize(2ull * PoolSize);
++    std::printf("Occlusion: real sample counts (BB_OCCLUSION=0: the old always-visible fake) - a "
++                "query on each of the %u draws after a block's begin, results written when the "
++                "GPU has run them (at most %llu frames late), %s; SET_PREDICATION skips only on "
++                "known results\n",
++                cap, static_cast<unsigned long long>(shared->max_lag),
++                precise ? "precise" : "not precise (a nonzero count reads plainly visible)");
++    return true;
++}
++
++Occlusion::~Occlusion() {
++    if (!shared) {
++        return;
++    }
++    // A resolve still queued on the scheduler's thread finds it gone and does nothing.
++    std::scoped_lock lk{shared->mutex};
++    shared->alive = false;
++    shared->device.destroyQueryPool(shared->pool);
++    shared->pool = nullptr;
++}
++
++Occlusion::DumpTask Occlusion::MakeDump(VAddr va, u32 num_pipes) const noexcept {
++    return {va, issued, BbStats::submit_done_calls.load(std::memory_order_relaxed),
++            std::clamp(num_pipes, 1u, MaxPipes), 0};
++}
++
++void Occlusion::Dump(const DumpTask& task) {
++    // Every draw stage A decoded since the last dump got a query, or the interval reads visible:
++    // a draw dropped before recording (pipeline still compiling, filtered, failed) must not
++    // count as occluded.
++    const bool poison =
++        !interval.open || task.issued - interval.issued_at != interval.queries;
++    const u64 tick = scheduler.CurrentTick();
++    const u64 serial = ++dump_serial;
++    if (block_serial.size() > 65536) {
++        block_serial.clear();
++    }
++    block_serial[task.va & ~15ull] = serial;
++    {
++        std::scoped_lock lk{shared->queue_mutex};
++        shared->pending.push_back({tick, task.va, task.frame, serial, interval.first,
++                                   interval.queries, task.pipes, poison});
++    }
++    if (tick != registered_tick) {
++        // One resolve per submission, on the scheduler's thread once the GPU has finished it.
++        registered_tick = tick;
++        scheduler.DeferPriorityOperation(
++            [shared = shared, tick] { shared->Resolve(tick); });
++    }
++    // Gnm's begin dump (+0 of a 16-byte cell) measures the draws up to its end dump; after any
++    // other dump only the next draw is measured (droogie's caps), the rest read visible.
++    interval = {true, (task.va & 15) == 0 ? cap : 1u, 0, query_head, task.issued};
++    pipes = task.pipes;
++}
++
++Occlusion::DrawQuery Occlusion::AllocateQuery(u32 scene_size) noexcept {
++    if (query_head - shared->released.load(std::memory_order_acquire) >= PoolSize) {
++        shared->pool_full.fetch_add(1, std::memory_order_relaxed);
++        return {}; // unmeasured: reads visible
++    }
++    const u32 index = static_cast<u32>(query_head % PoolSize);
++    // A pass into the reduced scene targets counts fewer samples than the PS4's 1920x1080; the
++    // count is scaled back so a threshold the game applies means the same.
++    u32 scale = 1u << 16;
++    if (scene_size) {
++        const auto size = SceneResolution::Unpack(scene_size);
++        scale = OcclusionModel::SampleScale(size.width, size.height);
++    }
++    shared->scale[index] = scale;
++    ++query_head;
++    ++interval.queries;
++    return {shared->pool, index,
++            precise ? vk::QueryControlFlags{vk::QueryControlFlagBits::ePrecise}
++                    : vk::QueryControlFlags{}};
++}
++
++void Occlusion::SetPredication(const PredicationTask& task) {
++    shared->pred_sets.fetch_add(1, std::memory_order_relaxed);
++    if (task.op == 0) {
++        pred_mode = PredMode::None;
++        pred_visible = pred_unknown = false;
++        return;
++    }
++    if (task.op != 1) {
++        pred_mode = PredMode::Draw; // primitive-count predication (streamout): not emulated
++        return;
++    }
++    if (!(task.cont && pred_mode != PredMode::None)) {
++        pred_visible = pred_unknown = false;
++    }
++    // Known only when every dump into the block has been resolved: then the block holds this
++    // use's result (or is not ready). Results come a frame late, so mostly unknown: drawn.
++    const auto it = block_serial.find(task.block);
++    if (it != block_serial.end() &&
++        shared->resolved_serial.load(std::memory_order_acquire) >= it->second) {
++        const auto state = ReadBlock(task.block, pipes);
++        pred_unknown |= state == OcclusionModel::Block::NotReady;
++        pred_visible |= state == OcclusionModel::Block::Visible;
++        if (state != OcclusionModel::Block::NotReady) {
++            shared->pred_resolved.fetch_add(1, std::memory_order_relaxed);
++        }
++    } else {
++        pred_unknown = true;
++    }
++    // A wrong "occluded" makes geometry vanish: unknown draws.
++    const bool draw =
++        OcclusionModel::PredicatedDraws(pred_visible, pred_unknown, task.draw_if_visible != 0);
++    pred_mode = draw ? PredMode::Draw : PredMode::Skip;
++}
++
++bool Occlusion::SkipPredicated() noexcept {
++    if (pred_mode == PredMode::Skip) {
++        shared->pred_skipped.fetch_add(1, std::memory_order_relaxed);
++        return true;
++    }
++    shared->pred_drawn.fetch_add(1, std::memory_order_relaxed);
++    return false;
++}
++
++void Occlusion::Shared::Resolve(u64 tick) {
++    std::scoped_lock lk{mutex};
++    if (!alive) {
++        return;
++    }
++    ready.clear();
++    {
++        std::scoped_lock queue{queue_mutex};
++        while (!pending.empty() && pending.front().tick <= tick) {
++            ready.push_back(pending.front());
++            pending.pop_front();
++        }
++    }
++    for (const Pending& dump : ready) {
++        Process(dump);
++    }
++    Report();
++}
++
++void Occlusion::Shared::Process(const Pending& dump) {
++    ++dumps;
++    bool bad = dump.poison;
++    u64 samples = 0;
++    if (dump.count) {
++        queries += dump.count;
++        // The ring may wrap inside the interval: at most two ranges.
++        const u32 first = static_cast<u32>(dump.first % PoolSize);
++        const u32 head_part = std::min<u32>(dump.count, PoolSize - first);
++        const std::array<std::pair<u32, u32>, 2> ranges{{{first, head_part},
++                                                         {0, dump.count - head_part}}};
++        for (const auto& [start, count] : ranges) {
++            if (!count) {
++                continue;
++            }
++            // Without waiting: the GPU has finished the submission. A query a driver did not
++            // resolve (AMD while the window is unfocused, KyoPS4x #220) reads visible.
++            const vk::Result result = device.getQueryPoolResults(
++                pool, start, count, 16ull * count, results.data(), 16,
++                vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
++            for (u32 i = 0; i < count; ++i) {
++                const bool failed = result != vk::Result::eSuccess &&
++                                    result != vk::Result::eNotReady;
++                const bool available = !failed && results[2 * i + 1] != 0;
++                unavailable += available ? 0 : 1;
++                // Imprecise results may be 0/1 (NVIDIA): one sample read as "nearly hidden" was
++                // the likeliest cause of KyoPS4x #219's black world.
++                samples += OcclusionModel::Samples(results[2 * i], available, precise,
++                                                   scale[start + i]);
++            }
++            device.resetQueryPool(pool, start, count);
++        }
++        released.fetch_add(dump.count, std::memory_order_release);
++    }
++    if (bad) {
++        ++poisoned;
++        samples += Unmeasured;
++    }
++    total += samples;
++    if (BbStats::submit_done_calls.load(std::memory_order_relaxed) - dump.frame > max_lag) {
++        // The game may have freed and reused the block by now: left as it is (not ready).
++        ++late;
++    } else {
++        WriteBlock(dump);
++    }
++    resolved_serial.store(dump.serial, std::memory_order_release);
++}
++
++void Occlusion::Shared::WriteBlock(const Pending& dump) {
++    std::array<u64, 2 * MaxPipes> words{};
++    const u64 extent = 16ull * (dump.pipes - 1) + 8;
++    ReadGuest(dump.va, words.data(), extent);
++    const auto own = written.find(dump.va);
++    for (u32 k = 0; k < dump.pipes; ++k) {
++        const u64 word = words[2 * k];
++        const bool ours = own != written.end() &&
++                          word == (Share(own->second, dump.pipes, k) | ValidBit);
++        if (word != 0 && !ours) {
++            ++foreign;
++            return; // neither the game's zeroes nor our last value: not a query block now
++        }
++    }
++    auto* memory = Core::Memory::Instance();
++    for (u32 k = 0; k < dump.pipes; ++k) {
++        const u64 value = Share(total, dump.pipes, k) | ValidBit;
++        auto* address = reinterpret_cast<u8*>(dump.va + 16ull * k);
++        // Through the backing view (no protection fault on this thread; fails rather than
++        // writing where nothing is mapped any more).
++        if (!memory->TryWriteBacking(address, &value, sizeof(value))) {
++            ++unbacked;
++            return;
++        }
++        rasterizer->NoteLateCommandWrite(dump.va + 16ull * k, &value, sizeof(value));
++    }
++    ++written_dumps;
++    if (written.size() > 262144) {
++        written.clear();
++    }
++    written[dump.va] = total;
++    // The end dump of a Gnm block (+8): how the pair reads, for the statistics.
++    if ((dump.va & 15) == 8) {
++        if (const auto begin = written.find(dump.va - 8); begin != written.end()) {
++            ++(total != begin->second ? visible : occluded);
++        }
++    }
++}
++
++void Occlusion::Shared::Report() {
++    static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
++    if (!stats) {
++        return;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    const double seconds = std::chrono::duration<double>(now - window).count();
++    if (seconds < 5.0) {
++        return;
++    }
++    window = now;
++    const u64 frames_now = BbStats::submit_done_calls.load(std::memory_order_relaxed);
++    const u64 draws_now = BbStats::draws.load(std::memory_order_relaxed);
++    const std::array<u64, 12> now_counts{
++        dumps,
++        queries,
++        visible,
++        occluded,
++        poisoned,
++        unavailable,
++        late + foreign + unbacked,
++        pool_full.load(std::memory_order_relaxed),
++        pred_sets.load(std::memory_order_relaxed),
++        pred_resolved.load(std::memory_order_relaxed),
++        pred_skipped.load(std::memory_order_relaxed),
++        pred_drawn.load(std::memory_order_relaxed),
++    };
++    std::array<double, 12> d{};
++    const double frames = std::max<double>(1.0, double(frames_now - window_frames));
++    for (size_t i = 0; i < d.size(); ++i) {
++        d[i] = double(now_counts[i] - last[i]) / frames;
++    }
++    const double pairs = d[2] + d[3];
++    std::printf("Occlusion per frame: %.1f dumps, %.1f queries, objects %.1f visible / %.1f "
++                "culled (%.0f%%), %.1f intervals read visible (%.1f queries unavailable), %.1f "
++                "dumps not written (totals: late %llu, reused memory %llu, unmapped %llu), pool "
++                "full %.1f; SET_PREDICATION %.1f (%.1f known), predicated draws %.1f skipped / "
++                "%.1f drawn; %.0f draws/frame\n",
++                d[0], d[1], d[2], d[3], pairs > 0 ? 100.0 * d[3] / pairs : 0.0, d[4], d[5], d[6],
++                (unsigned long long)late, (unsigned long long)foreign,
++                (unsigned long long)unbacked, d[7], d[8], d[9], d[10], d[11],
++                double(draws_now - window_draws) / frames);
++    std::fflush(stdout);
++    last = now_counts;
++    window_frames = frames_now;
++    window_draws = draws_now;
++}
++
++} // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
+new file mode 100644
+index 0000000..39e9668
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
+@@ -0,0 +1,168 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: real occlusion query results (BB_OCCLUSION, default on; 0: the old fake counts).
++//
++// The design follows droogie/bbhost commit b68ed17 ("occlusion: the game's own GPU occlusion
++// culling works", Kyoskii, after KyoPS4x #217-#220), adapted to this renderer: there the GPU
++// writes the counts with a compute shader before the labels; here labels are written when the
++// work is recorded (not when the GPU has run it), so the counts are written by the CPU once the
++// GPU has finished the submission holding the queries, a frame or so after the game asked.
++//
++// The PS4 model: each depth block (DB, 8 on a base PS4) keeps a running count of the samples
++// that passed; an EVENT_WRITE of PIXEL_PIPE_STAT_DUMP / ZPASS_DONE stores every DB's count, bit
++// 63 (valid) set, at the dump's address + 16 * db. Gnm's query block is {begin, end} per DB:
++// the game zeroes it, dumps at +0 before the draws it measures and at +8 after, and reads the
++// sum of end - begin. Bloodborne tests its culling proxies that way (GX GetData, CPU readback,
++// ~180 blocks a frame in a dense view: when the answer is "no samples" it does not submit the
++// object's draws at all) and also predicates draws on blocks with SET_PREDICATION (Gnm's
++// setZPassPredicationEnable, called from the game at 0x216a79e and 0x2250745).
++//
++// Here:
++// - Stage A counts the draws it decodes and hands each dump to the recording side in order
++//   (RunInOrder). Draws recorded after a dump get a Vulkan occlusion query each, begun and ended
++//   around the vkCmdDraw itself (never across a render pass): up to BB_OCCLUSION_CAP (64) after
++//   a block's begin dump, one after any other dump. An interval holding a draw without a query
++//   (past the cap, filtered, its pipeline not ready yet, failed) reads plainly visible.
++// - At the dump the interval's queries and the block address are queued; once the GPU has
++//   finished that submission (Scheduler::DeferPriorityOperation, its own thread) the results
++//   are read without waiting, a running total is kept like the DBs keep theirs, and the dump
++//   writes it, split over the DBs with the valid bit, into the game's memory. Never a stall:
++//   no thread waits for a query, the game polls its blocks and takes "not ready" as it would on
++//   the PS4 (it keeps the object drawn and asks again).
++// - Fail-safe towards "visible": an unavailable query, a missing query, an imprecise device's
++//   nonzero result, all add a large count. A dump more than BB_OCCLUSION_MAX_LAG frames late,
++//   or over memory that holds neither the game's zeroes nor our own last value (freed and
++//   reused), is not written: the block stays not ready.
++// - SET_PREDICATION: the draws between a ZPASS set and its clear are skipped only when every
++//   dump into the block has been resolved and the block reads occluded; otherwise they are
++//   drawn. The results arrive a frame late, so this rarely skips: GPU conditional rendering
++//   would need a render pass split per predicated object to copy the result on the GPU and
++//   would still record every draw (the CPU cost this port is bound by), so it is not done.
++//   BB_FRAME_STATS counts how many predicated draws there are.
++//
++// Latency: an object coming into view is drawn again once the game has read the result of a
++// query it issued while the object was hidden: one or two frames later than on the PS4 (the
++// game itself already lags a frame there). Popping at the edge of occluders is the visible risk.
++
++#pragma once
++
++#include <atomic>
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++
++#include "common/types.h"
++#include "video_core/renderer_vulkan/vk_common.h"
++
++namespace Vulkan {
++
++class Instance;
++class Scheduler;
++class Rasterizer;
++
++class Occlusion {
++public:
++    /// BB_OCCLUSION (default on). Off: the fake counts and SET_PREDICATION ignored, as before.
++    static bool Wanted();
++
++    /// Null when the device cannot do it (no host query reset, no query pool): the fake then.
++    static std::unique_ptr<Occlusion> Create(const Instance& instance, Scheduler& scheduler,
++                                             Rasterizer& rasterizer);
++    ~Occlusion();
++
++    /// Stage A (GPU command thread): a draw packet decoded (direct or indirect).
++    void NoteIssued() noexcept {
++        ++issued;
++    }
++
++    /// Stage A: what a dump hands to the recording side.
++    struct DumpTask {
++        VAddr va;
++        u64 issued;    ///< draws decoded before the dump
++        u64 frame;     ///< sceGnmSubmitDone calls when it was decoded
++        u32 pipes;     ///< DBs the dump writes
++        u32 pad;
++    };
++    DumpTask MakeDump(VAddr va, u32 num_pipes) const noexcept;
++
++    struct PredicationTask {
++        VAddr block;
++        u32 op; ///< 0 clear, 1 ZPASS, 2 primitive count (not emulated: drawn)
++        u8 draw_if_visible;
++        u8 cont;
++        u16 pad;
++    };
++    /// Stage A: whether a SET_PREDICATION region is open (the submission end clears it).
++    bool predication_open = false;
++
++    /// Dumps were queued into the submission `current_tick` (not sent to the GPU yet). Read on
++    /// stage A with the draw pipe drained.
++    bool HasUnsubmittedDumps(u64 current_tick) const noexcept {
++        return registered_tick == current_tick;
++    }
++
++    // ---- the recording side (stage B, or stage A after a drain), in stream order ----
++    void Dump(const DumpTask& task);
++    void SetPredication(const PredicationTask& task);
++    /// At the start of a draw's recording: true when SET_PREDICATION skips it.
++    bool SkipDraw() noexcept {
++        if (pred_mode == PredMode::None) [[likely]] {
++            return false;
++        }
++        return SkipPredicated();
++    }
++    /// The query to wrap the draw about to be recorded in (pool null: none). `scene_size`: the
++    /// draw's push_data.scene_size (reduced scene targets count fewer samples).
++    struct DrawQuery {
++        vk::QueryPool pool{};
++        u32 index = 0;
++        vk::QueryControlFlags flags{};
++    };
++    DrawQuery BeginDraw(u32 scene_size) noexcept {
++        if (!interval.open || interval.queries >= interval.cap) [[likely]] {
++            return {};
++        }
++        return AllocateQuery(scene_size);
++    }
++
++private:
++    Occlusion(const Instance& instance, Scheduler& scheduler, Rasterizer& rasterizer);
++    bool Init();
++    DrawQuery AllocateQuery(u32 scene_size) noexcept;
++    bool SkipPredicated() noexcept;
++
++    static constexpr u32 PoolSize = 16384;
++
++    const Instance& instance;
++    Scheduler& scheduler;
++    Rasterizer& rasterizer;
++    bool precise = false;
++    u32 cap = 64;
++    u32 pipes = 8; ///< DBs of the last dump (a Neo has 16)
++
++    // Stage A.
++    u64 issued = 0;
++
++    // The recording side.
++    struct Interval {
++        bool open = false;
++        u32 cap = 0;
++        u32 queries = 0;    ///< queries handed out in it (one per measured draw)
++        u64 first = 0;      ///< its first query, as a running count
++        u64 issued_at = 0;  ///< stage A's draw count at the dump that opened it
++    } interval;
++    u64 query_head = 0;     ///< queries handed out so far
++    u64 dump_serial = 0;
++    u64 registered_tick = ~0ull;
++    std::unordered_map<VAddr, u64> block_serial; ///< a block's last dump (either half)
++    enum class PredMode : u8 { None, Skip, Draw };
++    PredMode pred_mode = PredMode::None;
++    bool pred_visible = false, pred_unknown = false; ///< CONTINUE chains OR blocks together
++
++    /// What the resolver thread and the recording side share.
++    struct Shared;
++    std::shared_ptr<Shared> shared;
++};
++
++} // namespace Vulkan
+diff --git a/tests/test_occlusion.cpp b/tests/test_occlusion.cpp
+new file mode 100644
+index 0000000..bb3b29a
+--- /dev/null
++++ b/tests/test_occlusion.cpp
+@@ -0,0 +1,78 @@
++// The depth-block counter model behind real occlusion results (occlusion_model.h).
++#include <cassert>
++#include <cstdint>
++#include <cstdio>
++
++#include "gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h"
++
++using namespace OcclusionModel;
++
++namespace {
++// The words two dumps write into a block: the begin dump at +0, the end dump at +8.
++void Dump(std::uint64_t* block, std::uint32_t pipes, std::uint64_t total, bool end) {
++    for (std::uint32_t k = 0; k < pipes; ++k) {
++        block[2 * k + (end ? 1 : 0)] = Share(total, pipes, k) | ValidBit;
++    }
++}
++
++std::uint64_t SumOfDifferences(const std::uint64_t* block, std::uint32_t pipes) {
++    std::uint64_t sum = 0;
++    for (std::uint32_t k = 0; k < pipes; ++k) {
++        sum += (block[2 * k + 1] & ~ValidBit) - (block[2 * k] & ~ValidBit);
++    }
++    return sum;
++}
++} // namespace
++
++int main() {
++    // The shares add up to the total, and every DB's share grows with it: the game's sum of
++    // end - begin is the samples drawn in between, whatever the split.
++    for (std::uint32_t pipes : {8u, 16u}) {
++        for (std::uint64_t total = 0; total < 200; ++total) {
++            std::uint64_t sum = 0;
++            for (std::uint32_t k = 0; k < pipes; ++k) {
++                sum += Share(total, pipes, k);
++                assert(Share(total + 1, pipes, k) >= Share(total, pipes, k));
++            }
++            assert(sum == total);
++        }
++        for (std::uint64_t begin : {0ull, 7ull, 123456789ull}) {
++            for (std::uint64_t samples : {0ull, 1ull, 5ull, 4000ull}) {
++                std::uint64_t block[2 * MaxPipes] = {};
++                assert(ReadBlock(block, pipes) == Block::NotReady); // zeroed by the game
++                Dump(block, pipes, begin, false);
++                assert(ReadBlock(block, pipes) == Block::NotReady); // only the begin landed
++                Dump(block, pipes, begin + samples, true);
++                assert(SumOfDifferences(block, pipes) == samples);
++                assert(ReadBlock(block, pipes) == (samples ? Block::Visible : Block::Occluded));
++            }
++        }
++    }
++
++    // Anything not measured reads visible, never occluded.
++    assert(Samples(0, false, true, 1u << 16) == Unmeasured);
++    assert(Samples(0, false, false, 1u << 16) == Unmeasured);
++    assert(Samples(1, true, false, 1u << 16) == Unmeasured); // imprecise 0/1: plainly visible
++    assert(Samples(0, true, false, 1u << 16) == 0);
++    assert(Samples(0, true, true, 4u << 16) == 0);           // occluded stays occluded
++    assert(Samples(10, true, true, 1u << 16) == 10);
++    assert(Samples(1, true, true, (1u << 16) + 1) == 2);      // rounds up, never down
++
++    // Reduced scene targets count fewer samples: scaled back to 1920x1080, never below 1.
++    assert(SampleScale(1920, 1080) == 1u << 16);
++    assert(SampleScale(3840, 2160) == 1u << 16);
++    assert(SampleScale(960, 540) == 4u << 16);
++    assert(SampleScale(0, 0) == 1u << 16);
++    assert(Samples(250, true, true, SampleScale(960, 540)) == 1000);
++
++    // SET_PREDICATION: unknown draws; otherwise draws when visibility matches the request.
++    assert(PredicatedDraws(false, true, true));
++    assert(PredicatedDraws(false, true, false));
++    assert(PredicatedDraws(true, false, true));
++    assert(!PredicatedDraws(false, false, true));
++    assert(PredicatedDraws(false, false, false));
++    assert(!PredicatedDraws(true, false, false));
++
++    std::printf("occlusion model: ok\n");
++    return 0;
++}
