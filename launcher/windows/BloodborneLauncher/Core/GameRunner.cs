@@ -98,6 +98,13 @@ namespace BloodborneLauncher.Core
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(SessionLog)!);
+                // The one before is kept: a crash's log survives starting the game again.
+                try
+                {
+                    if (File.Exists(SessionLog))
+                        File.Copy(SessionLog, Path.Combine(Path.GetDirectoryName(SessionLog)!, "previous_session.log"), overwrite: true);
+                }
+                catch (IOException) { /* still open elsewhere: only this session's is kept */ }
                 var stream = new FileStream(SessionLog, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
                 _log = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
                 _log.WriteLine($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  Bloodborne Launcher {Updater.CurrentLabel}");
