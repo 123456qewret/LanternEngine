@@ -77,7 +77,12 @@ namespace BloodborneLauncher
                 if (Environment.GetCommandLineArgs().Contains("--test-trophy"))
                     TrophyToast.Announce(TrophyTracker.ById[14]);
                 // --test-prompt <png>: a picture of a sample dialog over the launcher, drawn off-screen.
-                if (Prompt.SnapshotPath != null)
+                // --test-import: the import dialog with a long pasted code instead.
+                if (Prompt.SnapshotPath != null && Environment.GetCommandLineArgs().Contains("--test-import"))
+                    Dispatcher.BeginInvoke(() => Prompt.Ask("Import settings", $"Paste the code someone shared (it starts with {SharedSettings.CodePrefix}).",
+                            new Prompt.Field("Code", SharedSettings.ToCode(SharedSettings.Take(ws.Ini, ws.Settings)), "", Multiline: true)),
+                        System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                else if (Prompt.SnapshotPath != null)
                     Dispatcher.BeginInvoke(() => Prompt.Confirm("Switch layout", "The launcher restarts to change its layout.", "Restart now"),
                         System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 ws.Log(Paths.IsPortDir(Paths.PortDir)

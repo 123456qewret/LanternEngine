@@ -42,7 +42,15 @@ namespace BloodborneLauncher.Views
                 text.FontSize = 13;
                 text.Margin = new Thickness(0, 8, 0, 4);
                 text.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
-                stack.Children.Add(text);
+                // A long message (an import's list of changes) scrolls instead of pushing the buttons
+                // out of a small window.
+                stack.Children.Add(new ScrollViewer
+                {
+                    Content = text,
+                    MaxHeight = 300,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                });
             }
             foreach (var field in fields)
             {
@@ -57,6 +65,10 @@ namespace BloodborneLauncher.Views
                     AcceptsReturn = field.Multiline,
                     TextWrapping = field.Multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
                     MinHeight = field.Multiline ? 70 : 0,
+                    // A pasted code is one long line: it wraps and scrolls inside the box, which keeps
+                    // the dialog's buttons on screen in a small window.
+                    MaxHeight = field.Multiline ? 160 : double.PositiveInfinity,
+                    VerticalScrollBarVisibility = field.Multiline ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden,
                 };
                 _boxes.Add(box);
                 stack.Children.Add(box);

@@ -60,7 +60,10 @@ namespace BloodborneLauncher.Core
             ["exp_thread_priority"] = false,
             ["exp_sleep_spin"] = false,
             ["exp_async_pipelines"] = true,
-            ["exp_occlusion"] = true,
+            // New engine features that could still crash or hang: on in beta builds, where they are
+            // tested, and off in stable ones until they have been.
+            ["exp_occlusion"] = Updater.CurrentBeta > 0,
+            ["exp_fast_draws"] = Updater.CurrentBeta > 0,
             ["occlusion_default_on"] = true,
             ["section_stats"] = false,
             ["trophy_notifications"] = true,
@@ -82,9 +85,9 @@ namespace BloodborneLauncher.Core
                 {
                     foreach (var (key, value) in saved)
                         _data[key] = value?.DeepClone();
-                    // Occlusion culling no longer flickers and is on by default; files from earlier
-                    // versions saved the old default (off), so it is switched on once.
-                    if (!saved.ContainsKey("occlusion_default_on"))
+                    // Beta builds: occlusion culling no longer flickers and is on by default; files
+                    // from earlier versions saved the old default (off), so it is switched on once.
+                    if (Updater.CurrentBeta > 0 && !saved.ContainsKey("occlusion_default_on"))
                         _data["exp_occlusion"] = true;
                 }
             }
