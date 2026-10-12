@@ -67,6 +67,7 @@ namespace BloodborneLauncher.Core
             ["exp_compile_skip"] = Updater.CurrentBeta > 0,
             ["audio_priority"] = false,
             ["sound_output"] = "",
+            ["load_profile"] = false,
             ["occlusion_default_on"] = true,
             ["section_stats"] = false,
             ["trophy_notifications"] = true,
@@ -118,7 +119,8 @@ namespace BloodborneLauncher.Core
         public string OnlinePassword
         {
             get => Secret.Unprotect(Str("online_password"));
-            set => Set("online_password", Secret.Protect(value));
+            // Should Windows refuse to encrypt it, it stays as typed rather than being lost.
+            set => Set("online_password", Secret.Protect(value) is { Length: > 0 } encrypted ? encrypted : value);
         }
 
         public string Str(string key)

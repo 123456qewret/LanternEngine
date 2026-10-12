@@ -54,6 +54,7 @@ namespace BloodborneLauncher.Core
             if (s.Bool("frame_stats")) env["BB_FRAME_STATS"] = "1";
             if (s.Bool("fsr_profile")) env["BB_FSR4_PROFILE"] = "1";
             if (s.Bool("audio_stats")) env["BB_AUDIO_STATS"] = "1";
+            if (s.Bool("load_profile")) env["BB_SAMPLE_THREADS"] = "load";
             if (s.Bool("fsr4_balanced")) env["BB_FSR4_BALANCED"] = "1";
             // Experimental engine features: on by default, each can be turned off.
             env["BB_PRECISE_PACING"] = s.Bool("exp_frame_pacing") ? "1" : "0";

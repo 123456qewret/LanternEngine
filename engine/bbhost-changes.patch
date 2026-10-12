@@ -285,7 +285,7 @@ index a014737..b3cfd54 100644
      const int ret =
          UPNP_AddPortMapping(m_urls.controlURL, m_data.first.servicetype, port_str.c_str(),
 diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp
-index 54df194..1322406 100644
+index 54df194..46ec8ac 100644
 --- a/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp
 +++ b/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp
 @@ -23,6 +23,7 @@
@@ -325,17 +325,68 @@ index 54df194..1322406 100644
  int FailWith(int error) {
      *Libraries::Kernel::__Error() = error;
      return -1;
-@@ -217,6 +233,9 @@ public:
+@@ -157,7 +173,7 @@ public:
+         LOG_ERROR(Lib_Net, "P2P transport is currently supported on Linux and Windows");
+         return false;
+ #else
+-        std::lock_guard lock(start_mutex);
++        std::unique_lock lock(start_mutex);
+         if (running.load(std::memory_order_acquire)) {
+             return true;
+         }
+@@ -169,8 +185,15 @@ public:
+         }
+ 
+         int one = 1;
++#ifdef _WIN32
++        // bbport: the port is this game's alone; SO_REUSEADDR let a second instance share it
++        // (incoming packets went to either).
++        (void)::setsockopt(host_socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
++                           reinterpret_cast<const char*>(&one), sizeof(one));
++#else
+         (void)::setsockopt(host_socket, SOL_SOCKET, SO_REUSEADDR,
+                            reinterpret_cast<const char*>(&one), sizeof(one));
++#endif
+         if (!SetSocketNonBlocking(host_socket)) {
+             LOG_ERROR(Lib_Net, "P2P transport failed to make socket nonblocking error={}",
+                       LastSocketError());
+@@ -196,10 +219,18 @@ public:
+         bind_addr.sin_port = htons(requested_port);
+ 
+         if (::bind(host_socket, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
+-            LOG_ERROR(Lib_Net, "P2P transport bind(port={}) failed error={}", requested_port,
+-                      LastSocketError());
+-            CloseSocket(host_socket);
+-            return false;
++            // bbport: the launcher's default port (SHADPS4_P2P_PORT_DEFAULT=1, not one the player
++            // set) may be taken or reserved: any free port then, rather than no co-op at all.
++            const char* fallback = std::getenv("SHADPS4_P2P_PORT_DEFAULT");
++            bind_addr.sin_port = 0;
++            if (requested_port == 0 || !fallback || std::strcmp(fallback, "1") != 0 ||
++                ::bind(host_socket, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
++                LOG_ERROR(Lib_Net, "P2P transport bind(port={}) failed error={}", requested_port,
++                          LastSocketError());
++                CloseSocket(host_socket);
++                return false;
++            }
++            LOG_WARNING(Lib_Net, "P2P transport: port {} is not available; using another", requested_port);
+         }
+ 
+         sockaddr_in actual{};
+@@ -217,6 +248,12 @@ public:
          LOG_INFO(Lib_Net,
                   "P2P transport ready: UDP physical_port={} (set SHADPS4_P2P_PORT to pin it)",
                   physical_port);
 +        // Peers reach this port from outside only through a mapping on the router (no-op until
-+        // the router has been found; UPnPClient asks again then).
-+        UPnPClient::Instance().AddMapping(physical_port);
++        // the router has been found; UPnPClient asks again then). bbport: outside the start lock:
++        // it is a round trip to the router, and every sender calls Start().
++        const u16 port = physical_port;
++        lock.unlock();
++        UPnPClient::Instance().AddMapping(port);
          return true;
  #endif
      }
-@@ -304,6 +323,13 @@ public:
+@@ -304,6 +341,13 @@ public:
              std::memcpy(framed.data() + kVPortHeaderSize, data, len);
          }
  
@@ -349,7 +400,7 @@ index 54df194..1322406 100644
          sockaddr_in dest{};
          dest.sin_family = AF_INET;
          dest.sin_addr.s_addr = dest_addr_nbo;
-@@ -326,10 +352,21 @@ public:
+@@ -326,10 +370,21 @@ public:
      }
  
      int SendInternal(const void* data, u32 len, u32 dest_addr_nbo, u16 dest_port_nbo) {
@@ -371,7 +422,7 @@ index 54df194..1322406 100644
      int ReceiveInternal(InternalChannel channel, void* buf, u32 len, u32* from_addr,
                          u16* from_port) {
          std::lock_guard lock(internal_mutex);
-@@ -357,6 +394,26 @@ public:
+@@ -357,6 +412,26 @@ public:
  private:
      P2PTransport() = default;
  
@@ -398,7 +449,7 @@ index 54df194..1322406 100644
      std::deque<QueuedPacket>& QueueFor(InternalChannel channel) {
          switch (channel) {
          case InternalChannel::Signaling:
-@@ -424,6 +481,26 @@ private:
+@@ -424,6 +499,26 @@ private:
                  continue;
              }
  
@@ -425,7 +476,7 @@ index 54df194..1322406 100644
              u16 source_vport_nbo = 0;
              u16 dest_vport_nbo = 0;
              std::memcpy(&source_vport_nbo, buffer.data(), sizeof(source_vport_nbo));
-@@ -462,6 +539,8 @@ private:
+@@ -462,6 +557,8 @@ private:
  
      net_socket host_socket{kInvalidSocket};
      u16 physical_port{0};
@@ -434,7 +485,7 @@ index 54df194..1322406 100644
  
      std::mutex registry_mutex;
      std::unordered_map<u16, P2PSocket*> game_sockets;
-@@ -966,6 +1045,10 @@ bool P2PTransportIsReady() {
+@@ -966,6 +1063,10 @@ bool P2PTransportIsReady() {
      return P2PTransport::Instance().IsReady();
  }
  
@@ -458,7 +509,7 @@ index 35faa3f..3f899cd 100644
  int P2PSignalingRecvFrom(void* buf, u32 len, u32* from_addr, u16* from_port);
  int P2PControlSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port);
 diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
-index d9ce291..c475700 100644
+index d9ce291..c436270 100644
 --- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
 +++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
 @@ -56,7 +56,7 @@ std::pair<std::string, u16> NpHandler::ParseServerAddress() const {
@@ -488,7 +539,25 @@ index d9ce291..c475700 100644
      LOG_INFO(NpHandler, "Connecting user_id={} npid='{}' to {}:{} (timeout {}s)", user_id, npid,
               host, port, ShadNet::SHAD_CONNECT_TIMEOUT_MS / 1000);
  
-@@ -296,7 +296,8 @@ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, cons
+@@ -272,6 +272,11 @@ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, cons
+     if (auth_state != ShadNet::ShadNetState::Ok) {
+         LOG_ERROR(NpHandler, "user_id={} authentication failed (state={})", user_id,
+                   static_cast<int>(auth_state));
++        {
++            std::lock_guard lock(m_mutex_clients);
++            m_connect_failure[user_id] = auth_state;
++            m_connect_rejected[user_id] = client->WasRejected();
++        }
+         handle_protocol_mismatch(auth_state);
+         client->Stop();
+         return false;
+@@ -293,10 +298,14 @@ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, cons
+         SetNpId(np_id, npid);
+         std::lock_guard lock(m_mutex_clients);
+         m_np_ids[user_id] = np_id;
++        m_account_ids[user_id] = static_cast<u64>(client->GetUserId());
++        m_connect_failure.erase(user_id);
++        m_connect_rejected.erase(user_id);
          m_clients[user_id] = std::move(client);
      }
  
@@ -498,7 +567,7 @@ index d9ce291..c475700 100644
      return true;
  }
  
-@@ -309,7 +310,7 @@ void NpHandler::SetAppearOffline(bool enable) {
+@@ -309,7 +318,7 @@ void NpHandler::SetAppearOffline(bool enable) {
      }
  }
  
@@ -507,7 +576,16 @@ index d9ce291..c475700 100644
      std::shared_ptr<ShadNet::ShadNetClient> client;
      {
          std::lock_guard lock(m_mutex_clients);
-@@ -324,7 +325,8 @@ void NpHandler::DisconnectUser(s32 user_id) {
+@@ -318,13 +327,16 @@ void NpHandler::DisconnectUser(s32 user_id) {
+             return;
+         client = std::move(it->second);
+         m_clients.erase(it);
++        if (report)
++            m_account_ids.erase(user_id);
+     }
+-    {
++    if (report) { // a network drop being reconnected keeps the friend list
+         std::lock_guard lock(m_mutex_friend_state);
          m_friend_state.erase(user_id);
      }
      client->Stop();
@@ -517,7 +595,7 @@ index d9ce291..c475700 100644
      LOG_INFO(NpHandler, "user_id={} disconnected", user_id);
  }
  
-@@ -348,22 +350,33 @@ void NpHandler::WorkerThread() {
+@@ -348,37 +360,64 @@ void NpHandler::WorkerThread() {
          std::this_thread::sleep_for(INTERVAL);
  
          // Collect ids of dropped clients
@@ -543,12 +621,22 @@ index d9ce291..c475700 100644
 -            LOG_WARNING(NpHandler, "user_id={} connection dropped (network); will retry", uid);
 -            DisconnectUser(uid);   // reports SignedOut + stops/removes the dead client
 -            MarkForReconnect(uid); // schedule transparent reconnect (network drop, not logout)
-+            LOG_WARNING(NpHandler,
-+                        "user_id={} connection dropped (network); reconnecting - still signed in "
-+                        "for the game for up to {}s",
-+                        uid, kReconnectGrace.count());
-+            DisconnectUser(uid, false); // stops/removes the dead client; the game is not told
-+            MarkForReconnect(uid);      // schedule transparent reconnect (network drop, not logout)
++            // In a room or waiting on a matching reply, the session is lost with the connection:
++            // the game is told (as before), and it gets SignedIn again when the reconnect comes.
++            const bool busy = NpMatching2::MmSessionBusy();
++            if (busy) {
++                LOG_WARNING(NpHandler,
++                            "user_id={} connection dropped (network) during co-op or matchmaking: "
++                            "signed out; reconnecting",
++                            uid);
++            } else {
++                LOG_WARNING(NpHandler,
++                            "user_id={} connection dropped (network); reconnecting - still signed "
++                            "in for the game for up to {}s",
++                            uid, kReconnectGrace.count());
++            }
++            MarkForReconnect(uid, busy); // first: IsPsnSignedIn sees no gap
++            DisconnectUser(uid, busy);   // stops/removes the dead client
          }
  
          TryReconnect();
@@ -556,7 +644,9 @@ index d9ce291..c475700 100644
      }
  }
  
-@@ -372,13 +385,19 @@ void NpHandler::MarkForReconnect(s32 user_id) {
+-void NpHandler::MarkForReconnect(s32 user_id) {
++void NpHandler::MarkForReconnect(s32 user_id, bool reported_out) {
+     if (!EmulatorSettings.IsShadNetEnabled())
          return; // offline mode: nothing to reconnect to
      constexpr auto kInitialBackoff = std::chrono::milliseconds(2000);
      std::lock_guard lock(m_mutex_clients);
@@ -566,7 +656,7 @@ index d9ce291..c475700 100644
      st.next_attempt = std::chrono::steady_clock::now() + st.backoff;
 +    if (!already) {
 +        st.since = std::chrono::steady_clock::now();
-+        st.reported_out = false;
++        st.reported_out = reported_out;
 +    }
  }
  
@@ -577,7 +667,7 @@ index d9ce291..c475700 100644
      const auto now = std::chrono::steady_clock::now();
  
      std::vector<s32> due;
-@@ -398,12 +417,20 @@ void NpHandler::TryReconnect() {
+@@ -398,14 +437,48 @@ void NpHandler::TryReconnect() {
              m_reconnect.erase(uid);
              continue;
          }
@@ -590,22 +680,55 @@ index d9ce291..c475700 100644
 +        }
          // ConnectUserById locks m_mutex_clients internally; call it unlocked.
 -        const bool ok = ConnectUserById(uid);
+-        std::lock_guard lock(m_mutex_clients);
 +        const bool ok = ConnectUserById(uid, told);
-         std::lock_guard lock(m_mutex_clients);
++        std::unique_lock lock(m_mutex_clients);
++        bool refused = false; // a refused login: wait out shadNet's cooldown
++        // bbport: a failure retrying can't fix - a wrong name, password or token, or the server
++        // turning this client away - ends the reconnect (signed out, if the game wasn't told yet).
++        if (!ok && !m_clients.count(uid)) {
++            const auto failure = m_connect_failure.count(uid) ? m_connect_failure[uid]
++                                                              : ShadNet::ShadNetState::Ok;
++            const bool rejected = m_connect_rejected.count(uid) && m_connect_rejected[uid];
++            if (rejected || failure == ShadNet::ShadNetState::FailureUsername ||
++                failure == ShadNet::ShadNetState::FailurePassword ||
++                failure == ShadNet::ShadNetState::FailureToken) {
++                auto it = m_reconnect.find(uid);
++                const bool tell = it != m_reconnect.end() && !it->second.reported_out;
++                if (it != m_reconnect.end())
++                    m_reconnect.erase(it);
++                m_account_ids.erase(uid);
++                lock.unlock();
++                LOG_WARNING(NpHandler, "user_id={} cannot sign in to shadNet again ({}); signed out",
++                            uid, rejected ? "the server turned this client away" : "account rejected");
++                if (tell)
++                    FireStateCallback(uid, NpManager::OrbisNpState::SignedOut);
++                continue;
++            }
++            // A refused login (shadNet's cooldown after a rejection, 120 s): wait it out.
++            refused = failure == ShadNet::ShadNetState::FailureAuth;
++        }
          if (ok || m_clients.count(uid)) {
              m_reconnect.erase(uid);
 -            LOG_INFO(NpHandler, "user_id={} reconnected to shadNet", uid);
 +            LOG_INFO(NpHandler, "user_id={} reconnected to shadNet{}", uid,
 +                     told ? "" : " (the game stayed signed in)");
          } else if (auto it = m_reconnect.find(uid); it != m_reconnect.end()) {
-             it->second.backoff = std::min(it->second.backoff * 2, kMaxBackoff);
+-            it->second.backoff = std::min(it->second.backoff * 2, kMaxBackoff);
++            it->second.backoff = refused ? std::chrono::milliseconds(60000)
++                                         : std::min(it->second.backoff * 2, kMaxBackoff);
              it->second.next_attempt = std::chrono::steady_clock::now() + it->second.backoff;
-@@ -416,7 +443,30 @@ void NpHandler::TryReconnect() {
+             LOG_DEBUG(NpHandler, "user_id={} reconnect failed; next attempt in {}ms", uid,
+                       it->second.backoff.count());
+@@ -416,7 +489,33 @@ void NpHandler::TryReconnect() {
  bool NpHandler::IsPsnSignedIn(s32 user_id) const {
      std::lock_guard lock(m_mutex_clients);
      auto it = m_clients.find(user_id);
 -    return it != m_clients.end() && it->second->IsAuthenticated();
 +    if (it != m_clients.end() && it->second->IsAuthenticated())
++        return true;
++    // bbport: dropped a moment ago, not yet taken by the worker (it looks every 500 ms).
++    if (it != m_clients.end() && it->second->WasAuthenticated() && !it->second->WasRejected())
 +        return true;
 +    // bbport: reconnecting after a network drop, within the grace: still signed in for the game.
 +    const auto r = m_reconnect.find(user_id);
@@ -632,11 +755,35 @@ index d9ce291..c475700 100644
  }
  
  bool NpHandler::IsAnySignedIn() const {
+@@ -446,7 +545,11 @@ std::string NpHandler::GetAvatarUrl(s32 user_id) const {
+ OrbisNpAccountId NpHandler::GetAccountId(s32 user_id) const {
+     std::lock_guard lock(m_mutex_clients);
+     auto it = m_clients.find(user_id);
+-    return it != m_clients.end() ? static_cast<OrbisNpAccountId>(it->second->GetUserId()) : 0;
++    if (it != m_clients.end())
++        return static_cast<OrbisNpAccountId>(it->second->GetUserId());
++    // bbport: reconnecting within the grace: the account id the game was given at sign-in.
++    auto kept = m_account_ids.find(user_id);
++    return kept != m_account_ids.end() ? static_cast<OrbisNpAccountId>(kept->second) : 0;
+ }
+ 
+ std::string NpHandler::GetBearerToken(s32 user_id) const {
+@@ -683,6 +786,10 @@ s32 NpHandler::GetUserIdByAccountId(u64 account_id) const {
+         if (static_cast<u64>(client->GetUserId()) == account_id)
+             return uid;
+     }
++    for (auto& [uid, id] : m_account_ids) { // reconnecting within the grace
++        if (id == account_id)
++            return uid;
++    }
+     return -1;
+ }
+ 
 diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h
-index 38dc51e..8e8fc17 100644
+index 38dc51e..2fdad20 100644
 --- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h
 +++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h
-@@ -221,10 +221,11 @@ private:
+@@ -221,10 +221,16 @@ private:
  
      /// Connect one user.  Blocks until connected+authenticated or failed.
      bool ConnectUser(s32 user_id, const std::string& host, u16 port, const std::string& npid,
@@ -647,10 +794,15 @@ index 38dc51e..8e8fc17 100644
 -    bool ConnectUserById(s32 user_id);
 +    /// `announce`: tell the game it signed in (not after a drop it was never told of).
 +    bool ConnectUserById(s32 user_id, bool announce = true);
++    /// bbport: why this user's last connect failed for good (bad name/password/token, or the
++    /// server turned the client away), else Ok; and whether it was a login refusal (cooldown).
++    std::unordered_map<s32, ShadNet::ShadNetState> m_connect_failure;
++    std::unordered_map<s32, bool> m_connect_rejected;
++    std::unordered_map<s32, u64> m_account_ids; // kept through a reconnect's grace
  
      // Parse the configured shadNet server "host:port" (default port 31313).
      std::pair<std::string, u16> ParseServerAddress() const;
-@@ -233,7 +234,10 @@ private:
+@@ -233,11 +239,14 @@ private:
      void StartWorker();
  
      // Disconnect and remove one user's client.
@@ -662,7 +814,12 @@ index 38dc51e..8e8fc17 100644
  
      void WorkerThread();
      // Transparent reconnect after a network drop
-@@ -297,11 +301,16 @@ private:
+-    void MarkForReconnect(s32 user_id);
++    void MarkForReconnect(s32 user_id, bool reported_out = false);
+     void TryReconnect();
+     void FireStateCallback(s32 user_id, NpManager::OrbisNpState state);
+ 
+@@ -297,11 +306,16 @@ private:
      std::atomic<bool> m_worker_running{false};
      std::thread m_worker_thread;
  
@@ -680,8 +837,42 @@ index 38dc51e..8e8fc17 100644
      std::unordered_map<s32, ReconnectState> m_reconnect;
  
      mutable std::mutex m_mutex_pending_invites;
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.cpp
+index 34f20a2..97e4737 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.cpp
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.cpp
+@@ -1156,6 +1156,15 @@ s32 ContextManager::CreateContext(const OrbisNpId* owner_np_id, OrbisNpServiceLa
+     return ORBIS_OK;
+ }
+ 
++bool ContextManager::AnyInRoom() {
++    std::lock_guard lock(m_mutex);
++    for (size_t i = 0; i < m_contexts.size(); ++i) {
++        if (m_used[i] && !m_contexts[i].room_cache.empty())
++            return true;
++    }
++    return false;
++}
++
+ bool ContextManager::Check(OrbisNpMatching2ContextId ctx_id) {
+     std::lock_guard lock(m_mutex);
+     return GetLocked(ctx_id) != nullptr;
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.h b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.h
+index 3e25b94..a8c82af 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.h
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_internal.h
+@@ -332,6 +332,9 @@ public:
+ 
+     void ApplyContextCallback(OrbisNpMatching2ContextCallback callback, void* arg);
+ 
++    /// bbport: a context of this run is in a room (co-op, an invasion, a bell).
++    bool AnyInRoom();
++
+     void Reset();
+ 
+ private:
 diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
-index 94882fd..6d59a31 100644
+index 94882fd..3a583d9 100644
 --- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
 +++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
 @@ -673,6 +673,7 @@ void SetMmShadNetClient(std::shared_ptr<ShadNet::ShadNetClient> client,
@@ -692,7 +883,23 @@ index 94882fd..6d59a31 100644
  
      if (!client) {
          NpSignaling::Stubs::SetTransportHooks({});
-@@ -1215,6 +1216,8 @@ bool RequestSignalingInfos(std::string_view target_online_id, u32* out_addr, u16
+@@ -731,6 +732,15 @@ void ClearMmShadNetClient() {
+     g_mm.sig_cv.notify_all();
+ }
+ 
++bool MmSessionBusy() {
++    {
++        std::lock_guard lock(g_mm.pending_mutex);
++        if (!g_mm.pending.empty())
++            return true;
++    }
++    return ContextManager::Instance().AnyInRoom();
++}
++
+ bool IsMmClientRunning() {
+     std::lock_guard lock(g_mm.mutex);
+     return g_mm.client && g_mm.client->IsAuthenticated();
+@@ -1215,6 +1225,8 @@ bool RequestSignalingInfos(std::string_view target_online_id, u32* out_addr, u16
          g_mm.sig_replies.erase(pkt_id);
      }
      if (reply.first != ShadNet::ErrorType::NoError) {
@@ -701,8 +908,21 @@ index 94882fd..6d59a31 100644
          return false;
      }
  
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.h b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.h
+index b747071..5245ac8 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.h
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.h
+@@ -41,6 +41,8 @@ void SetMmShadNetClient(std::shared_ptr<ShadNet::ShadNetClient> client,
+                         std::string_view server_host, u16 tcp_port);
+ void ClearMmShadNetClient();
+ bool IsMmClientRunning();
++/// bbport: in a room or waiting for a matching reply: a dropped connection loses that session.
++bool MmSessionBusy();
+ 
+ void OnMatchingReply(ShadNet::CommandType cmd, u64 pkt_id, ShadNet::ErrorType error,
+                      const std::vector<u8>& body);
 diff --git a/gpu/bbnet/vendor/shadps4/shadnet/client.cpp b/gpu/bbnet/vendor/shadps4/shadnet/client.cpp
-index 7088df3..bffd6b3 100644
+index 7088df3..1b8a081 100644
 --- a/gpu/bbnet/vendor/shadps4/shadnet/client.cpp
 +++ b/gpu/bbnet/vendor/shadps4/shadnet/client.cpp
 @@ -3,6 +3,7 @@
@@ -713,7 +933,64 @@ index 7088df3..bffd6b3 100644
  #include <chrono>
  #include <thread>
  
-@@ -524,6 +525,31 @@ u64 ShadNetClient::SetAppearOffline(bool enable) {
+@@ -79,10 +80,7 @@ void ShadNetClient::Stop() {
+         m_sem_connected.release();
+     } catch (...) {
+     }
+-    try {
+-        m_sem_authenticated.release();
+-    } catch (...) {
+-    }
++    SignalAuth();
+     {
+         std::lock_guard lock(m_mutex_send_queue);
+         m_cv_send_queue.notify_all();
+@@ -113,7 +111,15 @@ ShadNetState ShadNetClient::WaitForAuthenticated() {
+             return ShadNetState::Ok;
+     }
+     m_sem_authenticated.acquire();
+-    return m_authenticated ? ShadNetState::Ok : m_state.load();
++    // bbport: signed in only if still connected; a failure without a reason is FailureOther.
++    if (m_authenticated && m_connected)
++        return ShadNetState::Ok;
++    return m_state == ShadNetState::Ok ? ShadNetState::FailureOther : m_state.load();
++}
++
++void ShadNetClient::SignalAuth() {
++    if (!m_auth_signalled.exchange(true))
++        m_sem_authenticated.release();
+ }
+ 
+ bool ShadNetClient::IsConnected() const {
+@@ -184,7 +190,7 @@ void ShadNetClient::ConnectThread() {
+     if (!connected) {
+         // m_state holds the last failure reason from DoConnect.
+         m_sem_connected.release();
+-        m_sem_authenticated.release();
++        SignalAuth();
+         return;
+     }
+ 
+@@ -244,13 +250,13 @@ void ShadNetClient::ReaderThread() {
+         DispatchPacket(ptype, cmd_raw, pkt_id, payload);
+     }
+ 
+-    if (!m_authenticated) {
+-        if (m_state == ShadNetState::Ok)
+-            m_state = ShadNetState::FailureOther;
+-        m_sem_authenticated.release();
+-    }
++    // bbport: a sign-in still waiting is released whatever happened (before, only when the login
++    // reply had not come: a close right after it, before the server features reply, hung it).
++    if (!m_auth_signalled && m_state == ShadNetState::Ok)
++        m_state = ShadNetState::FailureOther;
+     m_connected = false;
+     m_authenticated = false;
++    SignalAuth();
+     LOG_INFO(ShadNet, "ReaderThread exiting");
+ }
+ 
+@@ -524,6 +530,31 @@ u64 ShadNetClient::SetAppearOffline(bool enable) {
      return SubmitRequest(CommandType::SetAppearOffline, MakeProtoPayload(req));
  }
  
@@ -745,15 +1022,36 @@ index 7088df3..bffd6b3 100644
  bool ShadNetClient::RequestServerFeatures() {
      const u64 pkt_id = m_pkt_counter.fetch_add(1);
      std::vector<u8> empty_payload;
-@@ -622,6 +648,7 @@ void ShadNetClient::HandleLoginReply(const std::vector<u8>& payload) {
+@@ -620,8 +651,10 @@ void ShadNetClient::HandleLoginReply(const std::vector<u8>& payload) {
+                     m_friends = res.friends;
+                 }
                  m_authenticated = true;
++                m_was_authenticated = true;
                  LOG_INFO(ShadNet, "Logged in npid='{}' userId={} friends={}", m_npid, m_user_id,
                           m_friends.size());
 +                SendClientVersion();
  
                  const u64 pkt_id = m_pkt_counter.fetch_add(1);
                  std::vector<u8> empty_payload;
-@@ -866,6 +893,33 @@ void ShadNetClient::HandleNotification(u16 cmd_raw, const std::vector<u8>& paylo
+@@ -636,7 +669,7 @@ void ShadNetClient::HandleLoginReply(const std::vector<u8>& payload) {
+                 res.error = ErrorType::Malformed;
+                 LOG_ERROR(ShadNet, "Failed to parse LoginReply proto");
+                 m_state = ShadNetState::FailureProtocol;
+-                m_sem_authenticated.release();
++                SignalAuth();
+                 DoDisconnect();
+             }
+         } else {
+@@ -658,7 +691,7 @@ void ShadNetClient::HandleLoginReply(const std::vector<u8>& payload) {
+                 break;
+             }
+             LOG_ERROR(ShadNet, "Login rejected error code {}", static_cast<u8>(res.error));
+-            m_sem_authenticated.release();
++            SignalAuth();
+             DoDisconnect();
+         }
+     }
+@@ -866,6 +899,34 @@ void ShadNetClient::HandleNotification(u16 cmd_raw, const std::vector<u8>& paylo
              onRoomMessage(n);
          break;
      }
@@ -780,6 +1078,7 @@ index 7088df3..bffd6b3 100644
 +            }
 +        }
 +        m_rejected = true;
++        m_state = ShadNetState::FailureAuth;
 +        LOG_ERROR(ShadNet, "The shadNet server turned this client away: {}",
 +                  message.empty() ? std::string("(no reason given)") : message);
 +        break;
@@ -788,7 +1087,7 @@ index 7088df3..bffd6b3 100644
          // Length-prefixed fields: npServiceName, npServiceLabel(u32 LE), dataType,
          // data, fromNpid, toNpid. ExtractBlob returns {} past the end, so a short
 diff --git a/gpu/bbnet/vendor/shadps4/shadnet/client.h b/gpu/bbnet/vendor/shadps4/shadnet/client.h
-index 5c0d041..cfe8e4b 100644
+index 5c0d041..2404d93 100644
 --- a/gpu/bbnet/vendor/shadps4/shadnet/client.h
 +++ b/gpu/bbnet/vendor/shadps4/shadnet/client.h
 @@ -67,6 +67,7 @@ enum class CommandType : u16 {
@@ -819,12 +1118,25 @@ index 5c0d041..cfe8e4b 100644
      ShadNetState GetState() const;
  
      const std::string& GetAvatarUrl() const;
-@@ -350,6 +357,8 @@ private:
+@@ -350,6 +357,21 @@ private:
      std::atomic<bool> m_terminate{false};
      std::atomic<bool> m_connected{false};
      std::atomic<bool> m_authenticated{false};
 +    std::atomic<bool> m_rejected{false};
 +    void SendClientVersion();
++    // bbport: WaitForAuthenticated is released exactly once, on every way the sign-in can end
++    // (a close between the login reply and the server features reply left it waiting forever).
++    std::atomic<bool> m_auth_signalled{false};
++    std::atomic<bool> m_was_authenticated{false};
++    void SignalAuth();
++
++public:
++    /// bbport: this client signed in once (it may since have dropped).
++    bool WasAuthenticated() const {
++        return m_was_authenticated;
++    }
++
++private:
      std::atomic<ShadNetState> m_state{ShadNetState::Ok};
  
      std::binary_semaphore m_sem_connected{0};
@@ -6792,10 +7104,18 @@ index 36d0505..0de4773 100644
                                                const ImageInfo& info);
  
 diff --git a/gpu/shim/bbgpu.cpp b/gpu/shim/bbgpu.cpp
-index f38aea7..aab9797 100644
+index f38aea7..407100f 100644
 --- a/gpu/shim/bbgpu.cpp
 +++ b/gpu/shim/bbgpu.cpp
-@@ -29,6 +29,7 @@
+@@ -8,6 +8,7 @@
+ #include <sys/resource.h>
+ #endif
+ #include "bbport_free_check.h"
++#include "bbport_sampler.h"
+ #include "bbport_toggles.h"
+ #include "engine/engine_hooks.h"
+ #include <algorithm>
+@@ -29,6 +30,7 @@
  #include "common/elf_info.h"
  #include "common/logging/log.h"
  #include "common/rdtsc.h"
@@ -6803,7 +7123,7 @@ index f38aea7..aab9797 100644
  #include "core/libraries/kernel/orbis_error.h"
  #include "core/libraries/libs.h"
  #include "core/emulator_settings.h"
-@@ -55,7 +56,9 @@ int32_t* runtime_errno(void);
+@@ -55,7 +57,9 @@ int32_t* runtime_errno(void);
  void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
  void runtime_memory_set_note_write_hook(RuntimeGpuRange note);
  void runtime_memory_set_cpu_write_hook(RuntimeGpuRange hook);
@@ -6813,7 +7133,7 @@ index f38aea7..aab9797 100644
  
  Frontend::WindowSDL* g_window = nullptr;
  
-@@ -274,8 +277,29 @@ bool g_window_ready;
+@@ -274,8 +278,29 @@ bool g_window_ready;
  } // namespace
  
  #ifdef BB_PGO_GENERATE
@@ -6843,7 +7163,7 @@ index f38aea7..aab9797 100644
  // Instrumented build (BB_PGO=generate): the game often ends through _exit (watchdog, guest
  // exit), which skips the profile write at exit. Write every 30 s and reset: the files sum the
  // intervals.
-@@ -284,8 +308,8 @@ static void StartProfileWriter() {
+@@ -284,8 +309,8 @@ static void StartProfileWriter() {
          Common::SetCurrentThreadName("bb:pgo");
          for (;;) {
              std::this_thread::sleep_for(std::chrono::seconds(30));
@@ -6854,7 +7174,7 @@ index f38aea7..aab9797 100644
              std::printf("PGO: profile written\n");
          }
      }).detach();
-@@ -294,6 +318,9 @@ static void StartProfileWriter() {
+@@ -294,8 +319,12 @@ static void StartProfileWriter() {
  
  extern "C" int bbgpu_init(const BbGpuConfig* config) {
      BbSettings::Load();
@@ -6863,8 +7183,11 @@ index f38aea7..aab9797 100644
 +    Shader::RegisterSrtFaultHandler();
  #ifdef BB_PGO_GENERATE
      StartProfileWriter();
++    BbSampler::Start(); // BB_SAMPLE_THREADS: where loading time goes
  #endif
-@@ -322,6 +349,20 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
+     g_sdk_version = config->sdk_version;
+ #ifdef _WIN32
+@@ -322,6 +351,20 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
          // _Exit skips renderer destructors. Snapshot completed pipeline work and drain its
          // asynchronous cache writes before terminating; no gameplay queue waits are added.
          Vulkan::PipelineCache::SaveAllForShutdown();
@@ -6885,7 +7208,7 @@ index f38aea7..aab9797 100644
          std::fflush(stdout);
          std::_Exit(0);
      });
-@@ -364,6 +405,36 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
+@@ -364,6 +407,36 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
      return 0;
  }
  
@@ -6922,7 +7245,7 @@ index f38aea7..aab9797 100644
  extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
      // BB_LABEL_TRAP (diagnostic): its read-only label pages first. Not passed on to GPU page
      // tracking (a write fault drains the draw pipe: thousands a second would change the timing
-@@ -372,9 +443,18 @@ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
+@@ -372,9 +445,18 @@ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
          return 1;
      }
      if (Core::Signals::Instance()->DispatchAccessViolation(ucontext, address)) {
@@ -6942,7 +7265,7 @@ index f38aea7..aab9797 100644
  }
  
  extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
-@@ -406,11 +486,13 @@ static void KernelServiceThread(std::stop_token stoken) {
+@@ -406,11 +488,13 @@ static void KernelServiceThread(std::stop_token stoken) {
          {
              std::unique_lock lock{m_asio_req};
              cv_asio_req.wait(lock, stoken, [] { return asio_requests != 0; });
@@ -8295,7 +8618,7 @@ index a2bc45d..ad7e742 100644
  bool player_stat_set(const char* name,std::int64_t value);
  bool player_origin(int* origin);
 diff --git a/gpu/shim/engine/graphics.cpp b/gpu/shim/engine/graphics.cpp
-index c1e5ac1..6f357cb 100644
+index c1e5ac1..67c8822 100644
 --- a/gpu/shim/engine/graphics.cpp
 +++ b/gpu/shim/engine/graphics.cpp
 @@ -4,6 +4,7 @@
@@ -8320,7 +8643,7 @@ index c1e5ac1..6f357cb 100644
  constexpr std::size_t kYebisHeld = 0x2710;  // on the YEBIS object: the block was not refreshed
  std::uint8_t* g_post_block = nullptr;
  
-@@ -51,9 +59,29 @@ const std::uint8_t kShadowSetupPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
+@@ -51,8 +59,29 @@ const std::uint8_t kShadowSetupPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
  constexpr std::size_t kShadowBlock = 0x80, kShadowHeld = 0x297c;  // on the renderer
  constexpr std::size_t kShadowScaled[] = {0x38, 0x3c, 0x44, 0x48};
  
@@ -8345,12 +8668,12 @@ index c1e5ac1..6f357cb 100644
 +// read every call: off, each returns at once and the game's own values stand - so the switch
 +// and every setting are live.
 +bool On() { return BbSettings::Get().graphics_controls.load(std::memory_order_relaxed); }
++// SSAO and AA are effects with their own settings (Picture tuning doesn't gate them): written
++// every view, so switching Picture tuning off leaves nothing forced behind.
  GUEST_ABI std::int64_t RenderView(std::uint64_t,const std::uint64_t* saved) {
-+    if (!On()) return 0;
      const auto r=saved[0];std::uint64_t caps=0;
      if (!r || !Read(r+kCapabilities,&caps)) return 0;
-     const std::uint8_t ssao=BbSettings::Get().effects[3].load() && (caps&kSsaoCapability);
-@@ -62,6 +90,7 @@ GUEST_ABI std::int64_t RenderView(std::uint64_t,const std::uint64_t* saved) {
+@@ -62,6 +91,7 @@ GUEST_ABI std::int64_t RenderView(std::uint64_t,const std::uint64_t* saved) {
      return 0;
  }
  GUEST_ABI std::int64_t AoDraw(std::uint64_t,const std::uint64_t* saved) {
@@ -8358,7 +8681,7 @@ index c1e5ac1..6f357cb 100644
      const auto object=saved[5];const float k=BbSettings::Get().graphics_ao_strength;
      std::uint8_t held=1;float v=0,o=0;
      if (!object || k==1 || !Read(object+kSsaoHeld,&held) || held ||
-@@ -70,6 +99,7 @@ GUEST_ABI std::int64_t AoDraw(std::uint64_t,const std::uint64_t* saved) {
+@@ -70,6 +100,7 @@ GUEST_ABI std::int64_t AoDraw(std::uint64_t,const std::uint64_t* saved) {
      return 0;
  }
  GUEST_ABI std::int64_t ShadowSetup(std::uint64_t,const std::uint64_t* saved) {
@@ -8366,7 +8689,7 @@ index c1e5ac1..6f357cb 100644
      const auto block=saved[4];const float k=BbSettings::Get().graphics_shadow_scale;
      std::uint8_t held=1;
      if (!block || k==1 || !Read(block+kShadowHeld-kShadowBlock,&held) || held) return 0;
-@@ -77,20 +107,38 @@ GUEST_ABI std::int64_t ShadowSetup(std::uint64_t,const std::uint64_t* saved) {
+@@ -77,20 +108,42 @@ GUEST_ABI std::int64_t ShadowSetup(std::uint64_t,const std::uint64_t* saved) {
      return 0;
  }
  GUEST_ABI std::int64_t YebisRecord(std::uint64_t,const std::uint64_t* saved) {
@@ -8376,19 +8699,25 @@ index c1e5ac1..6f357cb 100644
      const auto& s=BbSettings::Get();
      const auto block=reinterpret_cast<std::uint64_t>(g_post_block);
 -    float glare=0,saturation=0,power=0;
+-    if (s.graphics_bloom!=1 && Read(block+kGlareLuminance,&glare) && std::isfinite(glare)) Write(block+kGlareLuminance,glare*s.graphics_bloom);
+-    if (s.graphics_saturation!=1 && Read(block+kSaturation,&saturation) && std::isfinite(saturation)) Write(block+kSaturation,saturation*s.graphics_saturation);
 +    float glare=0,saturation=0,power=0,hue=0,value=0,contrast=0;
-     if (s.graphics_bloom!=1 && Read(block+kGlareLuminance,&glare) && std::isfinite(glare)) Write(block+kGlareLuminance,glare*s.graphics_bloom);
-     if (s.graphics_saturation!=1 && Read(block+kSaturation,&saturation) && std::isfinite(saturation)) Write(block+kSaturation,saturation*s.graphics_saturation);
++    // Typed values (Ctrl+click) are kept within bbport_settings.cpp's limits here too.
++    const float bloom=std::clamp(s.graphics_bloom.load(),0.0f,10.0f),sat=std::clamp(s.graphics_saturation.load(),0.0f,5.0f);
++    const float hue_offset=std::clamp(s.graphics_hue.load(),-180.0f,180.0f),bright=std::clamp(s.graphics_brightness.load(),0.0f,5.0f);
++    const float contrast_scale=std::clamp(s.graphics_contrast.load(),0.5f,1.5f);
++    if (bloom!=1 && Read(block+kGlareLuminance,&glare) && std::isfinite(glare)) Write(block+kGlareLuminance,glare*bloom);
++    if (sat!=1 && Read(block+kSaturation,&saturation) && std::isfinite(saturation)) Write(block+kSaturation,saturation*sat);
      if (!s.graphics_vignette && Read(block+kVignettePower,&power)) Write(block+kVignettePower,0.0f);
-+    if (s.graphics_hue!=0 && Read(block+kHue,&hue) && std::isfinite(hue)) Write(block+kHue,hue+s.graphics_hue);
-+    if (s.graphics_brightness!=1 && Read(block+kValue,&value) && std::isfinite(value)) Write(block+kValue,value*s.graphics_brightness);
-+    if (s.graphics_contrast!=1 && Read(block+kContrast,&contrast) && std::isfinite(contrast)) Write(block+kContrast,contrast*s.graphics_contrast);
++    if (hue_offset!=0 && Read(block+kHue,&hue) && std::isfinite(hue)) Write(block+kHue,hue+hue_offset);
++    if (bright!=1 && Read(block+kValue,&value) && std::isfinite(value)) Write(block+kValue,value*bright);
++    if (contrast_scale!=1 && Read(block+kContrast,&contrast) && std::isfinite(contrast)) Write(block+kContrast,contrast*contrast_scale);
 +    return 0;
 +}
 +// At the fog table's upload: rdi the id map, rdx the table, both checked against the fog
 +// manager before anything is written.
 +GUEST_ABI std::int64_t FogUpload(std::uint64_t,const std::uint64_t* saved) {
-+    const float k=BbSettings::Get().graphics_fog;
++    const float k=std::clamp(BbSettings::Get().graphics_fog.load(),0.0f,5.0f);
 +    std::uint64_t manager=0,fog=0,map=0,table=0;std::uint32_t count=0;
 +    if (!On() || k==1 || !std::isfinite(k) || !Read(reinterpret_cast<std::uint64_t>(g_graphics_manager),&manager) ||
 +        !Read(manager+kFogManager,&fog) || !Read(fog+kFogMap,&map) || !Read(fog+kFogTable,&table) ||
@@ -8407,7 +8736,7 @@ index c1e5ac1..6f357cb 100644
      Hook hooks[4];
      if (size<0x55406e0+0x370 || !Prepare(hooks[0],image,size,kRenderView-0x400000,kRenderViewPrologue,RenderView) ||
          !Prepare(hooks[1],image,size,kYebisRecord-0x400000,kYebisRecordPrologue,YebisRecord) ||
-@@ -100,8 +148,23 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -100,8 +153,23 @@ bool Install(std::uint8_t* image,std::size_t size) {
          host_log("live graphics disabled: engine bytes differ; all original paths retained");return false;
      }
      g_post_block=image+0x55406e0;
@@ -8433,7 +8762,7 @@ index c1e5ac1..6f357cb 100644
  }
  }
 diff --git a/gpu/shim/engine/option_menu.cpp b/gpu/shim/engine/option_menu.cpp
-index cf652fe..b0da711 100644
+index cf652fe..fc9c681 100644
 --- a/gpu/shim/engine/option_menu.cpp
 +++ b/gpu/shim/engine/option_menu.cpp
 @@ -606,8 +606,14 @@ Slider camera[] = {
@@ -8452,7 +8781,27 @@ index cf652fe..b0da711 100644
  StartupToggle enhancements[]={{nullptr,124001},{nullptr,124002},{nullptr,124004}};
  bool enhancements_seeded=false;
  StartupToggle graphics_toggles[]={{nullptr,117001},{nullptr,117000}};
-@@ -662,7 +668,9 @@ GUEST_ABI void GraphicsHandler(void* dialog,void* params) {
+@@ -615,6 +621,13 @@ StartupToggle effect_toggles[]={{nullptr,117005},{nullptr,117002},{nullptr,11700
+ bool graphics_seeded=false,effects_seeded=false;
+ std::int32_t output_resolution=1,last_resolution=1;
+ const Choice outputs[]={{0,117010},{1,117012},{2,117013},{3,117015},{4,117040},{5,117041},{6,117042},{7,117043},{8,117044},{9,117045}};
++// What "Defaults" puts a toggle back to: an effect's own default (bbport_settings.h Effects: CA,
++// DoF, motion blur and the game's AA are off), on for the others (vignette).
++std::uint8_t DefaultOf(const std::atomic<bool>* setting) {
++    for (int e=0;e<BbSettings::EffectCount;++e)
++        if (setting==&BbSettings::Get().effects[e]) return BbSettings::Effects[e].default_on?1:0;
++    return 1;
++}
+ template<typename Rows> void SeedSliders(Rows& rows) {
+     for (auto& s:rows) s.value=s.last=static_cast<std::uint8_t>(std::clamp(std::lround((s.setting->load()-s.base)/s.step),0l,10l));
+ }
+@@ -657,21 +670,32 @@ GUEST_ABI void GraphicsHandler(void* dialog,void* params) {
+     host_log("pc-options: PCGraphics opened, dialog=%p params=%p",dialog,params);
+     alignas(16) std::uint8_t scratch[0x100]{};
+     hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
+-    for (auto& t:graphics_toggles) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,1); }
++    for (auto& t:graphics_toggles) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,DefaultOf(t.setting)); }
+     SeedSliders(graphics_sliders);
      for (auto& s:graphics_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
      output_resolution=last_resolution=BbSettings::Get().output_res;
      add_list_row(dialog,&output_resolution,117004,outputs,BbSettings::OutputCount,BbSettings::OutputDefault);
@@ -8463,8 +8812,10 @@ index cf652fe..b0da711 100644
  }
  GUEST_ABI void EffectsHandler(void* dialog,void* params) {
      host_log("pc-options: PCEffects opened, dialog=%p params=%p",dialog,params);
-@@ -671,7 +679,16 @@ GUEST_ABI void EffectsHandler(void* dialog,void* params) {
-     for (auto& t:effect_toggles) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,1); }
+     alignas(16) std::uint8_t scratch[0x100]{};
+     hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
+-    for (auto& t:effect_toggles) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,1); }
++    for (auto& t:effect_toggles) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,DefaultOf(t.setting)); }
      SeedSliders(effect_sliders);
      for (auto& s:effect_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
 -    effects_seeded=true;log_rows("PCEffects",dialog,6,6);
@@ -8474,14 +8825,14 @@ index cf652fe..b0da711 100644
 +    host_log("pc-options: PCColour opened, dialog=%p params=%p",dialog,params);
 +    alignas(16) std::uint8_t scratch[0x100]{};
 +    hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
-+    for (auto& t:color_toggle) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,1); }
++    for (auto& t:color_toggle) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,0); }
 +    SeedSliders(color_sliders);
 +    for (auto& s:color_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
 +    color_seeded=true;log_rows("PCColour",dialog,5,5);
  }
  GUEST_ABI std::int64_t OpenGraphics(void* root,void* params) {
      return open_named(root,params,"PCGraphics",reinterpret_cast<void*>(&GraphicsHandler),4);
-@@ -687,6 +704,13 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
+@@ -687,6 +711,13 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
      GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenEffects));
      hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;
  }
@@ -8495,7 +8846,7 @@ index cf652fe..b0da711 100644
  
  StartupToggle controls[]={{nullptr,118000},{nullptr,118002},{nullptr,118003},{nullptr,116002},{nullptr,118005}};
  std::uint8_t sensitivity=5,last_sensitivity=5;bool controls_seeded=false;
-@@ -712,6 +736,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -712,6 +743,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
          { Captions c(110010);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenEffectsRow));
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
@@ -8504,7 +8855,7 @@ index cf652fe..b0da711 100644
      }
      if(input_page) {
          {Captions c(110008);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenControlsRow));hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag);}
-@@ -720,7 +746,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -720,7 +753,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
      if (camera_page) { Captions c(110011);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenCameraRow));
        hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
      hle_call_guest<std::int64_t>(guest_fn(kSystemFinalize),out,builder,arg3);
@@ -8513,7 +8864,7 @@ index cf652fe..b0da711 100644
      return out;
  }
  } // namespace
-@@ -783,7 +809,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -783,7 +816,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
      graphics_sliders[0].setting=&settings.graphics_ao_strength;graphics_sliders[1].setting=&settings.graphics_shadow_scale;
      effect_toggles[0].setting=&settings.effects[2];effect_toggles[1].setting=&settings.effects[1];
      effect_toggles[2].setting=&settings.effects[0];effect_toggles[3].setting=&settings.graphics_vignette;
@@ -8525,7 +8876,7 @@ index cf652fe..b0da711 100644
      enhancements[0].setting=&settings.change_appearance;
      enhancements[1].setting=&settings.rebirth;
      enhancements[2].setting=&settings.camera_controls;
-@@ -797,7 +826,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -797,7 +833,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
      std::memcpy(p,&target,8); p+=8; *p++=0x41; *p++=0xff; *p=0xe3;
      const std::int32_t to_pad=pad-(call+5); std::memcpy(image+call+1,&to_pad,4);
      g_installed=true;
@@ -8534,7 +8885,7 @@ index cf652fe..b0da711 100644
      return true;
  }
  bool ClickDecides(std::uint8_t* list, int index) {
-@@ -850,17 +879,29 @@ void Tick() {
+@@ -850,17 +886,29 @@ void Tick() {
          changed=true;
      }
      auto push_sliders=[&](auto& rows,bool active) {
@@ -8632,10 +8983,10 @@ index f475c39..aa552ab 100644
  
  } // namespace Frontend
 diff --git a/licenses/BBHOST-PORTS.md b/licenses/BBHOST-PORTS.md
-index ba73307..dbaf849 100644
+index ba73307..485c11f 100644
 --- a/licenses/BBHOST-PORTS.md
 +++ b/licenses/BBHOST-PORTS.md
-@@ -53,3 +53,11 @@ vertical FOV and uses this port's output size. Vulkan UI composition adds unifor
+@@ -53,3 +53,12 @@ vertical FOV and uses this port's output size. Vulkan UI composition adds unifor
  centered fitting, including stencil masks and window-space vertices. The existing
  presenter already letterboxes. The existing renderer, temporal resources,
  synchronization, shader and motion-vector paths remain in use.
@@ -8646,7 +8997,8 @@ index ba73307..dbaf849 100644
 +engine/online_fixes.cpp adapts src/engine/chara_id.cpp (the login's character step clears the
 +empty-list character id) and src/engine/sos_signs.cpp (the summon sign timeout). The fog control in
 +engine/graphics.cpp adapts the fog table upload hook of src/engine/graphics_patch.cpp, redirected
-+through the function's padding; the play-log redirect in scripts/online.py follows src/hle/http.cpp.
++through the function's padding; the play-log redirect in scripts/online.py follows src/hle/http.cpp. The boss defeat flags in
++engine/trophy_sync.cpp are from the boss rush table of plugins/boss_rush/boss_rush.cpp.
 diff --git a/licenses/SHADNET-PORT.md b/licenses/SHADNET-PORT.md
 index 4fbbd84..7f7cce2 100644
 --- a/licenses/SHADNET-PORT.md
@@ -8662,7 +9014,7 @@ index 4fbbd84..7f7cce2 100644
  `third_party/httplib/httplib.h` and `third_party/wepoll/` retain their embedded
  third-party license notices.
 diff --git a/scripts/online.py b/scripts/online.py
-index fdbf8c4..d0e1ad9 100644
+index fdbf8c4..6e5d795 100644
 --- a/scripts/online.py
 +++ b/scripts/online.py
 @@ -6,8 +6,22 @@ from pathlib import Path
@@ -8685,7 +9037,7 @@ index fdbf8c4..d0e1ad9 100644
  ONLINE_ENV = ('BB_ONLINE', 'BB_SHADNET_SERVER', 'BB_SHADNET_WEBAPI', 'BB_SHADNET_NPID',
 -              'BB_SHADNET_PASSWORD', 'BB_SHADNET_TOKEN', 'BB_UPNP', 'SHADPS4_P2P_PORT', 'SHADPS4_HTTP_HOST_OVERRIDES_JSON')
 +              'BB_SHADNET_PASSWORD', 'BB_SHADNET_TOKEN', 'BB_UPNP', 'SHADPS4_P2P_PORT', 'SHADPS4_HTTP_HOST_OVERRIDES_JSON',
-+              'BB_SIGN_TIMEOUT')
++              'BB_SIGN_TIMEOUT', 'SHADPS4_P2P_PORT_DEFAULT')
  
  def read_settings(path):
      settings = {}
@@ -8720,7 +9072,14 @@ index fdbf8c4..d0e1ad9 100644
      if urlsplit(webapi).path not in ('', '/') or urlsplit(game_api).path not in ('', '/'):
          raise ValueError('WebAPI and game API require a server origin without an extra path')
      username = settings.get('online_username', '')
-@@ -58,13 +85,15 @@ def configure_online(settings, data, env):
+@@ -52,19 +79,24 @@ def configure_online(settings, data, env):
+         raise ValueError('Sign in with the account password in the launcher')
+     p2p = settings.get('online_p2p_port', '').strip()
+     if p2p and not 1 <= int(p2p) <= 65535:
+-        raise ValueError('Local P2P port must be between 1 and 65535 or empty for automatic')
++        raise ValueError('Local P2P port must be between 1 and 65535, or empty for the default (3658)')
+     # Runtime cache only. Never read or overwrite another application's JSON,
+     # and never route private-server traffic through a public server by default.
      destination = Path(data) / 'network/host_overrides.json'
      destination.parent.mkdir(parents=True, exist_ok=True)
      temporary = destination.with_suffix('.json.tmp')
@@ -8737,11 +9096,34 @@ index fdbf8c4..d0e1ad9 100644
 -    if p2p:
 -        env['SHADPS4_P2P_PORT'] = str(int(p2p))
 +    env['SHADPS4_P2P_PORT'] = str(int(p2p)) if p2p else str(DEFAULT_P2P_PORT)
++    # The default may be taken or reserved on this PC: the engine falls back to a free port then.
++    # A port the player set is kept as it is.
++    env['SHADPS4_P2P_PORT_DEFAULT'] = '0' if p2p else '1'
 +    timeout = settings.get('online_sign_timeout', '').strip()
 +    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
+diff --git a/scripts/patches.py b/scripts/patches.py
+index da1e52e..4420b63 100644
+--- a/scripts/patches.py
++++ b/scripts/patches.py
+@@ -77,10 +77,14 @@ def validate_patch_requirements(names, game):
+                              'or disable debug_menu in bbport.ini')
+ 
+ 
++# A key bbport.ini doesn't have takes the engine's default (bbport_settings.h Effects): these start off.
++DEFAULT_OFF=('effect_chromatic_aberration','effect_dof','effect_motion_blur','effect_game_aa')
+ def effect_patches(settings):
+     names=[]
+     for key,(off,on) in EFFECTS.items():
+-        if key not in settings: continue
++        if key not in settings:
++            if key in DEFAULT_OFF and off: names.append(off)
++            continue
+         name=on if settings[key]=='1' else off
+         if name: names.append(name)
+     lod=MODEL_LOD.get(settings.get('model_lod','0'))
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..cfc4b33 100644
+index ea6daf1..8132e56 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
 @@ -10,12 +10,15 @@ The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_
@@ -8824,7 +9206,7 @@ index ea6daf1..cfc4b33 100644
      if fps not in ('30', '60', '90'):
          print(f'Unsupported Windows FPS preset {fps!r}; using 60 FPS.', flush=True)
          fps = '60'
-@@ -139,9 +192,7 @@ def main():
+@@ -139,38 +192,36 @@ def main():
                         '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
      overlay = merged if merged.resolve() != original else None
      try:
@@ -8835,17 +9217,59 @@ index ea6daf1..cfc4b33 100644
          prebuilt = os.environ.get('BB_PREBUILT') == '1'
          if not prebuilt:
              build()
-@@ -149,7 +200,8 @@ def main():
+         # Engine features are prepared locally and only mounted after runtime byte checks.
          for key in ('BB_DREAM_MIRROR_ASSET', 'BB_ENGINE_IMAGE_SHA256', 'BB_PC_MENU_ASSETS', 'BB_REBIRTH_ASSET'):
              os.environ.pop(key, None)
-         if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
+-        if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
 -            or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
-+            or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))
-+            or any(settings_value(config, key) not in (None, '', '0', 'off') for key in ('cheat_vials', 'cheat_bullets'))):
-             try:
-                 from engine_assets import prepare_mirror, verify_executable
-                 os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
-@@ -192,8 +244,12 @@ def main():
+-            try:
+-                from engine_assets import prepare_mirror, verify_executable
+-                os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
+-                if settings_value(config, 'change_appearance') == '1':
+-                    asset = prepare_mirror(merged, out / 'eboot.elf', data / 'engine-assets')
+-                    os.environ['BB_DREAM_MIRROR_ASSET'] = str(asset)
+-                    print(f'Engine: Dream mirror prepared locally: {asset}', flush=True)
+-                if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
+-                    or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
+-                    from engine_assets import prepare_menu_assets
+-                    try:
+-                        menus = prepare_menu_assets(merged, out / 'eboot.elf', data / 'engine-assets',
+-                                                    out / 'bb-engine-assets.exe', rebirth=settings_value(config, 'rebirth') == '1')
+-                        os.environ['BB_PC_MENU_ASSETS'] = str(menus)
+-                        print(f'Engine: native PC menus prepared locally: {menus}', flush=True)
+-                        if settings_value(config, 'rebirth') == '1':
+-                            os.environ['BB_REBIRTH_ASSET'] = str(menus / 'dvdroot_ps4/script/talk/m24_02_00_00.talkesdbnd.dcx')
+-                    except (OSError, ValueError) as error:
+-                        print(f'Engine: native PC menus disabled: {error}', flush=True)
+-            except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
+-                print(f'Engine: enhancement preparation skipped: {error}', flush=True)
++        # bbport: the engine's own features - picture tuning, cheats, trophies from a save, the
++        # online fixes - all check the executable first, so it is always verified (~0.1 s).
++        try:
++            from engine_assets import prepare_mirror, verify_executable
++            os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
++            if settings_value(config, 'change_appearance') == '1':
++                asset = prepare_mirror(merged, out / 'eboot.elf', data / 'engine-assets')
++                os.environ['BB_DREAM_MIRROR_ASSET'] = str(asset)
++                print(f'Engine: Dream mirror prepared locally: {asset}', flush=True)
++            if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
++                or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
++                from engine_assets import prepare_menu_assets
++                try:
++                    menus = prepare_menu_assets(merged, out / 'eboot.elf', data / 'engine-assets',
++                                                out / 'bb-engine-assets.exe', rebirth=settings_value(config, 'rebirth') == '1')
++                    os.environ['BB_PC_MENU_ASSETS'] = str(menus)
++                    print(f'Engine: native PC menus prepared locally: {menus}', flush=True)
++                    if settings_value(config, 'rebirth') == '1':
++                        os.environ['BB_REBIRTH_ASSET'] = str(menus / 'dvdroot_ps4/script/talk/m24_02_00_00.talkesdbnd.dcx')
++                except (OSError, ValueError) as error:
++                    print(f'Engine: native PC menus disabled: {error}', flush=True)
++        except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
++            print(f'Engine: enhancement preparation skipped: {error}', flush=True)
+         # Sizes chosen below for the previous launch are recomputed after an in-game restart.
+         if os.environ.get('BB_AUTO_RENDER_RES') == '1':
+             for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
+@@ -192,8 +243,12 @@ def main():
              print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
          elif scaled_output:
              os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
@@ -8860,7 +9284,7 @@ index ea6daf1..cfc4b33 100644
                    '(live_resolution=1: live changes)')
          run([PYTHON, SCRIPTS / 'patches.py', '--out', out, '--fps', fps, '--extra', os.environ.get('BB_PATCHES', ''),
               '--settings', config, '--game-dir', merged, '--render-res', os.environ.get('BB_RENDER_RES', ''),
-@@ -219,7 +275,9 @@ def main():
+@@ -219,7 +274,9 @@ def main():
          except KeyboardInterrupt:
              status = 130
          print(f'bb-probe exited with code {status}', flush=True)
@@ -9159,7 +9583,7 @@ index b36f136..d8be9be 100644
      }
      Output out={job->outputs,job->output_count,0,0};
 diff --git a/src/runtime_audio.c b/src/runtime_audio.c
-index 2563dfa..ff8a305 100644
+index 2563dfa..d673185 100644
 --- a/src/runtime_audio.c
 +++ b/src/runtime_audio.c
 @@ -3,9 +3,16 @@
@@ -9191,11 +9615,12 @@ index 2563dfa..ff8a305 100644
  } Port;
  typedef struct { uint16_t output; uint8_t channel, reserved; int16_t volume; uint16_t reroute; uint64_t flag, reserved64[2]; } PortState;
  _Static_assert(sizeof(PortState)==32,"AudioOut port state layout");
-@@ -59,6 +68,44 @@ static int sdl_audio(void) {
+@@ -59,6 +68,45 @@ static int sdl_audio(void) {
      }
      return sdl_ready;
  }
-+static int audio_priority(void) { const char *e=getenv("BB_AUDIO_THREAD_PRIORITY"); return !e || strcmp(e,"0"); }
++/* As runtime_thread.c reads it: off only when it starts with 0. */
++static int audio_priority(void) { const char *e=getenv("BB_AUDIO_THREAD_PRIORITY"); return !(e && e[0]=='0'); }
 +/* The device thread, seen from the first port's postmix callback: written frames, mixes and
 +   the longest wait between two, read and reset by that port's statistics. */
 +static struct { uint64_t last_ns, max_gap_ns, frames; unsigned calls; int freq, seen; } device_thread;
@@ -9236,7 +9661,7 @@ index 2563dfa..ff8a305 100644
  static int port_range(int type, int *first, int *last) {
      switch (type) {
      case 0: *first=0; *last=7; return 1;      /* main */
-@@ -112,6 +159,7 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
+@@ -112,6 +160,7 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
          else fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink\n",SDL_GetError(),id);
      }
      p->stats=getenv("BB_AUDIO_STATS")!=NULL;
@@ -9244,7 +9669,7 @@ index 2563dfa..ff8a305 100644
      const char *dump=getenv("BB_AUDIO_DUMP");
      if (dump) {
          char path[4096];
-@@ -162,19 +210,35 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
+@@ -162,19 +211,35 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
          if (p->dump) fwrite(converted,1,bytes,p->dump);
          if (p->stats) {
              uint64_t now=now_ns();
@@ -9284,7 +9709,7 @@ index 2563dfa..ff8a305 100644
              }
          }
          if (pace) {
-@@ -186,15 +250,31 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
+@@ -186,15 +251,31 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
          if (p->stream) {
              /* The device drains the queue in quanta (21 ms on PipeWire), so the level
                 is a sawtooth: its minimum over ~32 buffers is what gets controlled. */
@@ -9953,7 +10378,7 @@ index 75eca24..45ea45d 100644
  void runtime_memory_set_guest_chunk_whole(int) {}
  int runtime_memory_vma_info(uintptr_t, int*, int*, uintptr_t*) { std::abort(); }
 diff --git a/tests/test_online.py b/tests/test_online.py
-index bf0d998..cc87b81 100644
+index bf0d998..7a66466 100644
 --- a/tests/test_online.py
 +++ b/tests/test_online.py
 @@ -6,7 +6,12 @@ import tempfile
@@ -9970,7 +10395,7 @@ index bf0d998..cc87b81 100644
  
  
  class OnlineProfileTests(unittest.TestCase):
-@@ -28,11 +33,12 @@ class OnlineProfileTests(unittest.TestCase):
+@@ -28,30 +33,50 @@ class OnlineProfileTests(unittest.TestCase):
              self.assertEqual(env, {'BB_ONLINE':'0','UNRELATED':'keep'})
              self.assertFalse((self.data/'network').exists())
  
@@ -9985,7 +10410,9 @@ index bf0d998..cc87b81 100644
          self.assertEqual(self.env['BB_SHADNET_SERVER'], 'server.example:31413')
          self.assertEqual(self.env['BB_SHADNET_WEBAPI'], 'http://server.example:31415')
          self.assertEqual(self.env['SHADPS4_P2P_PORT'], '32000')
-@@ -41,17 +47,34 @@ class OnlineProfileTests(unittest.TestCase):
++        self.assertEqual(self.env['SHADPS4_P2P_PORT_DEFAULT'], '0')
+         self.assertEqual(self.env['SHADPS4_HTTP_HOST_OVERRIDES_JSON'], str(path.resolve()))
+         self.assertEqual(self.env['UNRELATED'], 'keep')
          self.assertNotIn('synthetic-test-password', path.read_text())
          self.assertFalse(path.with_suffix('.json.tmp').exists())
  
@@ -9997,6 +10424,7 @@ index bf0d998..cc87b81 100644
 -        self.assertNotIn('SHADPS4_P2P_PORT', self.env)
 +        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:HUNTERS_DREAM, **play_logs('thehuntersdream.com')})
 +        self.assertEqual(self.env['SHADPS4_P2P_PORT'], str(DEFAULT_P2P_PORT))
++        self.assertEqual(self.env['SHADPS4_P2P_PORT_DEFAULT'], '1')
 +        self.assertEqual(self.env['BB_SIGN_TIMEOUT'], str(DEFAULT_SIGN_TIMEOUT))
 +
 +    def test_sign_timeout_setting(self):
@@ -10024,6 +10452,41 @@ index bf0d998..cc87b81 100644
              'online_username':['','has space','x'*17,'é'*9],
              'online_p2p_port':['0','65536','bad']}.items():
              for value in values:
+diff --git a/tests/test_patches.py b/tests/test_patches.py
+index b65009f..1b28cf3 100644
+--- a/tests/test_patches.py
++++ b/tests/test_patches.py
+@@ -7,7 +7,7 @@ from pathlib import Path
+ 
+ import patches
+ 
+-from patches import (EBOOT_BASE, OUTPUT_SIZE, RESOLUTION_TEMPLATE, SCENE_HEIGHT,
++from patches import (DEFAULT_OFF, EBOOT_BASE, OUTPUT_SIZE, RESOLUTION_TEMPLATE, SCENE_HEIGHT,
+                      SCENE_WIDTH, UI_HEIGHT, UI_WIDTH, compile_patches,
+                      render_size, resolution_writes, scaled_sizes, effect_patches,
+                      validate_patch_requirements, external_patches, external_selection,
+@@ -91,7 +91,8 @@ class NativeUiTests(unittest.TestCase):
+ 
+ class DebugPatchTests(unittest.TestCase):
+     def test_camera_patch_is_optional_and_compatible_with_fps_and_debug_menu(self):
+-        self.assertEqual(effect_patches({'debug_camera': '0', 'debug_menu': '0'}), [])
++        on = {key: '1' for key in DEFAULT_OFF}
++        self.assertEqual(effect_patches({'debug_camera': '0', 'debug_menu': '0', **on}), [])
+         camera = effect_patches({'debug_camera': '1'})
+         writes = compile_patches(XML, camera, '01.09', SEGMENTS)
+         self.assertGreater(len(writes), 0)
+@@ -102,6 +103,11 @@ class DebugPatchTests(unittest.TestCase):
+                     if offset+i in camera_bytes:
+                         self.assertEqual(camera_bytes[offset+i], byte, patch)
+ 
++    def test_missing_effect_keys_follow_the_engine_defaults(self):
++        self.assertEqual(effect_patches({}), ['Disable Chromatic Aberration', 'Disable DoF',
++                                              'Disable Motion Blur (perf increase)', 'Disable AA'])
++        self.assertNotIn('Disable DoF', effect_patches({'effect_dof': '1'}))
++
+     def test_debug_menu_checks_both_fonts_but_camera_does_not_need_them(self):
+         names = effect_patches({'debug_menu': '1'})
+         with tempfile.TemporaryDirectory() as directory:
 diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
 index 593fed4..2087d68 100644
 --- a/tests/test_settings.cpp
@@ -10275,6 +10738,47 @@ index 593fed4..2087d68 100644
 +    std::filesystem::remove(temporary);
      std::puts("PASS: settings save keeps other keys, menu position");
  }
+diff --git a/tests/test_windows_frame_rate.py b/tests/test_windows_frame_rate.py
+index 49eb6c3..494466c 100644
+--- a/tests/test_windows_frame_rate.py
++++ b/tests/test_windows_frame_rate.py
+@@ -12,8 +12,8 @@ class WindowsFrameRateTests(unittest.TestCase):
+                 self.assertEqual(env['BB_FPS_LIMIT'], fps)
+                 self.assertEqual(env['BB_VBLANK_HZ'], '90' if fps == '90' else '60')
+ 
+-    def test_default_and_retired_presets_are_capped_at_60(self):
+-        for value in (None, 'uncap', 'Unlimited', '', '0', '480', 'bad'):
++    def test_default_and_unknown_presets_are_capped_at_60(self):
++        for value in (None, 'Unlimited', '', '0', 'bad'):
+             with self.subTest(value=value):
+                 env = {'BB_VBLANK_HZ': '0', 'BB_FPS_LIMIT': '0'}
+                 if value is not None:
+@@ -23,6 +23,25 @@ class WindowsFrameRateTests(unittest.TestCase):
+                 self.assertEqual(env['BB_FPS_LIMIT'], '60')
+                 self.assertEqual(env['BB_VBLANK_HZ'], '60')
+ 
++    def test_high_rates_use_the_uncapped_patch_with_a_limit(self):
++        # The launcher's 120 and 144 presets: the uncapped patch, limited to the rate.
++        for fps in ('120', '144', '480'):
++            with self.subTest(fps=fps):
++                env = {'BB_FPS': fps, 'BB_FPS_LIMIT': '0', 'BB_VBLANK_HZ': '60'}
++                self.assertEqual(configure_frame_rate(env), 'uncap')
++                self.assertEqual(env['BB_FPS'], 'uncap')
++                self.assertEqual(env['BB_FPS_LIMIT'], fps)
++                self.assertEqual(env['BB_VBLANK_HZ'], '0')
++
++    def test_uncapped_keeps_its_limit(self):
++        # "Uncapped": no limit unless BB_FPS_LIMIT asks for one.
++        for inherited, expected in (('0', '0'), ('165', '165'), ('bad', '0')):
++            with self.subTest(limit=inherited):
++                env = {'BB_FPS': 'uncap', 'BB_FPS_LIMIT': inherited, 'BB_VBLANK_HZ': '60'}
++                self.assertEqual(configure_frame_rate(env), 'uncap')
++                self.assertEqual(env['BB_FPS_LIMIT'], expected)
++                self.assertEqual(env['BB_VBLANK_HZ'], '0')
++
+ 
+ if __name__ == '__main__':
+     unittest.main()
 diff --git a/tools/engine/menu_assets.cpp b/tools/engine/menu_assets.cpp
 index d51b554..60e312c 100644
 --- a/tools/engine/menu_assets.cpp
@@ -14468,6 +14972,264 @@ index 0000000..693ca50
 +const char* MenuTranslation(MenuLanguage language, const char* english);
 +
 +} // namespace BbSettings
+diff --git a/gpu/shim/bbport_sampler.cpp b/gpu/shim/bbport_sampler.cpp
+new file mode 100644
+index 0000000..ca56857
+--- /dev/null
++++ b/gpu/shim/bbport_sampler.cpp
+@@ -0,0 +1,238 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: BB_SAMPLE_THREADS=<names> - where those threads run, for loading-time work (Windows; the
++// Linux runtime has BB_SAMPLE_THREAD in runtime_kernel.c). Names are comma-separated prefixes of
++// thread descriptions (guest threads carry theirs), "main" is the process's first thread (the
++// game's main loop), and "load" is main, GXRenderThread and the game's Core.Res.* file loaders.
++// About every 2 ms each is suspended, its instruction pointer read and resumed; samples in host
++// code are kept with the first return address into the game on the stack. Every 5 s, per thread:
++// the share in game code, in each host module (waiting shows as ntdll/KernelBase), and the
++// hottest sites.
++#include "bbport_sampler.h"
++
++#ifdef _WIN32
++#include <windows.h>
++#include <tlhelp32.h>
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++#include <string>
++#include <thread>
++#include <utility>
++#include <vector>
++#include "bbport_platform.h"
++
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++
++namespace BbSampler {
++namespace {
++constexpr unsigned long long kGuestLo = 0x800000000ull, kGuestHi = 0x810000000ull;
++
++/// A sample: the instruction (guest offset when in game code) and, in host code, the first guest
++/// return address on the stack (offset; 0 when none).
++using Site = std::pair<unsigned long long, unsigned long long>;
++
++struct Target {
++    HANDLE handle = nullptr;
++    std::string name;
++    unsigned long long samples = 0;
++    std::map<Site, unsigned long long> sites;
++};
++
++std::vector<std::string> Wanted() {
++    std::vector<std::string> names;
++    const char* env = std::getenv("BB_SAMPLE_THREADS");
++    std::string list = env ? env : "";
++    if (list == "load") list = "main,GXRenderThread,Core.Res.";
++    size_t start = 0;
++    for (;;) {
++        const size_t comma = list.find(',', start);
++        std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
++        if (!name.empty()) names.push_back(name);
++        if (comma == std::string::npos) break;
++        start = comma + 1;
++    }
++    return names;
++}
++
++std::string Describe(HANDLE thread) {
++    PWSTR wide = nullptr;
++    std::string name;
++    if (SUCCEEDED(GetThreadDescription(thread, &wide)) && wide) {
++        char text[128] = {};
++        WideCharToMultiByte(CP_UTF8, 0, wide, -1, text, sizeof(text) - 1, nullptr, nullptr);
++        name = text;
++        LocalFree(wide);
++    }
++    return name;
++}
++
++constexpr DWORD kAccess = THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION;
++
++// The process's threads whose description starts with one of `wanted` ("main": the first one).
++void Refresh(const std::vector<std::string>& wanted, std::map<DWORD, Target>& targets) {
++    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
++    if (snapshot == INVALID_HANDLE_VALUE) return;
++    const DWORD pid = GetCurrentProcessId(), self = GetCurrentThreadId();
++    const bool want_main = std::find(wanted.begin(), wanted.end(), "main") != wanted.end();
++    THREADENTRY32 entry{};
++    entry.dwSize = sizeof(entry);
++    DWORD first = 0;
++    FILETIME first_created{0xffffffffu, 0xffffffffu};
++    std::vector<DWORD> seen;
++    for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry)) {
++        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
++        seen.push_back(entry.th32ThreadID);
++        HANDLE thread = OpenThread(kAccess, FALSE, entry.th32ThreadID);
++        if (!thread) continue;
++        FILETIME created{}, unused{};
++        if (want_main && GetThreadTimes(thread, &created, &unused, &unused, &unused) &&
++            CompareFileTime(&created, &first_created) < 0) {
++            first_created = created;
++            first = entry.th32ThreadID;
++        }
++        bool want = false;
++        if (!targets.count(entry.th32ThreadID)) {
++            const std::string name = Describe(thread);
++            for (const auto& w : wanted) want |= w != "main" && !name.empty() && name.rfind(w, 0) == 0;
++            if (want) targets[entry.th32ThreadID] = Target{thread, name};
++        }
++        if (!want) CloseHandle(thread);
++    }
++    CloseHandle(snapshot);
++    if (first && !targets.count(first)) {
++        if (HANDLE thread = OpenThread(kAccess, FALSE, first)) targets[first] = Target{thread, "main"};
++    }
++    for (auto it = targets.begin(); it != targets.end();) { // threads that ended
++        if (std::find(seen.begin(), seen.end(), it->first) == seen.end()) {
++            CloseHandle(it->second.handle);
++            it = targets.erase(it);
++        } else {
++            ++it;
++        }
++    }
++}
++
++bool Sample(Target& t, Site* site) {
++    if (SuspendThread(t.handle) == static_cast<DWORD>(-1)) return false;
++    CONTEXT context{};
++    context.ContextFlags = CONTEXT_CONTROL;
++    unsigned long long rip = 0, caller = 0;
++    if (GetThreadContext(t.handle, &context)) {
++        rip = context.Rip;
++        if (rip < kGuestLo || rip >= kGuestHi) {
++            // Read while the thread is suspended: its stack can't change under us.
++            unsigned long long stack[192] = {};
++            if (BbPlatform::ReadProcessMemory(reinterpret_cast<const void*>(context.Rsp), stack, sizeof(stack))) {
++                for (const auto value : stack) {
++                    if (value >= kGuestLo && value < kGuestHi) {
++                        caller = value - kGuestLo;
++                        break;
++                    }
++                }
++            }
++        }
++    }
++    ResumeThread(t.handle);
++    if (!rip) return false;
++    *site = rip >= kGuestLo && rip < kGuestHi ? Site{rip - kGuestLo, ~0ull} : Site{rip, caller};
++    return true;
++}
++
++std::string Module(unsigned long long address, bool with_offset) {
++    char text[512];
++    BbPlatform::DescribeAddress(reinterpret_cast<const void*>(address), text, sizeof(text));
++    std::string s = text;
++    const size_t slash = s.find_last_of("\\/");
++    if (slash != std::string::npos) s = s.substr(slash + 1);
++    if (!with_offset) {
++        const size_t plus = s.find('+');
++        if (plus != std::string::npos) s = s.substr(0, plus);
++    }
++    return s;
++}
++
++void Report(std::map<DWORD, Target>& targets) {
++    for (auto& [id, t] : targets) {
++        if (!t.samples) continue;
++        std::map<std::string, unsigned long long> modules;
++        unsigned long long guest = 0;
++        for (const auto& [site, count] : t.sites) {
++            if (site.second == ~0ull) guest += count;
++            else modules[Module(site.first, false)] += count;
++        }
++        std::vector<std::pair<Site, unsigned long long>> hot(t.sites.begin(), t.sites.end());
++        std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
++        std::vector<std::pair<std::string, unsigned long long>> mods(modules.begin(), modules.end());
++        std::sort(mods.begin(), mods.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
++        std::printf("Samples %s (%llu): game code %.0f%%", t.name.c_str(), t.samples, 100.0 * guest / t.samples);
++        for (size_t i = 0; i < mods.size() && i < 5; ++i)
++            std::printf(", %s %.0f%%", mods[i].first.c_str(), 100.0 * mods[i].second / t.samples);
++        std::printf("; hottest:");
++        for (size_t i = 0; i < hot.size() && i < 8; ++i) {
++            const auto& [site, count] = hot[i];
++            if (site.second == ~0ull)
++                std::printf(" +%#llx %.0f%%", site.first, 100.0 * count / t.samples);
++            else
++                std::printf(" %s (from +%#llx) %.0f%%", Module(site.first, true).c_str(), site.second,
++                            100.0 * count / t.samples);
++        }
++        std::printf("\n");
++        t.samples = 0;
++        t.sites.clear();
++    }
++    std::fflush(stdout);
++}
++
++void Run(std::vector<std::string> wanted) {
++    std::map<DWORD, Target> targets;
++    // A high-resolution timer: ~2 ms waits without changing the system timer resolution.
++    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++    auto last_refresh = std::chrono::steady_clock::now() - std::chrono::seconds(10);
++    auto last_report = std::chrono::steady_clock::now();
++    std::printf("Sampler: BB_SAMPLE_THREADS=%s, about every 2 ms, reported every 5 s\n", std::getenv("BB_SAMPLE_THREADS"));
++    for (;;) {
++        const auto now = std::chrono::steady_clock::now();
++        if (now - last_refresh >= std::chrono::seconds(2)) {
++            Refresh(wanted, targets);
++            last_refresh = now;
++        }
++        for (auto& [id, t] : targets) {
++            Site site;
++            if (Sample(t, &site)) {
++                ++t.samples;
++                ++t.sites[site];
++            }
++        }
++        if (now - last_report >= std::chrono::seconds(5)) {
++            Report(targets);
++            last_report = now;
++        }
++        if (timer) {
++            LARGE_INTEGER due;
++            due.QuadPart = -20000; // 2 ms, relative, in 100 ns units
++            if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, INFINITE);
++        } else {
++            std::this_thread::sleep_for(std::chrono::milliseconds(2));
++        }
++    }
++}
++} // namespace
++
++void Start() {
++    static bool started = false;
++    if (started) return;
++    auto wanted = Wanted();
++    if (wanted.empty()) return;
++    started = true;
++    std::thread(Run, std::move(wanted)).detach();
++}
++} // namespace BbSampler
++#else
++namespace BbSampler {
++void Start() {}
++} // namespace BbSampler
++#endif
+diff --git a/gpu/shim/bbport_sampler.h b/gpu/shim/bbport_sampler.h
+new file mode 100644
+index 0000000..afaaaa1
+--- /dev/null
++++ b/gpu/shim/bbport_sampler.h
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: BB_SAMPLE_THREADS - where chosen threads spend their time, sampled. See bbport_sampler.cpp.
++#pragma once
++
++namespace BbSampler {
++/// Starts the sampler thread when BB_SAMPLE_THREADS is set (Windows); nothing otherwise.
++void Start();
++} // namespace BbSampler
 diff --git a/gpu/shim/engine/cheats.cpp b/gpu/shim/engine/cheats.cpp
 new file mode 100644
 index 0000000..8ecdcf5
@@ -15658,10 +16420,10 @@ index 0000000..1b042f6
 +} // namespace BbEngine::OnlineFixes
 diff --git a/gpu/shim/engine/trophy_sync.cpp b/gpu/shim/engine/trophy_sync.cpp
 new file mode 100644
-index 0000000..0414afd
+index 0000000..705692f
 --- /dev/null
 +++ b/gpu/shim/engine/trophy_sync.cpp
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,73 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// The game unlocks a trophy only as it happens: a save imported from a PS4 (or played on another
 +// port) never reports the bosses it had already defeated. Their defeat flags - set by the game
@@ -15708,6 +16470,7 @@ index 0000000..0414afd
 +
 +std::bitset<kBossCount> g_reported;
 +std::chrono::steady_clock::time_point g_next{};
++std::uint64_t g_read_record = 0; // the character whose save was read (0: read the next one)
 +} // namespace
 +
 +void Tick() {
@@ -15716,7 +16479,16 @@ index 0000000..0414afd
 +    const auto now = std::chrono::steady_clock::now();
 +    if (now < g_next) return;
 +    g_next = now + std::chrono::seconds(3);
-+    if (!player_record() || !world_player_block(nullptr)) return;
++    // Once per character in the world: the flags its save brought. Read again after a load
++    // (out of the world, or another character), not polled - a boss killed now sets its flag
++    // before the game unlocks its trophy, which must keep its own notification.
++    const std::uint64_t record = player_record();
++    if (!record || !world_player_block(nullptr)) {
++        g_read_record = 0;
++        return;
++    }
++    if (record == g_read_record) return;
++    g_read_record = record;
 +    for (int i = 0; i < kBossCount; ++i) {
 +        bool defeated = false;
 +        if (g_reported.test(i) || !event_flag_get(kBosses[i].defeat_flag, &defeated) || !defeated) continue;
@@ -15740,6 +16512,23 @@ index 0000000..ffaf36b
 +/// The main thread's frame hook (change_appearance.cpp FrameHook).
 +void Tick();
 +} // namespace BbEngine::TrophySync
+diff --git a/gpu/win_compat.h b/gpu/win_compat.h
+new file mode 100644
+index 0000000..662d6f4
+--- /dev/null
++++ b/gpu/win_compat.h
+@@ -0,0 +1,11 @@
++// Windows CLANG64 build: headers some vendored sources (FSR 3 SDK) expect to arrive
++// transitively but newer libc++ no longer includes (_countof, placement new, log2).
++#pragma once
++#include <cstdio>
++#include <cstdlib>
++#include <cwchar>
++#include <new>
++#include <cmath>
++#ifndef _countof
++#define _countof(a) (sizeof(a) / sizeof((a)[0]))
++#endif
 diff --git a/src/respawn_patch.h b/src/respawn_patch.h
 new file mode 100644
 index 0000000..c73a186

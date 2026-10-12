@@ -244,8 +244,15 @@ namespace BloodborneLauncher.Core
                 _runTail = chunk[Math.Max(0, end - 64)..end];
 
                 var text = Encoding.UTF8.GetString(chunk, 0, end);
-                var ids = UnlockLine.Matches(text).Concat(SaveLine.Matches(text)).Select(m => int.Parse(m.Groups[1].Value)).ToList();
-                return ids.Count == 0 ? ids : Record(ids, new DateTimeOffset(stamp.Value.Item2).ToUnixTimeSeconds());
+                var when = new DateTimeOffset(stamp.Value.Item2).ToUnixTimeSeconds();
+                var found = new List<int>();
+                // Trophies a save already had: recorded without a notification each; only a
+                // platinum they complete is announced.
+                var saved = SaveLine.Matches(text).Select(m => int.Parse(m.Groups[1].Value)).ToList();
+                if (saved.Count > 0) found.AddRange(Record(saved, when).Where(id => id == PlatinumId));
+                var ids = UnlockLine.Matches(text).Select(m => int.Parse(m.Groups[1].Value)).ToList();
+                if (ids.Count > 0) found.AddRange(Record(ids, when));
+                return found;
             }
             catch
             {

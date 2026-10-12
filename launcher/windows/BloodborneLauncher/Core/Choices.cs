@@ -186,6 +186,12 @@
             for (var i = 0; i < choices.Count; i++)
                 if (choices[i].Value == value)
                     return i;
+            // A number written another way (the engine saves "1.00" for "1"): the same choice.
+            if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number))
+                for (var i = 0; i < choices.Count; i++)
+                    if (double.TryParse(choices[i].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var option) &&
+                        Math.Abs(option - number) < 1e-6)
+                        return i;
             return 0;
         }
     }

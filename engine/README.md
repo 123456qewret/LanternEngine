@@ -1,7 +1,6 @@
 # Engine
 
-The engine as developed here. Our work is `bbhost-changes.patch` (engine) and `run-windows-frame-rate.patch`
-(`scripts/run_windows.py`), applied to its starting point, [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
+The engine as developed here. Our work is `bbhost-changes.patch` (engine and scripts), applied to its starting point, [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
 at tag `v0.4.0-darkizuku-preview.1`.
 
 ## Changes
@@ -40,6 +39,7 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | The mouse cursor hidden 2 s after the mouse last moved (it was always shown on Windows unless the mouse camera was on) | `hide_cursor` |
 | Online: the client reports what it is after signing in (shadNet 0.0.34 signs out clients that report nothing); a rejection is logged and signs out at once | `BB_CLIENT_VERSION` |
 | Launch: the boot image (prepare, link_libc, link_modules, content profile) is reused while its inputs are unchanged, about 10 s a launch | `out/prepared.json` |
+| Loading profile: the main, render and resource-loading threads sampled every 2 ms, their hottest game and engine code in the log every 5 s | `BB_SAMPLE_THREADS=load` |
 | Online: a network drop of the shadNet connection keeps the game signed in for 90 s while it reconnects (it returned to the title menu) | |
 | Online co-op: shadNet server framing for signaling, UPnP port mapping (Supermedo 004d2c37), P2P port 3658 by default, play logs to the game server | `SHADPS4_P2P_PORT` |
 | In-game PC Colour page (brightness, contrast, saturation, hue from the game's own tone map) and a fog slider on PC Graphics, live; the same in the launcher's Picture tuning | `graphics_brightness`, `graphics_contrast`, `graphics_hue`, `graphics_fog` |
@@ -61,7 +61,7 @@ In the MSYS2 **CLANG64** shell (packages as in the engine's README):
 ```bash
 git clone --branch v0.4.0-darkizuku-preview.1 --recurse-submodules https://github.com/DarkIzuku/bloodborne_pc
 cd bloodborne_pc
-git apply /path/to/engine/bbhost-changes.patch /path/to/engine/run-windows-frame-rate.patch
+git apply /path/to/engine/bbhost-changes.patch
 cp /path/to/engine/win_compat.h gpu/
 CFLAGS="-Wno-error=unused-but-set-global" CXXFLAGS="-include $PWD/gpu/win_compat.h" bash build.sh
 ```

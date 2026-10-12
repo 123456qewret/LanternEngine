@@ -115,7 +115,9 @@ namespace BloodborneLauncher.Views
             {
                 var results = await Online.CheckAsync(Online.GameServer(Ini.Get("online_game_api")), $"{host}:{port}", webapi);
                 var p2p = int.TryParse(Ini.Get("online_p2p_port").Trim(), out var pinned) && pinned is > 0 and < 65536 ? pinned : 3658;
-                if (await Online.CheckUdpAsync(host, int.TryParse(port, out var tcp) ? tcp : 31313,
+                // Not while the game plays: the ping carries the account name and could point the
+                // server at the launcher's port instead of the game's.
+                if (!Ws.Game.Running && await Online.CheckUdpAsync(host, int.TryParse(port, out var tcp) ? tcp : 31313,
                         Ini.Get("online_username").Trim(), p2p) is { } udp)
                     results.Add(udp);
                 else
