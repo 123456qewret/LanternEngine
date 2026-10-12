@@ -21,7 +21,7 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | Controller: the pad in use takes over; swap sticks, invert camera, dead zone | `pad_swap_sticks`, `pad_invert_look_x/y`, `pad_deadzone` |
 | Controller: Cross/Circle in the name entry, held buttons ignored after menus | |
 | No 12-second minimum loading time after death | `BB_RESPAWN_DELAY_FIX=0` off |
-| Crash fixes: oversized command data, empty recording chunk, out-of-order flip IRQ; swapchain recreation | |
+| Crash fixes: oversized command data, empty recording chunk, out-of-order flip IRQ, SnormNz packed formats; swapchain recreation | |
 | DLSS texture LOD bias | `BB_DLSS_MIP_BIAS=0` off |
 | Optional FSR 4 balanced model | `BB_FSR4_BALANCED=1` |
 | Cheats: infinite or a set amount of Blood Vials and Quicksilver Bullets, live and revertible (in-game menu) | `cheat_vials`, `cheat_bullets` |

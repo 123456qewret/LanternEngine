@@ -22,11 +22,15 @@ namespace BloodborneLauncher.Core
                 return "A frame reached the screen out of order (a timing race in the engine; Precise frame pacing makes it likelier).";
             if (Has("DEVICE_LOST") || Has("device lost"))
                 return "The graphics driver stopped responding: the GPU hung or lost the game's memory.";
-            var assertion = tail.FindIndex(l => l.Contains("Assertion Failed", StringComparison.OrdinalIgnoreCase));
-            if (assertion >= 0)
+            // The engine's own message: "GPU [Debug] <Critical> file:line Function: text", maybe
+            // followed by a detail line ("data_fmt = 7") before the STOP line.
+            var critical = tail.FindLastIndex(l => l.Contains("<Critical>", StringComparison.Ordinal));
+            if (critical >= 0)
             {
-                var detail = assertion + 1 < tail.Count && !tail[assertion + 1].StartsWith("STOP:") ? tail[assertion + 1].Trim() : "";
-                return "The engine stopped on an internal check" + (detail.Length > 0 ? $": {detail}." : ".");
+                var message = tail[critical][(tail[critical].IndexOf("<Critical>", StringComparison.Ordinal) + 10)..].Trim();
+                var next = critical + 1 < tail.Count ? tail[critical + 1].Trim() : "";
+                if (next.Length > 0 && !next.StartsWith("STOP:") && !next.Contains("exited with code")) message += " (" + next + ")";
+                return "The engine stopped on an internal check: " + message;
             }
             return code == 23
                 ? "The engine stopped itself on an error (exit code 23); the report has the details."

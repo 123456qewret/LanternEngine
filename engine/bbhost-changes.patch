@@ -494,6 +494,22 @@ index fa7e146..ee3859e 100644
      if (const int clock = BbPlatform::ThreadCpuClock(); clock != -1) {
          BbStats::gpu_thread_clock.store(clock);
      }
+diff --git a/gpu/shadps4/video_core/amdgpu/pixel_format.h b/gpu/shadps4/video_core/amdgpu/pixel_format.h
+index 8b83639..aeac901 100644
+--- a/gpu/shadps4/video_core/amdgpu/pixel_format.h
++++ b/gpu/shadps4/video_core/amdgpu/pixel_format.h
+@@ -356,7 +356,10 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
+         case DataFormat::Format16_16_16_16:
+             return NumberConversion::Sint16ToSnormNz;
+         default:
+-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
++            // bbport: Bloodborne sometimes binds SnormNz with a packed format (seen: data_fmt 7,
++            // 11_11_10) after minutes of play; this stopped the game (exit 23). Such a descriptor
++            // has no SnormNz meaning, so it is read without a conversion instead.
++            return NumberConversion::None;
+         }
+     }
+     default:
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
 index a123982..a9c39b6 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
