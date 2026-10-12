@@ -1210,10 +1210,10 @@ index 21f9e6e..6d89586 100644
      u64 depth_uid{};
      u64 image_uid{};
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 98ccdd1..ea06039 100644
+index 98ccdd1..cacde15 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-@@ -150,8 +150,36 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
+@@ -150,8 +150,61 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
          std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                        DEFAULT_CRITICAL_GC_MEMORY));
      trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
@@ -1245,12 +1245,37 @@ index 98ccdd1..ea06039 100644
 +    }();
 +    return seconds;
 +}
++/// bbport (GPU hang guard): the collector never frees, nor writes back, an image used in the
++/// last this many collector passes, one per guest submission and several a frame
++/// (BB_GC_RECENT_FRAMES, default 48; 0: off). The memo hits that bind most
++/// images (texture sets, binding and target memos: MarkFound) do not touch the LRU, so an image
++/// sampled every frame looked idle: it was freed while in use, re-created and uploaded again,
++/// and GPU-written render targets went through a synchronous write-back each time (stalls of
++/// 0.3-2 s in area loads before a VK_ERROR_DEVICE_LOST in a full-screen blit).
++u64 GcRecentFrames() {
++    static const u64 frames = [] {
++        const char* env = std::getenv("BB_GC_RECENT_FRAMES");
++        return std::min<u64>(env && env[0] ? std::strtoull(env, nullptr, 10) : 48, 60);
++    }();
++    return frames;
++}
++/// bbport (GPU hang guard): a deleted image's Vulkan objects outlive its unregistration by this
++/// many collector passes (submissions), then the GPU's completion of the tick of that pass
++/// (BB_IMAGE_FREE_DELAY_FRAMES, default 32; 0: only the GPU tick, as shadPS4). A reference that outlived the registry change
++/// (a memo, a proxy, the upscaler) then reads a still valid image instead of freed memory.
++u64 ImageFreeDelayFrames() {
++    static const u64 frames = [] {
++        const char* env = std::getenv("BB_IMAGE_FREE_DELAY_FRAMES");
++        return std::min<u64>(env && env[0] ? std::strtoull(env, nullptr, 10) : 32, 240);
++    }();
++    return frames;
++}
 +} // namespace
 +
  TextureCache::~TextureCache() = default;
  
  std::string TextureCache::DescribeImagesIn(VAddr addr, u64 size) {
-@@ -267,6 +295,155 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+@@ -267,6 +320,155 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
      }
  }
  
@@ -1406,7 +1431,7 @@ index 98ccdd1..ea06039 100644
  void TextureCache::DumpImagesAt(VAddr address, const char* dir) {
      boost::container::small_vector<ImageId, 4> ids;
      {
-@@ -1160,6 +1337,9 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
+@@ -1160,6 +1362,9 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
  }
  
  void TextureCache::GarbageCollectImages() {
@@ -1416,7 +1441,7 @@ index 98ccdd1..ea06039 100644
      if (instance.CanReportMemoryUsage()) {
          total_used_memory = instance.GetDeviceMemoryUsage();
          // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
-@@ -1179,6 +1359,16 @@ void TextureCache::GarbageCollectImages() {
+@@ -1179,6 +1384,16 @@ void TextureCache::GarbageCollectImages() {
                  pressure_gc_memory = budget / 100 * 85;
                  critical_gc_memory = budget / 100 * 95;
              }
@@ -1433,7 +1458,7 @@ index 98ccdd1..ea06039 100644
          }
      }
      BbStats::gc_used_bytes.store(total_used_memory, std::memory_order_relaxed);
-@@ -1188,9 +1378,6 @@ void TextureCache::GarbageCollectImages() {
+@@ -1188,9 +1403,6 @@ void TextureCache::GarbageCollectImages() {
      // discrete GPU it stays over the trigger, where an age of 16 ticks (~3 frames) evicted every
      // texture briefly off screen and uploaded it again. Below the pressure mark an image goes
      // once unused for BB_GC_IDLE_SECONDS (20): the textures of an area left behind.
@@ -1443,7 +1468,7 @@ index 98ccdd1..ea06039 100644
      if (second != gc_second) {
          gc_second = second;
          BbStats::coarse_second.store(u32(second), std::memory_order_relaxed);
-@@ -1216,6 +1403,17 @@ void TextureCache::GarbageCollectImages() {
+@@ -1216,6 +1428,29 @@ void TextureCache::GarbageCollectImages() {
      u64 below_tick = 0;
      size_t num_deletions = 0;
      u32 visited = 0;
@@ -1458,10 +1483,22 @@ index 98ccdd1..ea06039 100644
 +    static constexpr size_t MaxTiledWritebacks = 4;
 +    static constexpr u64 WritebackRetryTicks = 600;
 +    size_t tiled_writebacks = 0;
++    // bbport (GPU hang guard): the submission tick GcRecentFrames() frames ago; images accessed
++    // at or after it are in use. 0: the guard is off. Until that many frames have passed, every
++    // image counts as recent.
++    const u64 recent_frames = GcRecentFrames();
++    const u64 recent_tick =
++        recent_frames == 0
++            ? 0
++            : (gc_tick >= recent_frames
++                   ? std::max<u64>(sched_tick_at_gc[(gc_tick - recent_frames) %
++                                                    sched_tick_at_gc.size()],
++                                   1)
++                   : ~0ull);
  
      const auto configure = [&](bool allow_aggressive) {
          pressured = total_used_memory >= pressure_gc_memory;
-@@ -1224,6 +1422,9 @@ void TextureCache::GarbageCollectImages() {
+@@ -1224,6 +1459,9 @@ void TextureCache::GarbageCollectImages() {
          below_tick = gc_tick - ticks_to_destroy;
          if (!pressured && !aggresive) {
              below_tick = std::min(below_tick, idle_tick);
@@ -1471,7 +1508,7 @@ index 98ccdd1..ea06039 100644
          }
          num_deletions = aggresive ? 40 : pressured ? 20 : 10;
          visited = 0;
-@@ -1237,16 +1438,40 @@ void TextureCache::GarbageCollectImages() {
+@@ -1237,16 +1475,47 @@ void TextureCache::GarbageCollectImages() {
          const bool download = image.SafeToDownload();
          const bool tiled = image.info.IsTiled();
          // bbport: images that cannot go now (GPU-written: their contents exist only here, and
@@ -1488,6 +1525,13 @@ index 98ccdd1..ea06039 100644
              return false;
 +        };
 +        if (download && !pressured) {
++            return keep();
++        }
++        // bbport (GPU hang guard): in use in the last frames (see GcRecentFrames), or by GPU
++        // work not finished yet: kept, whatever its LRU age says.
++        if (recent_tick != 0 && (image.tick_accessed_last >= recent_tick ||
++                                 !scheduler.IsFree(image.tick_accessed_last))) {
++            ++gc_recent_kept;
 +            return keep();
 +        }
 +        bool written_back = false;
@@ -1517,7 +1561,7 @@ index 98ccdd1..ea06039 100644
              // bbport: synchronously, while the image still protects its pages. A deferred
              // write-back landed after FreeImage had unprotected them, over whatever the game
              // had meanwhile stored there (e.g. its heap after unloading an area).
-@@ -1279,17 +1504,19 @@ void TextureCache::GarbageCollectImages() {
+@@ -1279,17 +1548,20 @@ void TextureCache::GarbageCollectImages() {
          lru_cache.ForEachItemBelow(below_tick, clean_up);
      }
      // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
@@ -1528,24 +1572,76 @@ index 98ccdd1..ea06039 100644
              std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu): "
 -                        "%llu images evicted, %llu written back since the last report\n",
 +                        "%llu images evicted, %llu written back, %llu tiled written back, "
-+                        "%llu tiled kept since the last report\n",
++                        "%llu tiled kept, %llu in use kept since the last report\n",
                          (unsigned long long)(total_used_memory >> 20),
                          (unsigned long long)(pressure_gc_memory >> 20),
                          (unsigned long long)(critical_gc_memory >> 20),
 -                        (unsigned long long)gc_evictions, (unsigned long long)gc_downloads);
 +                        (unsigned long long)gc_evictions, (unsigned long long)gc_downloads,
-+                        (unsigned long long)gc_tiled_written, (unsigned long long)gc_tiled_kept);
++                        (unsigned long long)gc_tiled_written, (unsigned long long)gc_tiled_kept,
++                        (unsigned long long)gc_recent_kept);
              gc_report_time = now;
 -            gc_evictions = gc_downloads = 0;
-+            gc_evictions = gc_downloads = gc_tiled_written = gc_tiled_kept = 0;
++            gc_evictions = gc_downloads = gc_tiled_written = gc_tiled_kept = gc_recent_kept = 0;
          }
      }
  }
+@@ -1338,6 +1610,10 @@ void TextureCache::RunGarbageCollector() {
+     SCOPE_EXIT {
+         ++gc_tick;
+     };
++    // bbport (GPU hang guard): this frame's submission tick (GcRecentFrames), and the images
++    // deleted long enough ago (ImageFreeDelayFrames).
++    sched_tick_at_gc[gc_tick % sched_tick_at_gc.size()] = scheduler.CurrentTick();
++    FlushImageGraveyard();
+ 
+     GarbageCollectImages();
+     GarbageCollectSamplers();
+@@ -1375,6 +1651,16 @@ void TextureCache::DeleteImage(ImageId image_id) {
+         }
+     }
+ 
++    // bbport (GPU hang guard): kept for ImageFreeDelayFrames() frames first (FlushImageGraveyard).
++    if (ImageFreeDelayFrames() != 0) {
++        std::scoped_lock lk{graveyard_mutex};
++        image_graveyard.push_back({gc_tick, image_id});
++        return;
++    }
++    ReclaimImage(image_id);
++}
++
++void TextureCache::ReclaimImage(ImageId image_id) {
+     // Reclaim image and any image views it references.
+     scheduler.DeferOperation([this, image_id] {
+         Image& image = slot_images[image_id];
+@@ -1387,4 +1673,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
+     });
+ }
+ 
++void TextureCache::FlushImageGraveyard() {
++    const u64 delay = ImageFreeDelayFrames();
++    std::scoped_lock lk{graveyard_mutex};
++    while (!image_graveyard.empty() && image_graveyard.front().gc_tick + delay <= gc_tick) {
++        // Deferred again: freed once the GPU has finished everything recorded until now.
++        ReclaimImage(image_graveyard.front().image_id);
++        image_graveyard.pop_front();
++    }
++}
++
+ } // namespace VideoCore
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.h b/gpu/shadps4/video_core/texture_cache/texture_cache.h
-index 2e4c529..7318299 100644
+index 2e4c529..55859ec 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.h
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.h
-@@ -365,6 +365,12 @@ private:
+@@ -13,6 +13,7 @@
+ #include <thread>
+ #include <unordered_set>
+ #include <boost/container/small_vector.hpp>
++#include <deque>
+ #include <queue>
+ #include <tsl/robin_map.h>
+ 
+@@ -365,6 +366,12 @@ private:
      /// Copies image memory back to CPU.
      void DownloadImageMemory(ImageId image_id, bool sync = false);
  
@@ -1558,7 +1654,22 @@ index 2e4c529..7318299 100644
      /// Thread function for copying downloaded images out to CPU memory.
      void DownloadedImagesThread(const std::stop_token& token);
  
-@@ -420,6 +426,9 @@ private:
+@@ -393,6 +400,14 @@ private:
+     /// Removes the image and any views/surface metas that reference it.
+     void DeleteImage(ImageId image_id);
+ 
++    /// bbport (GPU hang guard): destroys the image and its views once the GPU is past the
++    /// current tick (DeleteImage, directly or after BB_IMAGE_FREE_DELAY_FRAMES).
++    void ReclaimImage(ImageId image_id);
++
++    /// bbport (GPU hang guard): hands images unregistered at least BB_IMAGE_FREE_DELAY_FRAMES
++    /// frames ago to ReclaimImage (RunGarbageCollector, once a frame).
++    void FlushImageGraveyard();
++
+     /// Touch the image in the LRU cache.
+     void TouchImage(const Image& image);
+ 
+@@ -420,6 +435,9 @@ private:
      std::unordered_set<ImageId> download_images;
      u64 total_used_memory = 0;
      u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
@@ -1568,7 +1679,7 @@ index 2e4c529..7318299 100644
      std::chrono::steady_clock::time_point gc_report_time{};
      /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
      std::array<u64, 64> gc_tick_at_second{};
-@@ -427,6 +436,11 @@ private:
+@@ -427,11 +445,28 @@ private:
      u64 trigger_gc_memory = 0;
      u64 pressure_gc_memory = 0;
      u64 critical_gc_memory = 0;
@@ -1580,6 +1691,23 @@ index 2e4c529..7318299 100644
      u64 total_used_samplers = 0;
      u64 trigger_gc_samplers = 0;
      u64 pressure_gc_samplers = 0;
+     u64 critical_gc_samplers = 0;
+     u64 gc_tick = 0;
++    /// bbport (GPU hang guard): scheduler.CurrentTick() at each of the last 64 collector passes
++    /// (one a frame, indexed by gc_tick), for "used in the last N frames" in submission ticks.
++    std::array<u64, 64> sched_tick_at_gc{};
++    /// bbport (GPU hang guard): unregistered images whose Vulkan objects are kept for a few more
++    /// frames (DeleteImage): the gc_tick they were deleted at. Slots are not reused meanwhile.
++    struct GraveImage {
++        u64 gc_tick;
++        ImageId image_id;
++    };
++    std::deque<GraveImage> image_graveyard;
++    std::mutex graveyard_mutex;
++    u64 gc_recent_kept = 0; ///< bbport: images kept because used in the last frames
+     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
+     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
+     const bool readback_linear_images;
 diff --git a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp b/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
 index da02543..8e9d6bb 100644
 --- a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
@@ -1742,6 +1870,576 @@ index f9d2884..35a5357 100644
          u64 seen = 0;
          std::unique_lock lk{mutex};
          while (true) {
+diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
+index 83e5538..d4b93b1 100644
+--- a/gpu/shim/bbport_overlay.cpp
++++ b/gpu/shim/bbport_overlay.cpp
+@@ -17,7 +17,8 @@
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ 
+-// DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
++// DejaVu Sans (Latin with Latin Extended, Greek, Cyrillic), embedded (third_party/fonts, Bitstream
++// Vera license).
+ #ifdef _WIN32
+ // PE/COFF assemblers have no .hidden/.previous: the compiler embeds the file (#embed, a GCC
+ // extension in C++).
+@@ -206,12 +207,15 @@ void Menu() {
+             dirty = true;
+         }
+     }
+-    // Always readable, even when the rest of the menu is in Russian.
+-    static const char* languages[] = {"English", "Русский"};
+-    int language = s.menu_language == BbSettings::MenuLanguage::Russian ? 1 : 0;
+-    if (ImGui::Combo("Language", &language, languages, 2)) {
++    // Always readable, whatever language the rest of the menu is in: each language by its own
++    // name, in MenuLanguage order.
++    static const char* languages[] = {"English",  "Русский",  "Español", "Português (Brasil)",
++                                      "Français", "Deutsch",  "Italiano", "Polski", "Türkçe"};
++    static_assert(std::size(languages) == BbSettings::MenuLanguageCount);
++    int language = int(s.menu_language.load());
++    if (ImGui::Combo("Language", &language, languages, BbSettings::MenuLanguageCount)) {
+         s.menu_language =
+-            language == 1 ? BbSettings::MenuLanguage::Russian : BbSettings::MenuLanguage::English;
++            BbSettings::MenuLanguage(std::clamp(language, 0, BbSettings::MenuLanguageCount - 1));
+         BbSettings::Save();
+     }
+     ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
+@@ -587,6 +591,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+     style.GrabRounding = 4.0f;
+     style.Colors[ImGuiCol_WindowBg].w = 0.92f;
+ 
++    // No GlyphRanges: the Vulkan backend has ImGuiBackendFlags_RendererHasTextures (ImGui 1.92), so
++    // the atlas loads each glyph of the font when first drawn (Cyrillic, ñ ç ü ß ą ł ş ğ ı, —).
++    // Ranges would only limit that.
+     ImFontConfig font_config;
+     font_config.FontDataOwnedByAtlas = false;
+     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
+diff --git a/gpu/shim/bbport_platform.cpp b/gpu/shim/bbport_platform.cpp
+index 8f2e888..b7cd129 100644
+--- a/gpu/shim/bbport_platform.cpp
++++ b/gpu/shim/bbport_platform.cpp
+@@ -5,6 +5,7 @@
+ #include <algorithm>
+ #include <bit>
+ #include <cstdio>
++#include <cstdlib>
+ #include <thread>
+ #include <windows.h>
+ #include <psapi.h>
+@@ -98,5 +99,20 @@ void MakeBackground() {
+     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+ }
+ 
++// The game runs dozens of threads at normal priority (cloth, character, Havok, job pools); on
++// 12 or fewer hardware threads Windows gives a ready thread of equal priority a core only when
++// another one's quantum ends (tens of ms), so a render-chain thread queued behind them delays
++// the frame. Its idle spins are bounded (BB_GPU_SPIN_US, BB_PIPE_SPIN_US, recording: 200 us)
++// before it sleeps, so the higher priority takes no lasting time from the game's threads.
++void MakeCritical() {
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_GPU_THREAD_PRIORITY");
++        return !(env && env[0] == '0');
++    }();
++    if (enabled) {
++        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
++    }
++}
++
+ } // namespace BbThreads
+ #endif
+diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
+index cf4fbd8..fc787ce 100644
+--- a/gpu/shim/bbport_settings.cpp
++++ b/gpu/shim/bbport_settings.cpp
+@@ -6,9 +6,11 @@
+ #endif
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #include "bbport_settings.h"
++#include "bbport_menu_i18n.h"
+ #include "input/ini_bindings.h"
+ 
+ #include <algorithm>
++#include <cctype>
+ #include <cstdio>
+ #include <cmath>
+ #include <cstdlib>
+@@ -35,9 +37,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+     const float f = float(std::atof(value.c_str()));
+     const int i = std::atoi(value.c_str());
+     if (key == "menu_language") {
+-        if (value == "en") v.menu_language = MenuLanguage::English;
+-        else if (value == "ru") v.menu_language = MenuLanguage::Russian;
+-        else std::printf("Settings: unknown menu_language '%s' (expected en or ru)\n", value.c_str());
++        bool known = false;
++        for (int l = 0; l < MenuLanguageCount; ++l) {
++            if (value == MenuLanguageCodes[l]) {
++                v.menu_language = MenuLanguage(l);
++                known = true;
++            }
++        }
++        if (!known) {
++            std::printf("Settings: unknown menu_language '%s' (expected en, ru, es, pt_BR, fr, de, it, pl "
++                        "or tr)\n",
++                        value.c_str());
++        }
+     } else if (key == "upscaler") {
+         for (int u = 0; u < UpscalerCount; ++u) {
+             if (value == UpscalerName(u)) {
+@@ -138,6 +149,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+     }
+ }
+ 
++// The menu's language for the launcher's code (BB_MENU_LANGUAGE: en, ru, pt_BR...) or a locale
++// (ru_RU.UTF-8, de_DE...): its first two letters; Portuguese only as pt_BR. Else English.
++MenuLanguage LanguageOfLocale(const char* lang) {
++    if (!lang || !lang[0] || !lang[1]) {
++        return MenuLanguage::English;
++    }
++    const auto lower = [lang](int i) { return char(std::tolower(static_cast<unsigned char>(lang[i]))); };
++    if (lower(0) == 'p' && lower(1) == 't') {
++        return (lang[2] == '_' || lang[2] == '-') && lower(3) == 'b' && lower(4) == 'r'
++                   ? MenuLanguage::PortugueseBrazil
++                   : MenuLanguage::English;
++    }
++    for (int l = 0; l < MenuLanguageCount; ++l) {
++        const char* code = MenuLanguageCodes[l];
++        if (code[2] == '\0' && lower(0) == code[0] && lower(1) == code[1]) {
++            return MenuLanguage(l);
++        }
++    }
++    return MenuLanguage::English;
++}
++
+ } // namespace
+ 
+ Values& Get() {
+@@ -146,7 +178,11 @@ Values& Get() {
+ }
+ 
+ const char* MenuText(const char* english, const char* russian) {
+-    return Get().menu_language == MenuLanguage::Russian ? russian : english;
++    switch (const MenuLanguage language = Get().menu_language) {
++    case MenuLanguage::English: return english;
++    case MenuLanguage::Russian: return russian;
++    default: return MenuTranslation(language, english);
++    }
+ }
+ 
+ void Load() {
+@@ -166,9 +202,7 @@ void Load() {
+                 }
+             }
+         }
+-        v.menu_language = lang && (lang[0] == 'r' || lang[0] == 'R') && (lang[1] == 'u' || lang[1] == 'U')
+-                              ? MenuLanguage::Russian
+-                              : MenuLanguage::English;
++        v.menu_language = LanguageOfLocale(lang);
+     }
+     if (FILE* file = std::fopen(Path(), "r")) {
+         char line[256];
+@@ -264,7 +298,7 @@ void Save() {
+         return std::string(text);
+     };
+     const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
+-    put("menu_language", v.menu_language == MenuLanguage::Russian ? "ru" : "en");
++    put("menu_language", MenuLanguageCodes[int(v.menu_language.load())]);
+     put("upscaler", UpscalerName(v.upscaler));
+     put("preset", std::to_string(v.preset.load()));
+     put("sharpen", flag(v.sharpen));
+diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
+index c0e8a94..10c0f80 100644
+--- a/gpu/shim/bbport_settings.h
++++ b/gpu/shim/bbport_settings.h
+@@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
+ }
+ enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
+ enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
+-enum class MenuLanguage { English, Russian };
++/// The menu's language, in the Language selector's order (bbport_overlay.cpp).
++enum class MenuLanguage {
++    English, Russian, Spanish, PortugueseBrazil, French, German, Italian, Polish, Turkish
++};
++/// menu_language in bbport.ini, by MenuLanguage; the launcher's BB_MENU_LANGUAGE uses the same codes.
++inline constexpr const char* MenuLanguageCodes[] = {"en", "ru", "es", "pt_BR", "fr", "de", "it", "pl", "tr"};
++inline constexpr int MenuLanguageCount = int(sizeof(MenuLanguageCodes) / sizeof(MenuLanguageCodes[0]));
++static_assert(MenuLanguageCount == int(MenuLanguage::Turkish) + 1);
+ 
+ /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
+ /// menu label, default (the game's own behaviour).
+@@ -103,7 +110,8 @@ struct Values {
+ };
+ 
+ Values& Get();
+-/// Localized overlay text; the Language selector itself stays in English.
++/// Localized overlay text; the Language selector itself stays in English. The other languages
++/// look the English text up (bbport_menu_i18n.cpp) and show it when they have no translation.
+ const char* MenuText(const char* english, const char* russian);
+ 
+ /// Reads the file, then the environment overrides. Called once at start.
+diff --git a/gpu/shim/bbport_threads.h b/gpu/shim/bbport_threads.h
+index 50d0422..d856520 100644
+--- a/gpu/shim/bbport_threads.h
++++ b/gpu/shim/bbport_threads.h
+@@ -19,7 +19,12 @@ namespace BbThreads {
+ // Windows (bbport_platform.cpp): the process affinity mask; THREAD_PRIORITY_IDLE.
+ unsigned Available();
+ void MakeBackground();
++/// The serial render chain (GPU command thread, draw recording, Vulkan recording) runs above
++/// the game's own threads (THREAD_PRIORITY_ABOVE_NORMAL; BB_GPU_THREAD_PRIORITY=0: normal).
++void MakeCritical();
+ #else
++/// Linux: unchanged (normal priority; raising it needs privileges).
++inline void MakeCritical() {}
+ /// Hardware threads available to the process.
+ inline unsigned Available() {
+     cpu_set_t set;
+diff --git a/gpu/shim/core/emulator_settings.h b/gpu/shim/core/emulator_settings.h
+index f176cc1..bcf4185 100644
+--- a/gpu/shim/core/emulator_settings.h
++++ b/gpu/shim/core/emulator_settings.h
+@@ -36,12 +36,8 @@ public:
+     u32 GetVblankFrequency() {
+         static const u32 value = [] {
+             const long hz = Number("BB_VBLANK_HZ", 60);
+-#ifdef _WIN32
+-            // Direct runtime launches must be safe too, even with legacy uncapped env vars.
+-            return hz == 30 || hz == 60 || hz == 90 ? u32(hz) : 60u;
+-#else
+-            return hz > 0 ? u32(hz) : 480u;
+-#endif
++            // Bloodborne PC: Windows runs uncapped too (0 or above 120: 480 Hz), as on Linux.
++            return hz > 0 && hz <= 120 ? u32(hz) : 480u;
+         }();
+         return value;
+     }
+@@ -49,24 +45,17 @@ public:
+     bool IsUncappedVblank() {
+         static const bool value = [] {
+             const long hz = Number("BB_VBLANK_HZ", 60);
+-#ifdef _WIN32
+-            (void)hz;
+-            return false;
+-#else
+             return hz <= 0 || hz > 120;
+-#endif
+         }();
+         return value;
+     }
+     /// Frames per second the present thread lets through; 0 = no limit (BB_FPS_LIMIT).
+     u32 GetFrameLimit() {
+         static const u32 value = [] {
+-#ifdef _WIN32
+-            const long fps = Number("BB_FPS_LIMIT", GetInstance()->GetVblankFrequency());
+-            return fps == 30 || fps == 60 || fps == 90 ? u32(fps) : 60u;
+-#else
+-            return u32(std::max(0L, Number("BB_FPS_LIMIT", 0)));
+-#endif
++            // Bloodborne PC: any limit the launcher asks for (0 = none); without one, the fixed
++            // presets still limit to their own rate.
++            const u32 vblank = GetInstance()->GetVblankFrequency();
++            return u32(std::max(0L, Number("BB_FPS_LIMIT", vblank <= 120 ? long(vblank) : 0L)));
+         }();
+         return value;
+     }
+diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
+index f475c39..8b574fb 100644
+--- a/gpu/shim/window.cpp
++++ b/gpu/shim/window.cpp
+@@ -169,6 +169,18 @@ bool WindowSDL::PollEvents() {
+             UpdateTextTitle();
+             continue;
+         }
++        // The controller finishes the text dialog too: Cross (South) accepts, Circle (East)
++        // cancels. From Supermedo/bloodborne_pc 1d34202.
++        if (text_active && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
++            (event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ||
++             event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)) {
++            std::scoped_lock lock{text_mutex};
++            text_state = event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ? 1 : 2;
++            text_active = false;
++            SDL_StopTextInput(window);
++            UpdateTextTitle();
++            continue;
++        }
+         if (BbOverlay::HandleEvent(event)) {
+             continue;
+         }
+diff --git a/src/probe.c b/src/probe.c
+index b0e7c32..b926998 100644
+--- a/src/probe.c
++++ b/src/probe.c
+@@ -8,6 +8,7 @@
+ #include <cpuid.h>
+ #include "runtime.h"
+ #include "gpu/bbgpu.h"
++#include "respawn_patch.h"
+ #if !defined(__x86_64__) || !defined(__GNUC__)
+ #error This prototype requires x86-64 GCC or Clang (including MinGW).
+ #endif
+@@ -903,6 +904,20 @@ int main(int argc, char **argv) {
+         memcpy(image + relocs[i].target, &value, 8);
+     }
+     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
++    /* AwesomeObserver 149972b: no 12-second minimum loading time after death. */
++    if (!cpu_only) {
++        const char *respawn_fix = getenv("BB_RESPAWN_DELAY_FIX");
++        if (respawn_fix && !strcmp(respawn_fix, "0")) {
++            puts("Respawn loading: original minimum delay requested (BB_RESPAWN_DELAY_FIX=0)");
++        } else {
++            int patched = bb_patch_respawn_delay(image, (size_t)size);
++            if (patched == BB_RESPAWN_APPLIED || patched == BB_RESPAWN_ALREADY_APPLIED)
++                printf("Respawn loading: 12-second minimum delay removed%s; readiness checks preserved\n",
++                       patched == BB_RESPAWN_ALREADY_APPLIED ? " (already patched)" : "");
++            else
++                puts("Respawn loading: unsupported or modified instructions; minimum-delay fix skipped");
++        }
++    }
+ #ifdef _WIN32
+     printf("Guest thread pointer reads: %" PRIu64 " use TEB TLS slot %u\n", patch_tls_reads(segments, ns), runtime_win_tls_slot());
+ #endif
+diff --git a/src/runtime_host.c b/src/runtime_host.c
+index 73f3762..9baefdd 100644
+--- a/src/runtime_host.c
++++ b/src/runtime_host.c
+@@ -76,19 +76,22 @@ uint64_t host_realtime_ns(void) {
+     return (ticks - UINT64_C(116444736000000000)) * 100;
+ }
+ static __thread HANDLE sleep_timer;
+-/* High-resolution waitable timers (Windows 10 1803+) wake within ~0.5 ms; the rest of a
+- * short wait is spun, so frame pacing and audio deadlines stay precise. */
+-void host_sleep_until_ns(uint64_t deadline) {
+-    enum { SPIN_NS = 600000 };
++static __thread int sleep_timer_high_resolution;
++enum { PRECISE_SPIN_NS = 600000 };
++/* High-resolution waitable timers (Windows 10 1803+) wake within ~0.5 ms; the last spin_ns of
++ * a wait is spun (all of it without such a timer). */
++static void sleep_until_spinning(uint64_t deadline, uint64_t spin_ns) {
+     uint64_t now = host_monotonic_ns();
+     if (now >= deadline) return;
+-    if (deadline - now > SPIN_NS) {
+-        if (!sleep_timer) {
+-            sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+-            if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+-        }
++    if (!sleep_timer) {
++        sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++        sleep_timer_high_resolution = sleep_timer != NULL;
++        if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
++    }
++    if (!sleep_timer_high_resolution && spin_ns < PRECISE_SPIN_NS) spin_ns = PRECISE_SPIN_NS;
++    if (deadline - now > spin_ns) {
+         LARGE_INTEGER due;
+-        due.QuadPart = -(LONGLONG)((deadline - now - SPIN_NS) / 100);
++        due.QuadPart = -(LONGLONG)((deadline - now - spin_ns) / 100);
+         if (sleep_timer && due.QuadPart < 0 && SetWaitableTimer(sleep_timer, &due, 0, NULL, NULL, FALSE))
+             WaitForSingleObject(sleep_timer, INFINITE);
+         else
+@@ -96,9 +99,26 @@ void host_sleep_until_ns(uint64_t deadline) {
+     }
+     while (host_monotonic_ns() < deadline) YieldProcessor();
+ }
++/* Frame pacing and audio deadlines: precise. */
++void host_sleep_until_ns(uint64_t deadline) { sleep_until_spinning(deadline, PRECISE_SPIN_NS); }
++/* The game's own sleeps (sceKernelUsleep, nanosleep: ~20-26 per frame, ~4 ms each in Central
++ * Yharnam) only need to last at least as long as asked: a shorter spin tail
++ * (BB_SLEEP_SPIN_US, default 200; 600 as before) leaves ~0.4 ms of a core per sleep to the
++ * render threads. Waking a little later than asked is within what a sleep promises. */
++static uint64_t guest_sleep_spin_ns(void) {
++    static uint64_t spin = UINT64_MAX;
++    uint64_t value = __atomic_load_n(&spin, __ATOMIC_RELAXED);
++    if (value == UINT64_MAX) {
++        const char *env = getenv("BB_SLEEP_SPIN_US");
++        value = env && env[0] ? strtoull(env, NULL, 10) * 1000 : 200000;
++        if (value > PRECISE_SPIN_NS) value = PRECISE_SPIN_NS;
++        __atomic_store_n(&spin, value, __ATOMIC_RELAXED);
++    }
++    return value;
++}
+ void host_sleep_ns(uint64_t ns) {
+     if (!ns) { SwitchToThread(); return; }
+-    host_sleep_until_ns(host_monotonic_ns() + ns);
++    sleep_until_spinning(host_monotonic_ns() + ns, guest_sleep_spin_ns());
+ }
+ #else
+ #include <pthread.h>
+diff --git a/src/runtime_pad.c b/src/runtime_pad.c
+index fac0ac7..96c326f 100644
+--- a/src/runtime_pad.c
++++ b/src/runtime_pad.c
+@@ -86,6 +86,52 @@ static int is_preferred(SDL_JoystickID id, const char *want) {
+     const char *name=SDL_GetGamepadNameForID(id);
+     return !SDL_strcasecmp(guid,want) || (name && SDL_strcasestr(name,want));
+ }
++/* bbport: several gamepads at once (also one pad behind a 2.4 GHz receiver that shows as two):
++ * without a chosen one, the pad being used takes over, checked five times a second. */
++#define MAX_OTHER_PADS 4
++static SDL_Gamepad *other_pads[MAX_OTHER_PADS];
++static SDL_JoystickID other_pad_ids[MAX_OTHER_PADS];
++static int pad_active(SDL_Gamepad *p) {
++    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT;++b) if (SDL_GetGamepadButton(p,(SDL_GamepadButton)b)) return 1;
++    for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a) {
++        const int v=SDL_GetGamepadAxis(p,(SDL_GamepadAxis)a);
++        if (v>20000 || v<-20000) return 1;
++    }
++    return 0;
++}
++static void follow_active_pad(void) {
++    static uint64_t last;
++    const uint64_t now=now_us();
++    if (now-last<200000) return;
++    last=now;
++    for (int s=0;s<MAX_OTHER_PADS;++s)
++        if (other_pads[s] && !SDL_GamepadConnected(other_pads[s])) { SDL_CloseGamepad(other_pads[s]); other_pads[s]=NULL; }
++    int count=0;
++    SDL_JoystickID *ids=SDL_GetGamepads(&count);
++    if (!ids) return;
++    for (int i=0;count>1 && i<count;++i) {
++        if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue;
++        int slot=-1, free_slot=-1;
++        for (int s=0;s<MAX_OTHER_PADS;++s) {
++            if (other_pads[s] && other_pad_ids[s]==ids[i]) slot=s;
++            else if (!other_pads[s] && free_slot<0) free_slot=s;
++        }
++        if (slot<0 && free_slot>=0 && (other_pads[free_slot]=SDL_OpenGamepad(ids[i]))) {
++            other_pad_ids[free_slot]=ids[i];
++            slot=free_slot;
++        }
++        if (slot>=0 && pad_active(other_pads[slot])) {
++            SDL_Gamepad *previous=gamepad;
++            gamepad=other_pads[slot];
++            other_pads[slot]=previous;
++            other_pad_ids[slot]=previous ? SDL_GetGamepadID(previous) : 0;
++            printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(gamepad));
++            break;
++        }
++    }
++    SDL_free(ids);
++}
++
+ /* The chosen gamepad, else the first while it is not connected (checked again every second, it
+  * is taken as soon as it connects); called under lock. */
+ static SDL_Gamepad *current_gamepad(void) {
+@@ -117,6 +163,7 @@ static SDL_Gamepad *current_gamepad(void) {
+         }
+         SDL_free(ids);
+     }
++    if (!want) follow_active_pad();
+     return gamepad;
+ }
+ /* bbport (frame stats): the game's libc heap, read every 5 s from a game thread (it reads the pad)
+@@ -168,6 +215,10 @@ enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* trigge
+ typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; } Binding;
+ static Binding bindings[IN_COUNT];
+ static int bindings_ready;
++/* bbport: stick options (bbport.ini): pad_swap_sticks=1 moves with the right stick and looks with
++ * the left; pad_invert_look_x / pad_invert_look_y=1 invert the camera stick; pad_deadzone=N
++ * (percent, 0-50) ignores small stick movement (worn sticks that drift). */
++static int pad_swap_sticks, pad_invert_look_x, pad_invert_look_y, pad_deadzone;
+ 
+ static void bind_defaults(void) {
+     static const struct { int input; SDL_Scancode key; } keys[]={
+@@ -216,6 +267,14 @@ static void load_bindings(void) {
+     while (fgets(line,sizeof line,f)) {
+         const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4);
+         char *eq=strchr(line,'=');
++        if (!strncmp(line,"pad_",4) && eq) {
++            const int value=atoi(eq+1);
++            if (!strncmp(line,"pad_swap_sticks=",16)) pad_swap_sticks=value!=0;
++            else if (!strncmp(line,"pad_invert_look_x=",18)) pad_invert_look_x=value!=0;
++            else if (!strncmp(line,"pad_invert_look_y=",18)) pad_invert_look_y=value!=0;
++            else if (!strncmp(line,"pad_deadzone=",13)) pad_deadzone=value<0 ? 0 : value>50 ? 50 : value;
++            continue;
++        }
+         if ((!keyboard && !pad) || !eq) continue;
+         *eq=0;
+         int input=-1;
+@@ -296,6 +355,17 @@ static void sample_host(PadData *d) {
+         }
+         d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
+         d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
++        if (pad_deadzone) {
++            const int dz=pad_deadzone*128/100;
++            uint8_t *sticks[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
++            for (int s=0;s<4;++s) if (*sticks[s]-128<dz && 128-*sticks[s]<dz) *sticks[s]=128;
++        }
++        if (pad_swap_sticks) {
++            uint8_t t=d->left_x; d->left_x=d->right_x; d->right_x=t;
++            t=d->left_y; d->left_y=d->right_y; d->right_y=t;
++        }
++        if (pad_invert_look_x) d->right_x=(uint8_t)(255-d->right_x);
++        if (pad_invert_look_y) d->right_y=(uint8_t)(255-d->right_y);
+         if (SDL_GetNumGamepadTouchpads(g)>0) {
+             const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
+             for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
+@@ -456,13 +526,21 @@ static void touch_ids(PadData *d) {
+     else if (!since) since=d->timestamp;
+     d->touch_held_time=d->touch_count ? (uint32_t)(d->timestamp-since) : 0;
+ }
++/* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
++ * name, the button that closed the menu) stay hidden until all are released: the game would
++ * take them as a new press. From Supermedo/bloodborne_pc 1d34202 (hold_after_capture). */
++static int hold_after_capture;
+ static void sample(PadData *d) {
+     sample_host(d);
+-    if (bbgpu_overlay_captures_input()) return;
++    if (bbgpu_overlay_captures_input()) { hold_after_capture=1; return; }
+     record_sample(d);
+     read_inject();
+     replay_sample(d);
+     d->buttons|=injected.buttons;
++    if (hold_after_capture) {
++        if (d->buttons) { d->buttons=0; d->l2=d->r2=0; }
++        else hold_after_capture=0;
++    }
+     if (injected.touch_side>=0) touch_click(d,injected.touch_side);
+     else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
+     if (injected.buttons & BTN_L2) d->l2=255;
+diff --git a/src/runtime_services.c b/src/runtime_services.c
+index 5f31782..97d2b4f 100644
+--- a/src/runtime_services.c
++++ b/src/runtime_services.c
+@@ -262,10 +262,13 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
+     utf16_to_utf8(param->title,128,prompt,sizeof(prompt));
+     const char *preset=getenv("BB_IME_TEXT");
+     if (preset) { ime_complete(0,preset); return 0; }
+-    if (!bbgpu_text_input_begin(initial,prompt[0] ? prompt : "Text")) {
+-        const char *name=getenv("BB_USER_NAME");
++    /* An empty field starts with the player name (launcher) or "Hunter", so a controller alone
++     * can accept it: there is no on-screen keyboard (Supermedo/bloodborne_pc 1d34202). */
++    const char *name=getenv("BB_USER_NAME");
++    const char *start=initial[0] ? initial : name && *name ? name : "Hunter";
++    if (!bbgpu_text_input_begin(start,prompt[0] ? prompt : "Text")) {
+         ime_complete(0,name ? name : initial[0] ? initial : "Hunter");
+-    } else printf("Runtime: ImeDialog opened: type in the game window, Enter to confirm, Esc to cancel\n");
++    } else printf("Runtime: ImeDialog opened: type in the game window; Enter or Cross accepts, Esc or Circle cancels\n");
+     return 0;
+ }
+ static ABI int32_t ime_status(void) {
+diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
+index 593fed4..6cf97cf 100644
+--- a/tests/test_settings.cpp
++++ b/tests/test_settings.cpp
+@@ -84,6 +84,19 @@ int main() {
+     { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
+     BbSettings::Load();
+     assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
++    // Menu languages: the code is read and written back; the added languages translate by the
++    // English text and fall back to it; Russian keeps its own text.
++    { std::ofstream file(path); file << "menu_language=pt_BR\n"; }
++    BbSettings::Load();
++    assert(s.menu_language == BbSettings::MenuLanguage::PortugueseBrazil);
++    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Fechar");
++    assert(std::string(BbSettings::MenuText("Not in the tables", "x")) == "Not in the tables");
++    BbSettings::Save();
++    assert(Read(path).find("menu_language=pt_BR\n") != std::string::npos);
++    s.menu_language = BbSettings::MenuLanguage::Turkish;
++    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Kapat");
++    s.menu_language = BbSettings::MenuLanguage::Russian;
++    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Закрыть");
+     std::filesystem::remove(temporary);
+     std::puts("PASS: settings save keeps other keys, menu position");
+ }
 diff --git a/gpu/shim/bbport_menu_i18n.cpp b/gpu/shim/bbport_menu_i18n.cpp
 new file mode 100644
 index 0000000..16a69e0
@@ -2855,334 +3553,6 @@ index 0000000..693ca50
 +const char* MenuTranslation(MenuLanguage language, const char* english);
 +
 +} // namespace BbSettings
-diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..d4b93b1 100644
---- a/gpu/shim/bbport_overlay.cpp
-+++ b/gpu/shim/bbport_overlay.cpp
-@@ -17,7 +17,8 @@
- #include "video_core/renderer_vulkan/vk_instance.h"
- #include "video_core/renderer_vulkan/vk_scheduler.h"
- 
--// DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
-+// DejaVu Sans (Latin with Latin Extended, Greek, Cyrillic), embedded (third_party/fonts, Bitstream
-+// Vera license).
- #ifdef _WIN32
- // PE/COFF assemblers have no .hidden/.previous: the compiler embeds the file (#embed, a GCC
- // extension in C++).
-@@ -206,12 +207,15 @@ void Menu() {
-             dirty = true;
-         }
-     }
--    // Always readable, even when the rest of the menu is in Russian.
--    static const char* languages[] = {"English", "Русский"};
--    int language = s.menu_language == BbSettings::MenuLanguage::Russian ? 1 : 0;
--    if (ImGui::Combo("Language", &language, languages, 2)) {
-+    // Always readable, whatever language the rest of the menu is in: each language by its own
-+    // name, in MenuLanguage order.
-+    static const char* languages[] = {"English",  "Русский",  "Español", "Português (Brasil)",
-+                                      "Français", "Deutsch",  "Italiano", "Polski", "Türkçe"};
-+    static_assert(std::size(languages) == BbSettings::MenuLanguageCount);
-+    int language = int(s.menu_language.load());
-+    if (ImGui::Combo("Language", &language, languages, BbSettings::MenuLanguageCount)) {
-         s.menu_language =
--            language == 1 ? BbSettings::MenuLanguage::Russian : BbSettings::MenuLanguage::English;
-+            BbSettings::MenuLanguage(std::clamp(language, 0, BbSettings::MenuLanguageCount - 1));
-         BbSettings::Save();
-     }
-     ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-@@ -587,6 +591,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
-     style.GrabRounding = 4.0f;
-     style.Colors[ImGuiCol_WindowBg].w = 0.92f;
- 
-+    // No GlyphRanges: the Vulkan backend has ImGuiBackendFlags_RendererHasTextures (ImGui 1.92), so
-+    // the atlas loads each glyph of the font when first drawn (Cyrillic, ñ ç ü ß ą ł ş ğ ı, —).
-+    // Ranges would only limit that.
-     ImFontConfig font_config;
-     font_config.FontDataOwnedByAtlas = false;
-     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
-diff --git a/gpu/shim/bbport_platform.cpp b/gpu/shim/bbport_platform.cpp
-index 8f2e888..b7cd129 100644
---- a/gpu/shim/bbport_platform.cpp
-+++ b/gpu/shim/bbport_platform.cpp
-@@ -5,6 +5,7 @@
- #include <algorithm>
- #include <bit>
- #include <cstdio>
-+#include <cstdlib>
- #include <thread>
- #include <windows.h>
- #include <psapi.h>
-@@ -98,5 +99,20 @@ void MakeBackground() {
-     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
- }
- 
-+// The game runs dozens of threads at normal priority (cloth, character, Havok, job pools); on
-+// 12 or fewer hardware threads Windows gives a ready thread of equal priority a core only when
-+// another one's quantum ends (tens of ms), so a render-chain thread queued behind them delays
-+// the frame. Its idle spins are bounded (BB_GPU_SPIN_US, BB_PIPE_SPIN_US, recording: 200 us)
-+// before it sleeps, so the higher priority takes no lasting time from the game's threads.
-+void MakeCritical() {
-+    static const bool enabled = [] {
-+        const char* env = std::getenv("BB_GPU_THREAD_PRIORITY");
-+        return !(env && env[0] == '0');
-+    }();
-+    if (enabled) {
-+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-+    }
-+}
-+
- } // namespace BbThreads
- #endif
-diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..fc787ce 100644
---- a/gpu/shim/bbport_settings.cpp
-+++ b/gpu/shim/bbport_settings.cpp
-@@ -6,9 +6,11 @@
- #endif
- // SPDX-License-Identifier: GPL-2.0-or-later
- #include "bbport_settings.h"
-+#include "bbport_menu_i18n.h"
- #include "input/ini_bindings.h"
- 
- #include <algorithm>
-+#include <cctype>
- #include <cstdio>
- #include <cmath>
- #include <cstdlib>
-@@ -35,9 +37,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
-     const float f = float(std::atof(value.c_str()));
-     const int i = std::atoi(value.c_str());
-     if (key == "menu_language") {
--        if (value == "en") v.menu_language = MenuLanguage::English;
--        else if (value == "ru") v.menu_language = MenuLanguage::Russian;
--        else std::printf("Settings: unknown menu_language '%s' (expected en or ru)\n", value.c_str());
-+        bool known = false;
-+        for (int l = 0; l < MenuLanguageCount; ++l) {
-+            if (value == MenuLanguageCodes[l]) {
-+                v.menu_language = MenuLanguage(l);
-+                known = true;
-+            }
-+        }
-+        if (!known) {
-+            std::printf("Settings: unknown menu_language '%s' (expected en, ru, es, pt_BR, fr, de, it, pl "
-+                        "or tr)\n",
-+                        value.c_str());
-+        }
-     } else if (key == "upscaler") {
-         for (int u = 0; u < UpscalerCount; ++u) {
-             if (value == UpscalerName(u)) {
-@@ -138,6 +149,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
-     }
- }
- 
-+// The menu's language for the launcher's code (BB_MENU_LANGUAGE: en, ru, pt_BR...) or a locale
-+// (ru_RU.UTF-8, de_DE...): its first two letters; Portuguese only as pt_BR. Else English.
-+MenuLanguage LanguageOfLocale(const char* lang) {
-+    if (!lang || !lang[0] || !lang[1]) {
-+        return MenuLanguage::English;
-+    }
-+    const auto lower = [lang](int i) { return char(std::tolower(static_cast<unsigned char>(lang[i]))); };
-+    if (lower(0) == 'p' && lower(1) == 't') {
-+        return (lang[2] == '_' || lang[2] == '-') && lower(3) == 'b' && lower(4) == 'r'
-+                   ? MenuLanguage::PortugueseBrazil
-+                   : MenuLanguage::English;
-+    }
-+    for (int l = 0; l < MenuLanguageCount; ++l) {
-+        const char* code = MenuLanguageCodes[l];
-+        if (code[2] == '\0' && lower(0) == code[0] && lower(1) == code[1]) {
-+            return MenuLanguage(l);
-+        }
-+    }
-+    return MenuLanguage::English;
-+}
-+
- } // namespace
- 
- Values& Get() {
-@@ -146,7 +178,11 @@ Values& Get() {
- }
- 
- const char* MenuText(const char* english, const char* russian) {
--    return Get().menu_language == MenuLanguage::Russian ? russian : english;
-+    switch (const MenuLanguage language = Get().menu_language) {
-+    case MenuLanguage::English: return english;
-+    case MenuLanguage::Russian: return russian;
-+    default: return MenuTranslation(language, english);
-+    }
- }
- 
- void Load() {
-@@ -166,9 +202,7 @@ void Load() {
-                 }
-             }
-         }
--        v.menu_language = lang && (lang[0] == 'r' || lang[0] == 'R') && (lang[1] == 'u' || lang[1] == 'U')
--                              ? MenuLanguage::Russian
--                              : MenuLanguage::English;
-+        v.menu_language = LanguageOfLocale(lang);
-     }
-     if (FILE* file = std::fopen(Path(), "r")) {
-         char line[256];
-@@ -264,7 +298,7 @@ void Save() {
-         return std::string(text);
-     };
-     const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
--    put("menu_language", v.menu_language == MenuLanguage::Russian ? "ru" : "en");
-+    put("menu_language", MenuLanguageCodes[int(v.menu_language.load())]);
-     put("upscaler", UpscalerName(v.upscaler));
-     put("preset", std::to_string(v.preset.load()));
-     put("sharpen", flag(v.sharpen));
-diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..10c0f80 100644
---- a/gpu/shim/bbport_settings.h
-+++ b/gpu/shim/bbport_settings.h
-@@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
- }
- enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
- enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
--enum class MenuLanguage { English, Russian };
-+/// The menu's language, in the Language selector's order (bbport_overlay.cpp).
-+enum class MenuLanguage {
-+    English, Russian, Spanish, PortugueseBrazil, French, German, Italian, Polish, Turkish
-+};
-+/// menu_language in bbport.ini, by MenuLanguage; the launcher's BB_MENU_LANGUAGE uses the same codes.
-+inline constexpr const char* MenuLanguageCodes[] = {"en", "ru", "es", "pt_BR", "fr", "de", "it", "pl", "tr"};
-+inline constexpr int MenuLanguageCount = int(sizeof(MenuLanguageCodes) / sizeof(MenuLanguageCodes[0]));
-+static_assert(MenuLanguageCount == int(MenuLanguage::Turkish) + 1);
- 
- /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
- /// menu label, default (the game's own behaviour).
-@@ -103,7 +110,8 @@ struct Values {
- };
- 
- Values& Get();
--/// Localized overlay text; the Language selector itself stays in English.
-+/// Localized overlay text; the Language selector itself stays in English. The other languages
-+/// look the English text up (bbport_menu_i18n.cpp) and show it when they have no translation.
- const char* MenuText(const char* english, const char* russian);
- 
- /// Reads the file, then the environment overrides. Called once at start.
-diff --git a/gpu/shim/bbport_threads.h b/gpu/shim/bbport_threads.h
-index 50d0422..d856520 100644
---- a/gpu/shim/bbport_threads.h
-+++ b/gpu/shim/bbport_threads.h
-@@ -19,7 +19,12 @@ namespace BbThreads {
- // Windows (bbport_platform.cpp): the process affinity mask; THREAD_PRIORITY_IDLE.
- unsigned Available();
- void MakeBackground();
-+/// The serial render chain (GPU command thread, draw recording, Vulkan recording) runs above
-+/// the game's own threads (THREAD_PRIORITY_ABOVE_NORMAL; BB_GPU_THREAD_PRIORITY=0: normal).
-+void MakeCritical();
- #else
-+/// Linux: unchanged (normal priority; raising it needs privileges).
-+inline void MakeCritical() {}
- /// Hardware threads available to the process.
- inline unsigned Available() {
-     cpu_set_t set;
-diff --git a/gpu/shim/core/emulator_settings.h b/gpu/shim/core/emulator_settings.h
-index f176cc1..bcf4185 100644
---- a/gpu/shim/core/emulator_settings.h
-+++ b/gpu/shim/core/emulator_settings.h
-@@ -36,12 +36,8 @@ public:
-     u32 GetVblankFrequency() {
-         static const u32 value = [] {
-             const long hz = Number("BB_VBLANK_HZ", 60);
--#ifdef _WIN32
--            // Direct runtime launches must be safe too, even with legacy uncapped env vars.
--            return hz == 30 || hz == 60 || hz == 90 ? u32(hz) : 60u;
--#else
--            return hz > 0 ? u32(hz) : 480u;
--#endif
-+            // Bloodborne PC: Windows runs uncapped too (0 or above 120: 480 Hz), as on Linux.
-+            return hz > 0 && hz <= 120 ? u32(hz) : 480u;
-         }();
-         return value;
-     }
-@@ -49,24 +45,17 @@ public:
-     bool IsUncappedVblank() {
-         static const bool value = [] {
-             const long hz = Number("BB_VBLANK_HZ", 60);
--#ifdef _WIN32
--            (void)hz;
--            return false;
--#else
-             return hz <= 0 || hz > 120;
--#endif
-         }();
-         return value;
-     }
-     /// Frames per second the present thread lets through; 0 = no limit (BB_FPS_LIMIT).
-     u32 GetFrameLimit() {
-         static const u32 value = [] {
--#ifdef _WIN32
--            const long fps = Number("BB_FPS_LIMIT", GetInstance()->GetVblankFrequency());
--            return fps == 30 || fps == 60 || fps == 90 ? u32(fps) : 60u;
--#else
--            return u32(std::max(0L, Number("BB_FPS_LIMIT", 0)));
--#endif
-+            // Bloodborne PC: any limit the launcher asks for (0 = none); without one, the fixed
-+            // presets still limit to their own rate.
-+            const u32 vblank = GetInstance()->GetVblankFrequency();
-+            return u32(std::max(0L, Number("BB_FPS_LIMIT", vblank <= 120 ? long(vblank) : 0L)));
-         }();
-         return value;
-     }
-diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
-index f475c39..8b574fb 100644
---- a/gpu/shim/window.cpp
-+++ b/gpu/shim/window.cpp
-@@ -169,6 +169,18 @@ bool WindowSDL::PollEvents() {
-             UpdateTextTitle();
-             continue;
-         }
-+        // The controller finishes the text dialog too: Cross (South) accepts, Circle (East)
-+        // cancels. From Supermedo/bloodborne_pc 1d34202.
-+        if (text_active && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
-+            (event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ||
-+             event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)) {
-+            std::scoped_lock lock{text_mutex};
-+            text_state = event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ? 1 : 2;
-+            text_active = false;
-+            SDL_StopTextInput(window);
-+            UpdateTextTitle();
-+            continue;
-+        }
-         if (BbOverlay::HandleEvent(event)) {
-             continue;
-         }
-diff --git a/src/probe.c b/src/probe.c
-index b0e7c32..b926998 100644
---- a/src/probe.c
-+++ b/src/probe.c
-@@ -8,6 +8,7 @@
- #include <cpuid.h>
- #include "runtime.h"
- #include "gpu/bbgpu.h"
-+#include "respawn_patch.h"
- #if !defined(__x86_64__) || !defined(__GNUC__)
- #error This prototype requires x86-64 GCC or Clang (including MinGW).
- #endif
-@@ -903,6 +904,20 @@ int main(int argc, char **argv) {
-         memcpy(image + relocs[i].target, &value, 8);
-     }
-     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
-+    /* AwesomeObserver 149972b: no 12-second minimum loading time after death. */
-+    if (!cpu_only) {
-+        const char *respawn_fix = getenv("BB_RESPAWN_DELAY_FIX");
-+        if (respawn_fix && !strcmp(respawn_fix, "0")) {
-+            puts("Respawn loading: original minimum delay requested (BB_RESPAWN_DELAY_FIX=0)");
-+        } else {
-+            int patched = bb_patch_respawn_delay(image, (size_t)size);
-+            if (patched == BB_RESPAWN_APPLIED || patched == BB_RESPAWN_ALREADY_APPLIED)
-+                printf("Respawn loading: 12-second minimum delay removed%s; readiness checks preserved\n",
-+                       patched == BB_RESPAWN_ALREADY_APPLIED ? " (already patched)" : "");
-+            else
-+                puts("Respawn loading: unsupported or modified instructions; minimum-delay fix skipped");
-+        }
-+    }
- #ifdef _WIN32
-     printf("Guest thread pointer reads: %" PRIu64 " use TEB TLS slot %u\n", patch_tls_reads(segments, ns), runtime_win_tls_slot());
- #endif
 diff --git a/src/respawn_patch.h b/src/respawn_patch.h
 new file mode 100644
 index 0000000..c73a186
@@ -3242,245 +3612,3 @@ index 0000000..c73a186
 +}
 +
 +#endif
-diff --git a/src/runtime_host.c b/src/runtime_host.c
-index 73f3762..9baefdd 100644
---- a/src/runtime_host.c
-+++ b/src/runtime_host.c
-@@ -76,19 +76,22 @@ uint64_t host_realtime_ns(void) {
-     return (ticks - UINT64_C(116444736000000000)) * 100;
- }
- static __thread HANDLE sleep_timer;
--/* High-resolution waitable timers (Windows 10 1803+) wake within ~0.5 ms; the rest of a
-- * short wait is spun, so frame pacing and audio deadlines stay precise. */
--void host_sleep_until_ns(uint64_t deadline) {
--    enum { SPIN_NS = 600000 };
-+static __thread int sleep_timer_high_resolution;
-+enum { PRECISE_SPIN_NS = 600000 };
-+/* High-resolution waitable timers (Windows 10 1803+) wake within ~0.5 ms; the last spin_ns of
-+ * a wait is spun (all of it without such a timer). */
-+static void sleep_until_spinning(uint64_t deadline, uint64_t spin_ns) {
-     uint64_t now = host_monotonic_ns();
-     if (now >= deadline) return;
--    if (deadline - now > SPIN_NS) {
--        if (!sleep_timer) {
--            sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
--            if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
--        }
-+    if (!sleep_timer) {
-+        sleep_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-+        sleep_timer_high_resolution = sleep_timer != NULL;
-+        if (!sleep_timer) sleep_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
-+    }
-+    if (!sleep_timer_high_resolution && spin_ns < PRECISE_SPIN_NS) spin_ns = PRECISE_SPIN_NS;
-+    if (deadline - now > spin_ns) {
-         LARGE_INTEGER due;
--        due.QuadPart = -(LONGLONG)((deadline - now - SPIN_NS) / 100);
-+        due.QuadPart = -(LONGLONG)((deadline - now - spin_ns) / 100);
-         if (sleep_timer && due.QuadPart < 0 && SetWaitableTimer(sleep_timer, &due, 0, NULL, NULL, FALSE))
-             WaitForSingleObject(sleep_timer, INFINITE);
-         else
-@@ -96,9 +99,26 @@ void host_sleep_until_ns(uint64_t deadline) {
-     }
-     while (host_monotonic_ns() < deadline) YieldProcessor();
- }
-+/* Frame pacing and audio deadlines: precise. */
-+void host_sleep_until_ns(uint64_t deadline) { sleep_until_spinning(deadline, PRECISE_SPIN_NS); }
-+/* The game's own sleeps (sceKernelUsleep, nanosleep: ~20-26 per frame, ~4 ms each in Central
-+ * Yharnam) only need to last at least as long as asked: a shorter spin tail
-+ * (BB_SLEEP_SPIN_US, default 200; 600 as before) leaves ~0.4 ms of a core per sleep to the
-+ * render threads. Waking a little later than asked is within what a sleep promises. */
-+static uint64_t guest_sleep_spin_ns(void) {
-+    static uint64_t spin = UINT64_MAX;
-+    uint64_t value = __atomic_load_n(&spin, __ATOMIC_RELAXED);
-+    if (value == UINT64_MAX) {
-+        const char *env = getenv("BB_SLEEP_SPIN_US");
-+        value = env && env[0] ? strtoull(env, NULL, 10) * 1000 : 200000;
-+        if (value > PRECISE_SPIN_NS) value = PRECISE_SPIN_NS;
-+        __atomic_store_n(&spin, value, __ATOMIC_RELAXED);
-+    }
-+    return value;
-+}
- void host_sleep_ns(uint64_t ns) {
-     if (!ns) { SwitchToThread(); return; }
--    host_sleep_until_ns(host_monotonic_ns() + ns);
-+    sleep_until_spinning(host_monotonic_ns() + ns, guest_sleep_spin_ns());
- }
- #else
- #include <pthread.h>
-diff --git a/src/runtime_pad.c b/src/runtime_pad.c
-index fac0ac7..96c326f 100644
---- a/src/runtime_pad.c
-+++ b/src/runtime_pad.c
-@@ -86,6 +86,52 @@ static int is_preferred(SDL_JoystickID id, const char *want) {
-     const char *name=SDL_GetGamepadNameForID(id);
-     return !SDL_strcasecmp(guid,want) || (name && SDL_strcasestr(name,want));
- }
-+/* bbport: several gamepads at once (also one pad behind a 2.4 GHz receiver that shows as two):
-+ * without a chosen one, the pad being used takes over, checked five times a second. */
-+#define MAX_OTHER_PADS 4
-+static SDL_Gamepad *other_pads[MAX_OTHER_PADS];
-+static SDL_JoystickID other_pad_ids[MAX_OTHER_PADS];
-+static int pad_active(SDL_Gamepad *p) {
-+    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT;++b) if (SDL_GetGamepadButton(p,(SDL_GamepadButton)b)) return 1;
-+    for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a) {
-+        const int v=SDL_GetGamepadAxis(p,(SDL_GamepadAxis)a);
-+        if (v>20000 || v<-20000) return 1;
-+    }
-+    return 0;
-+}
-+static void follow_active_pad(void) {
-+    static uint64_t last;
-+    const uint64_t now=now_us();
-+    if (now-last<200000) return;
-+    last=now;
-+    for (int s=0;s<MAX_OTHER_PADS;++s)
-+        if (other_pads[s] && !SDL_GamepadConnected(other_pads[s])) { SDL_CloseGamepad(other_pads[s]); other_pads[s]=NULL; }
-+    int count=0;
-+    SDL_JoystickID *ids=SDL_GetGamepads(&count);
-+    if (!ids) return;
-+    for (int i=0;count>1 && i<count;++i) {
-+        if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue;
-+        int slot=-1, free_slot=-1;
-+        for (int s=0;s<MAX_OTHER_PADS;++s) {
-+            if (other_pads[s] && other_pad_ids[s]==ids[i]) slot=s;
-+            else if (!other_pads[s] && free_slot<0) free_slot=s;
-+        }
-+        if (slot<0 && free_slot>=0 && (other_pads[free_slot]=SDL_OpenGamepad(ids[i]))) {
-+            other_pad_ids[free_slot]=ids[i];
-+            slot=free_slot;
-+        }
-+        if (slot>=0 && pad_active(other_pads[slot])) {
-+            SDL_Gamepad *previous=gamepad;
-+            gamepad=other_pads[slot];
-+            other_pads[slot]=previous;
-+            other_pad_ids[slot]=previous ? SDL_GetGamepadID(previous) : 0;
-+            printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(gamepad));
-+            break;
-+        }
-+    }
-+    SDL_free(ids);
-+}
-+
- /* The chosen gamepad, else the first while it is not connected (checked again every second, it
-  * is taken as soon as it connects); called under lock. */
- static SDL_Gamepad *current_gamepad(void) {
-@@ -117,6 +163,7 @@ static SDL_Gamepad *current_gamepad(void) {
-         }
-         SDL_free(ids);
-     }
-+    if (!want) follow_active_pad();
-     return gamepad;
- }
- /* bbport (frame stats): the game's libc heap, read every 5 s from a game thread (it reads the pad)
-@@ -168,6 +215,10 @@ enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* trigge
- typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; } Binding;
- static Binding bindings[IN_COUNT];
- static int bindings_ready;
-+/* bbport: stick options (bbport.ini): pad_swap_sticks=1 moves with the right stick and looks with
-+ * the left; pad_invert_look_x / pad_invert_look_y=1 invert the camera stick; pad_deadzone=N
-+ * (percent, 0-50) ignores small stick movement (worn sticks that drift). */
-+static int pad_swap_sticks, pad_invert_look_x, pad_invert_look_y, pad_deadzone;
- 
- static void bind_defaults(void) {
-     static const struct { int input; SDL_Scancode key; } keys[]={
-@@ -216,6 +267,14 @@ static void load_bindings(void) {
-     while (fgets(line,sizeof line,f)) {
-         const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4);
-         char *eq=strchr(line,'=');
-+        if (!strncmp(line,"pad_",4) && eq) {
-+            const int value=atoi(eq+1);
-+            if (!strncmp(line,"pad_swap_sticks=",16)) pad_swap_sticks=value!=0;
-+            else if (!strncmp(line,"pad_invert_look_x=",18)) pad_invert_look_x=value!=0;
-+            else if (!strncmp(line,"pad_invert_look_y=",18)) pad_invert_look_y=value!=0;
-+            else if (!strncmp(line,"pad_deadzone=",13)) pad_deadzone=value<0 ? 0 : value>50 ? 50 : value;
-+            continue;
-+        }
-         if ((!keyboard && !pad) || !eq) continue;
-         *eq=0;
-         int input=-1;
-@@ -296,6 +355,17 @@ static void sample_host(PadData *d) {
-         }
-         d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
-         d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
-+        if (pad_deadzone) {
-+            const int dz=pad_deadzone*128/100;
-+            uint8_t *sticks[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
-+            for (int s=0;s<4;++s) if (*sticks[s]-128<dz && 128-*sticks[s]<dz) *sticks[s]=128;
-+        }
-+        if (pad_swap_sticks) {
-+            uint8_t t=d->left_x; d->left_x=d->right_x; d->right_x=t;
-+            t=d->left_y; d->left_y=d->right_y; d->right_y=t;
-+        }
-+        if (pad_invert_look_x) d->right_x=(uint8_t)(255-d->right_x);
-+        if (pad_invert_look_y) d->right_y=(uint8_t)(255-d->right_y);
-         if (SDL_GetNumGamepadTouchpads(g)>0) {
-             const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
-             for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
-@@ -456,13 +526,21 @@ static void touch_ids(PadData *d) {
-     else if (!since) since=d->timestamp;
-     d->touch_held_time=d->touch_count ? (uint32_t)(d->timestamp-since) : 0;
- }
-+/* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
-+ * name, the button that closed the menu) stay hidden until all are released: the game would
-+ * take them as a new press. From Supermedo/bloodborne_pc 1d34202 (hold_after_capture). */
-+static int hold_after_capture;
- static void sample(PadData *d) {
-     sample_host(d);
--    if (bbgpu_overlay_captures_input()) return;
-+    if (bbgpu_overlay_captures_input()) { hold_after_capture=1; return; }
-     record_sample(d);
-     read_inject();
-     replay_sample(d);
-     d->buttons|=injected.buttons;
-+    if (hold_after_capture) {
-+        if (d->buttons) { d->buttons=0; d->l2=d->r2=0; }
-+        else hold_after_capture=0;
-+    }
-     if (injected.touch_side>=0) touch_click(d,injected.touch_side);
-     else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
-     if (injected.buttons & BTN_L2) d->l2=255;
-diff --git a/src/runtime_services.c b/src/runtime_services.c
-index 5f31782..97d2b4f 100644
---- a/src/runtime_services.c
-+++ b/src/runtime_services.c
-@@ -262,10 +262,13 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
-     utf16_to_utf8(param->title,128,prompt,sizeof(prompt));
-     const char *preset=getenv("BB_IME_TEXT");
-     if (preset) { ime_complete(0,preset); return 0; }
--    if (!bbgpu_text_input_begin(initial,prompt[0] ? prompt : "Text")) {
--        const char *name=getenv("BB_USER_NAME");
-+    /* An empty field starts with the player name (launcher) or "Hunter", so a controller alone
-+     * can accept it: there is no on-screen keyboard (Supermedo/bloodborne_pc 1d34202). */
-+    const char *name=getenv("BB_USER_NAME");
-+    const char *start=initial[0] ? initial : name && *name ? name : "Hunter";
-+    if (!bbgpu_text_input_begin(start,prompt[0] ? prompt : "Text")) {
-         ime_complete(0,name ? name : initial[0] ? initial : "Hunter");
--    } else printf("Runtime: ImeDialog opened: type in the game window, Enter to confirm, Esc to cancel\n");
-+    } else printf("Runtime: ImeDialog opened: type in the game window; Enter or Cross accepts, Esc or Circle cancels\n");
-     return 0;
- }
- static ABI int32_t ime_status(void) {
-diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
-index 593fed4..6cf97cf 100644
---- a/tests/test_settings.cpp
-+++ b/tests/test_settings.cpp
-@@ -84,6 +84,19 @@ int main() {
-     { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
-     BbSettings::Load();
-     assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
-+    // Menu languages: the code is read and written back; the added languages translate by the
-+    // English text and fall back to it; Russian keeps its own text.
-+    { std::ofstream file(path); file << "menu_language=pt_BR\n"; }
-+    BbSettings::Load();
-+    assert(s.menu_language == BbSettings::MenuLanguage::PortugueseBrazil);
-+    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Fechar");
-+    assert(std::string(BbSettings::MenuText("Not in the tables", "x")) == "Not in the tables");
-+    BbSettings::Save();
-+    assert(Read(path).find("menu_language=pt_BR\n") != std::string::npos);
-+    s.menu_language = BbSettings::MenuLanguage::Turkish;
-+    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Kapat");
-+    s.menu_language = BbSettings::MenuLanguage::Russian;
-+    assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Закрыть");
-     std::filesystem::remove(temporary);
-     std::puts("PASS: settings save keeps other keys, menu position");
- }

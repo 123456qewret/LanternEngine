@@ -10,6 +10,7 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 |---|---|
 | 120 / 144 / uncapped FPS on Windows | `BB_FPS_LIMIT`, `BB_VBLANK_HZ` |
 | VRAM cleanup: GPU-drawn textures written back and freed under memory pressure | `BB_IMAGE_WRITEBACK_GC=0` off |
+| GPU hang guard: textures in use are never freed, deleted ones kept a little longer | `BB_GC_RECENT_FRAMES=0`, `BB_IMAGE_FREE_DELAY_FRAMES=0` off |
 | Texture memory sized to the GPU (80% of its budget on discrete cards) | `BB_GC_PRESSURE_PERCENT=0` off |
 | Precise frame pacing | `BB_PRECISE_PACING=0` off |
 | Render threads at above-normal priority | `BB_GPU_THREAD_PRIORITY=0` off |

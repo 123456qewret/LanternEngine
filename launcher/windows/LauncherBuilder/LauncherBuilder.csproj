@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Build Launcher</AssemblyName>
     <RootNamespace>BloodborneLauncher.Builder</RootNamespace>
-    <Version>0.9.6</Version>
+    <Version>0.9.7</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 

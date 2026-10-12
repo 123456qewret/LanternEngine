@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -9,7 +9,7 @@
     <AssemblyName>Bloodborne Launcher</AssemblyName>
     <RootNamespace>BloodborneLauncher</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.9.6</Version>
+    <Version>0.9.7</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
