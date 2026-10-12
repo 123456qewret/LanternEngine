@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -223,7 +223,7 @@ namespace BloodborneLauncher
         public async Task UpdateEngineAsync()
         {
             var ws = Workspace.Current;
-            var release = ws.Latest ?? await Updater.LatestAsync();
+            var release = ws.Latest ?? await Updater.LatestAsync(Updater.BetaChannel(ws.Settings));
             if (release?.ZipUrl == null)
             {
                 Prompt.Tell("Update engine", $"No package is published yet. See {Updater.ReleasesPage}");
@@ -243,7 +243,7 @@ namespace BloodborneLauncher
             var notes = release.Notes.Trim();
             if (notes.Length > 1200) notes = notes[..1200] + "…";
             var size = package ? release.ZipSize : release.ExeSize;
-            var body = $"You have v{Updater.Current}. " +
+            var body = $"You have {Updater.CurrentLabel}. " +
                        (package
                            ? $"This update includes a new engine, so the whole package is downloaded ({size / 1048576} MB) and updated in place."
                            : $"The launcher downloads {release.Tag} ({size / 1048576} MB), replaces itself and restarts.") +

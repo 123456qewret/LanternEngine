@@ -88,6 +88,18 @@ namespace BloodborneLauncher.Views
                 _updateNow,
                 IconButton(SymbolRegular.Open24, "Open the releases page", (_, _) =>
                     Process.Start(new ProcessStartInfo(Updater.ReleasesPage) { UseShellExecute = true }))), out _updateHint));
+            ComboRow(SymbolRegular.Branch24, "Update channel",
+                "Stable: releases that have been tested. Beta: every change as soon as it is done, before it is tested",
+                new[] { new Choice("Stable", "stable"), new Choice("Beta", "beta") },
+                () => Updater.BetaChannel(S) ? "beta" : "stable",
+                v =>
+                {
+                    if (v == (Updater.BetaChannel(S) ? "beta" : "stable")) return;
+                    S.Set("update_channel", v);
+                    Ws.SaveSoon();
+                    Ws.Log(v == "beta" ? "Update channel: beta." : "Update channel: stable.", LogLevel.Step);
+                    _ = Ws.CheckForUpdatesAsync(quiet: false);
+                });
             SettingToggle(SymbolRegular.Alert24, "Check for updates at start", $"Looks at github.com/{Updater.Repository}/releases", "check_updates");
             Ws.UpdateStateChanged += UpdateUpdates;
             UpdateUpdates();
@@ -125,10 +137,11 @@ namespace BloodborneLauncher.Views
             var latest = Ws.Latest;
             _updateNow.Visibility = update != null ? Visibility.Visible : Visibility.Collapsed;
             SetHint(_updateHint,
-                update != null ? $"{update.Name} is available (you have v{Updater.Current})"
-                : Ws.CheckedAt == null ? $"You have v{Updater.Current}"
-                : latest == null ? $"You have v{Updater.Current}; no release is published yet"
-                : $"You have v{Updater.Current}, the latest ({latest.Tag})");
+                update != null ? $"{update.Name} is available (you have {Updater.CurrentLabel})" +
+                                 (update.IsNewerThan(Updater.Current, Updater.CurrentBeta) ? "" : ": back to stable")
+                : Ws.CheckedAt == null ? $"You have {Updater.CurrentLabel}"
+                : latest == null ? $"You have {Updater.CurrentLabel}; no release is published yet"
+                : $"You have {Updater.CurrentLabel}, the latest ({latest.Tag})");
         }
 
         /// <summary>Restarts into the chosen layout; false if the player cancelled.</summary>

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
@@ -16,6 +16,9 @@ namespace BloodborneLauncher.Core
     /// package has no package.json yet), the whole package is downloaded and copied over this one,
     /// keeping the player's settings, saves, mods and profiles. A running exe cannot be overwritten
     /// but can be renamed, so the launcher moves itself aside and is removed on the next start.
+    ///
+    /// Two channels: stable follows GitHub's latest release; beta also takes pre-releases, tagged
+    /// v&lt;version&gt;-beta.&lt;n&gt;. A beta comes before the stable release of the same version.
     /// </summary>
     public static class Updater
     {
@@ -31,8 +34,11 @@ namespace BloodborneLauncher.Core
         /// <summary>Files and folders of the player's that a package update never touches.</summary>
         private static readonly string[] Kept = { "bbport.ini", "mods.json", "patches.json", "user", "mods", "logs", "network", "engine-assets" };
 
-        public sealed record Release(Version Version, string Tag, string Name, string Notes, string Page,
-            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize);
+        public sealed record Release(Version Version, int Beta, string Tag, string Name, string Notes, string Page,
+            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize)
+        {
+            public bool IsNewerThan(Version version, int beta) => Compare(Version, Beta, version, beta) > 0;
+        }
 
         public static Version Current
         {
@@ -41,6 +47,34 @@ namespace BloodborneLauncher.Core
                 var v = typeof(Updater).Assembly.GetName().Version ?? new Version(0, 0, 0);
                 return new Version(v.Major, v.Minor, Math.Max(0, v.Build));
             }
+        }
+
+        /// <summary>The beta number of this build (from its informational version, "0.9.7-beta.2"), 0 when stable.</summary>
+        public static int CurrentBeta { get; } =
+            TryVersion(typeof(Updater).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "", out _, out var beta)
+                ? beta
+                : 0;
+
+        /// <summary>This build as players see it: "v0.9.6" or "v0.9.7 beta 2".</summary>
+        public static string CurrentLabel => Label(Current, CurrentBeta);
+
+        /// <summary>The channel the player chose; until they choose, a beta build stays on beta.</summary>
+        public static bool BetaChannel(LauncherSettings s) => s.Str("update_channel") switch
+        {
+            "beta" => true,
+            "stable" => false,
+            _ => CurrentBeta > 0,
+        };
+
+        public static string Label(Version version, int beta) => beta > 0 ? $"v{version} beta {beta}" : $"v{version}";
+
+        /// <summary>Orders builds: by version, and a version's betas before its stable release.</summary>
+        public static int Compare(Version a, int betaA, Version b, int betaB)
+        {
+            var byVersion = a.CompareTo(b);
+            if (byVersion != 0) return byVersion;
+            return (betaA == 0 ? int.MaxValue : betaA).CompareTo(betaB == 0 ? int.MaxValue : betaB);
         }
 
         /// <summary>The package this launcher runs in (it ships inside it), or null when it runs on its own.</summary>
@@ -67,18 +101,35 @@ namespace BloodborneLauncher.Core
         /// <summary>The package needs the engine this launcher is made for.</summary>
         public static bool EngineOutdated => OwnPackage != null && LocalEngine() != EngineId;
 
-        /// <summary>The latest published release, or null when there is none (or no network).</summary>
-        public static async Task<Release?> LatestAsync()
+        /// <summary>The latest release on the channel, or null when there is none (or no network).
+        /// Stable: GitHub's latest release. Beta: the newest of all releases, pre-releases included.</summary>
+        public static async Task<Release?> LatestAsync(bool beta = false)
         {
             using var http = Client(TimeSpan.FromSeconds(10));
-            using var response = await http.GetAsync($"https://api.github.com/repos/{Repository}/releases/latest");
+            using var response = await http.GetAsync(beta
+                ? $"https://api.github.com/repos/{Repository}/releases?per_page=30"
+                : $"https://api.github.com/repos/{Repository}/releases/latest");
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 return null;
             response.EnsureSuccessStatusCode();
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            var root = doc.RootElement;
+            if (!beta)
+                return Parse(doc.RootElement);
+
+            Release? newest = null;
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                if (item.TryGetProperty("draft", out var draft) && draft.GetBoolean()) continue;
+                if (Parse(item) is { } release && (newest == null || release.IsNewerThan(newest.Version, newest.Beta)))
+                    newest = release;
+            }
+            return newest;
+        }
+
+        private static Release? Parse(JsonElement root)
+        {
             var tag = root.GetProperty("tag_name").GetString() ?? "";
-            if (!TryVersion(tag, out var version))
+            if (!TryVersion(tag, out var version, out var betaNumber))
                 return null;
 
             string? exe = null, zip = null, package = null;
@@ -96,15 +147,25 @@ namespace BloodborneLauncher.Core
                 else if (name.Equals(PackageFile, StringComparison.OrdinalIgnoreCase))
                     package = url;
             }
-            return new Release(version, tag,
+            return new Release(version, betaNumber, tag,
                 root.TryGetProperty("name", out var n) && n.GetString() is { Length: > 0 } title ? title : tag,
                 root.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "",
                 root.GetProperty("html_url").GetString() ?? ReleasesPage, exe, zip, package, exeSize, zipSize);
         }
 
-        public static bool TryVersion(string tag, out Version version)
+        /// <summary>Reads "v0.9.7", "0.9.7-beta.2" or "0.9.7-beta2+abc123"; <paramref name="beta"/> is 0 for a stable build.</summary>
+        public static bool TryVersion(string tag, out Version version, out int beta)
         {
             var text = tag.Trim().TrimStart('v', 'V');
+            var plus = text.IndexOf('+');
+            if (plus > 0) text = text[..plus];
+            beta = 0;
+            var marker = text.IndexOf("-beta", StringComparison.OrdinalIgnoreCase);
+            if (marker > 0)
+            {
+                var digits = new string(text[(marker + 5)..].Where(char.IsDigit).ToArray());
+                beta = int.TryParse(digits, out var n) && n > 0 ? n : 1;
+            }
             var cut = text.IndexOfAny(new[] { '-', '+', ' ' });
             if (cut > 0) text = text[..cut];
             if (Version.TryParse(text.Contains('.') ? text : text + ".0", out var v))

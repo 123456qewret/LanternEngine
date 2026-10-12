@@ -54,20 +54,20 @@ namespace BloodborneLauncher.Views
             // Engine features from 0.9.4, each with a switch, as IFreemz's "Bloodborne - Experimental".
             Group("Experimental");
             SettingToggle(SymbolRegular.Broom24, "VRAM cleanup",
-                "Frees video memory held by textures the GPU drew, so long sessions don't fill up VRAM and slow down. On by default",
+                "Frees video memory held by textures the GPU drew, so long sessions don't fill up VRAM and slow down. Recommended: on",
                 "exp_vram_cleanup");
             SettingToggle(SymbolRegular.Timer24, "Precise frame pacing",
-                "A high-resolution timer and even spacing between frames: steadier frame times and less VRR flicker. Uses a little CPU",
-                "exp_precise_pacing");
+                "A high-resolution timer and even spacing between frames: steadier frame times and less VRR flicker. Uses a little CPU. Off by default while it is tested",
+                "exp_frame_pacing");
             SettingToggle(SymbolRegular.Storage24, "Use more VRAM for textures",
-                "Keeps textures in video memory up to 80% of the card instead of about 40%, so they aren't thrown out and loaded again (the cause of most stutters on 8 GB cards). On by default",
-                "exp_texture_budget");
+                "Keeps textures in video memory up to 80% of the card instead of about 40%, so they aren't thrown out and loaded again (the cause of most stutters on 8 GB cards). Off by default while it is tested",
+                "exp_vram_budget");
             SettingToggle(SymbolRegular.TopSpeed24, "Graphics threads first",
-                "Runs the engine's graphics threads at a higher CPU priority than the game's other threads, so a frame isn't held up behind them. On by default",
-                "exp_gpu_priority");
+                "Runs the engine's graphics threads at a higher CPU priority than the game's other threads, so a frame isn't held up behind them. Off by default while it is tested",
+                "exp_thread_priority");
             SettingToggle(SymbolRegular.Sleep24, "Shorter sleep spin",
-                "The game's many short sleeps busy-wait less at the end (0.2 ms instead of 0.6 ms), leaving that CPU time to the graphics threads. On by default",
-                "exp_short_spin");
+                "The game's many short sleeps busy-wait less at the end (0.2 ms instead of 0.6 ms), leaving that CPU time to the graphics threads. Off by default while it is tested",
+                "exp_sleep_spin");
             SettingToggle(SymbolRegular.FlashFlow24, "Background shader compiling",
                 "New shaders compile on helper threads instead of freezing the frame: much shorter hitches when you reach a new area. On by default",
                 "exp_async_pipelines");

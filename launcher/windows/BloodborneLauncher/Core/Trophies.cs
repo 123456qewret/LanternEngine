@@ -98,6 +98,35 @@ namespace BloodborneLauncher.Core
             Poll(readRunLog: true);
         }
 
+        /// <summary>
+        /// Starts trophy progress over: trophies.log is kept as a dated backup and emptied, and what
+        /// last_run.log already holds is treated as read, so old unlocks don't come back. Returns the
+        /// backup's path, or null when there was nothing to reset.
+        /// </summary>
+        public string? Reset()
+        {
+            string? backup = null;
+            if (File.Exists(LogPath))
+            {
+                backup = Path.Combine(_userDir, $"trophies.{DateTime.Now:yyyyMMdd-HHmmss}.log.bak");
+                File.Move(LogPath, backup);
+            }
+            Unlocked.Clear();
+            _logStamp = Stamp(LogPath);
+            try
+            {
+                var run = File.Exists(RunLogPath) ? File.ReadAllBytes(RunLogPath) : Array.Empty<byte>();
+                _runOffset = run.Length;
+                _runTail = run[Math.Max(0, run.Length - 64)..];
+                _runStamp = Stamp(RunLogPath);
+            }
+            catch
+            {
+                // Unreadable run log: it is read again from the start, as on any other start.
+            }
+            return backup;
+        }
+
         // ---------------------------------------------------------------- progress
 
         public int Count => Unlocked.Keys.Count(ById.ContainsKey);

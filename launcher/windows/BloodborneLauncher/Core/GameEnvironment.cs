@@ -10,8 +10,13 @@ namespace BloodborneLauncher.Core
     {
         public static string GameDir(LauncherSettings s) => Paths.Expand(s.Str("game_dir"));
 
-        public static string UserDir(LauncherSettings s) =>
+        /// <summary>The saves folder the player chose (or the package's user folder): the Main profile.</summary>
+        public static string SavesRoot(LauncherSettings s) =>
             s.Str("user_dir") is { Length: > 0 } dir ? Paths.Expand(dir) : Path.Combine(Paths.DataDir, "user");
+
+        /// <summary>Where the game keeps saves and trophies: the current player profile's folder.</summary>
+        public static string UserDir(LauncherSettings s) =>
+            PlayerProfiles.Folder(s, PlayerProfiles.Current(s));
 
         public static string ModsDir(LauncherSettings s) =>
             s.Str("mods_dir") is { Length: > 0 } dir ? Paths.Expand(dir) : Path.Combine(Paths.DataDir, "mods");
@@ -51,7 +56,7 @@ namespace BloodborneLauncher.Core
             if (s.Bool("audio_stats")) env["BB_AUDIO_STATS"] = "1";
             if (s.Bool("fsr4_balanced")) env["BB_FSR4_BALANCED"] = "1";
             // Experimental engine features: on by default, each can be turned off.
-            env["BB_PRECISE_PACING"] = s.Bool("exp_precise_pacing") ? "1" : "0";
+            env["BB_PRECISE_PACING"] = s.Bool("exp_frame_pacing") ? "1" : "0";
             env["BB_IMAGE_WRITEBACK_GC"] = s.Bool("exp_vram_cleanup") ? "1" : "0";
             // Gamepads (SDL3 reads its hints from the environment): DualShock 3 through SDL's own
             // driver (with DsHidMini or Sony's sixaxis driver installed), and the community
@@ -60,9 +65,9 @@ namespace BloodborneLauncher.Core
                 env[key] = value;
 
             // Off: the engine's earlier behaviour; on: its default (left unset).
-            if (!s.Bool("exp_texture_budget")) { env["BB_GC_PRESSURE_PERCENT"] = "0"; env["BB_GC_PRESSURE_SECONDS"] = "0"; }
-            if (!s.Bool("exp_gpu_priority")) env["BB_GPU_THREAD_PRIORITY"] = "0";
-            if (!s.Bool("exp_short_spin")) env["BB_SLEEP_SPIN_US"] = "600";
+            if (!s.Bool("exp_vram_budget")) { env["BB_GC_PRESSURE_PERCENT"] = "0"; env["BB_GC_PRESSURE_SECONDS"] = "0"; }
+            if (!s.Bool("exp_thread_priority")) env["BB_GPU_THREAD_PRIORITY"] = "0";
+            if (!s.Bool("exp_sleep_spin")) env["BB_SLEEP_SPIN_US"] = "600";
             if (!s.Bool("exp_async_pipelines")) env["BB_ASYNC_PIPELINES"] = "0";
             if (s.Bool("section_stats")) env["BB_SECTIONS"] = "1";
             // The account password never goes to bbport.ini; the engine takes it from here.

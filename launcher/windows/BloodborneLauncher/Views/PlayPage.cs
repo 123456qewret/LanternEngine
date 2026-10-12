@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -15,6 +15,8 @@ namespace BloodborneLauncher.Views
     {
         private readonly InfoBar _problem;
         private readonly SettingRow _engineCard;
+        private readonly Button _profileButton;
+        private readonly TextBlock _profileHint;
         private readonly TextBlock _gameHint, _userHint, _statGame, _statUpscaler, _statResolution, _statFps, _statVia;
         private readonly SymbolIcon _gameIcon;
         private readonly Button _play, _resetUser;
@@ -86,6 +88,17 @@ namespace BloodborneLauncher.Views
             gameCard.ShowIcon = true;
             Add(gameCard);
 
+            // Player profiles: each its own saves and trophies (a button with a menu, not a drop-down,
+            // so a click can't pick an entry by itself).
+            _profileButton = SmallButton("Main", SymbolRegular.Person24, (_, _) => ShowProfileMenu());
+            Add(Card(SymbolRegular.People24, "Player profile",
+                "Each profile has its own save files and trophies, so several people can play their own runs on this PC", Row(
+                _profileButton,
+                SmallButton("New…", SymbolRegular.PersonAdd24, (_, _) => NewProfile()),
+                IconButton(SymbolRegular.Rename24, "Rename this profile", (_, _) => RenameProfile()),
+                IconButton(SymbolRegular.PersonDelete24, "Remove this profile from the list (its saves stay on disk)", (_, _) => RemoveProfile())),
+                out _profileHint));
+
             _resetUser = IconButton(SymbolRegular.ArrowUndo24, "Back to the default folder", (_, _) =>
             {
                 S.Set("user_dir", "");
@@ -94,7 +107,7 @@ namespace BloodborneLauncher.Views
             });
             Add(Card(SymbolRegular.Save24, "Saves folder", "", Row(
                 SmallButton("Browse", SymbolRegular.FolderOpen24, (_, _) => ChooseUser()),
-                IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(GameEnvironment.UserDir(S))),
+                IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(GameEnvironment.SavesRoot(S))),
                 _resetUser), out _userHint));
 
             ComboRow(SymbolRegular.LocalLanguage24, "In-game menu language", "The port's settings menu (Insert or L3 + R3)",
@@ -139,12 +152,10 @@ namespace BloodborneLauncher.Views
             _problem.Message = status.Summary;
 
             var custom = S.Str("user_dir").Length > 0;
-            var userDir = GameEnvironment.UserDir(S);
-            var saves = Path.Combine(userDir, "savedata");
-            var found = Directory.Exists(saves) && Directory.EnumerateFileSystemEntries(saves).Any();
-            SetHint(_userHint, (custom ? userDir : $"Default: {userDir}") +
-                               (found ? "  ·  saves found" : "  ·  no saves yet; the game creates them here"));
+            var root = GameEnvironment.SavesRoot(S);
+            SetHint(_userHint, (custom ? root : $"Default: {root}") + "  ·  every profile's saves live here");
             _resetUser.IsEnabled = custom;
+            RefreshProfile();
 
             _engineCard.Visibility = Updater.EngineOutdated ? Visibility.Visible : Visibility.Collapsed;
             _statGame.Text = status.Health == Health.Bad ? "Not found" : $"{status.TitleId} {status.Version}".Trim();
@@ -197,9 +208,106 @@ namespace BloodborneLauncher.Views
             Refresh();
         }
 
+        // ---------------------------------------------------------------- player profiles
+
+        private void RefreshProfile()
+        {
+            var profile = PlayerProfiles.Current(S);
+            _profileButton.Content = profile;
+            var dir = GameEnvironment.UserDir(S);
+            var saves = Path.Combine(dir, "savedata");
+            var found = Directory.Exists(saves) && Directory.EnumerateFileSystemEntries(saves).Any();
+            SetHint(_profileHint, dir + (found ? "  ·  saves found" : "  ·  no saves yet; the game creates them here") +
+                                  $"  ·  {Ws.Trophies.Count} / {TrophyTracker.All.Length} trophies");
+        }
+
+        private void ShowProfileMenu()
+        {
+            var menu = new ContextMenu { PlacementTarget = _profileButton, Placement = PlacementMode.Bottom };
+            var current = PlayerProfiles.Current(S);
+            foreach (var profile in PlayerProfiles.All(S))
+            {
+                var name = profile;
+                var item = new System.Windows.Controls.MenuItem { Header = name, IsCheckable = true, IsChecked = name.Equals(current, StringComparison.OrdinalIgnoreCase) };
+                item.Click += (_, _) => SwitchProfile(name);
+                menu.Items.Add(item);
+            }
+            menu.IsOpen = true;
+        }
+
+        private bool GameBlocksProfiles()
+        {
+            if (!Ws.Game.Running) return false;
+            Prompt.Tell("Player profile", "Close the game before changing profiles: it is using this profile's saves.");
+            return true;
+        }
+
+        private void SwitchProfile(string name)
+        {
+            if (name.Equals(PlayerProfiles.Current(S), StringComparison.OrdinalIgnoreCase) || GameBlocksProfiles()) return;
+            S.Set("player_profile", PlayerProfiles.IsMain(name) ? "" : name);
+            Directory.CreateDirectory(GameEnvironment.UserDir(S));
+            Ws.Trophies.SetUserDir(GameEnvironment.UserDir(S));
+            Ws.SaveSoon();
+            Ws.Log($"Player profile: {name}.", LogLevel.Step);
+            Refresh();
+        }
+
+        private void NewProfile()
+        {
+            if (GameBlocksProfiles()) return;
+            var values = Prompt.Ask("New player profile", "Its own save files and trophies. The game starts a new character the first time.",
+                new Prompt.Field("Name", "", "e.g. Alex"));
+            if (values == null) return;
+            var name = PlayerProfiles.Validate(S, values[0], out var error);
+            if (name == null) { Prompt.Tell("New player profile", error); return; }
+            PlayerProfiles.Add(S, name);
+            SwitchProfile(name);
+        }
+
+        private void RenameProfile()
+        {
+            var current = PlayerProfiles.Current(S);
+            if (PlayerProfiles.IsMain(current)) { Prompt.Tell("Rename profile", "Main is the original saves folder and keeps its name."); return; }
+            if (GameBlocksProfiles()) return;
+            var values = Prompt.Ask("Rename profile", null, new Prompt.Field("Name", current));
+            if (values == null) return;
+            var name = PlayerProfiles.Validate(S, values[0], out var error, renaming: current);
+            if (name == null) { Prompt.Tell("Rename profile", error); return; }
+            try
+            {
+                PlayerProfiles.Rename(S, current, name);
+            }
+            catch (Exception e)
+            {
+                Prompt.Tell("Rename profile", "Could not rename its folder: " + e.Message);
+                return;
+            }
+            Ws.Trophies.SetUserDir(GameEnvironment.UserDir(S));
+            Ws.SaveSoon();
+            Refresh();
+        }
+
+        private void RemoveProfile()
+        {
+            var current = PlayerProfiles.Current(S);
+            if (PlayerProfiles.IsMain(current)) { Prompt.Tell("Remove profile", "Main is the original saves folder and can't be removed."); return; }
+            if (GameBlocksProfiles()) return;
+            if (!Prompt.Confirm("Remove profile",
+                    $"{current} is taken off the list and the launcher switches to Main. Its saves and trophies are not deleted: " +
+                    $"they stay in {GameEnvironment.UserDir(S)}, and adding a profile with the same name brings them back.", "Remove"))
+                return;
+            PlayerProfiles.Remove(S, current);
+            S.Set("player_profile", "");
+            Ws.Trophies.SetUserDir(GameEnvironment.UserDir(S));
+            Ws.SaveSoon();
+            Refresh();
+        }
+
         private void ChooseUser()
         {
-            var path = PickFolder("Saves folder", GameEnvironment.UserDir(S));
+            if (GameBlocksProfiles()) return;
+            var path = PickFolder("Saves folder", GameEnvironment.SavesRoot(S));
             if (path == null) return;
             S.Set("user_dir", path);
             Ws.SaveSoon();

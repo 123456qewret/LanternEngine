@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -17,6 +17,7 @@ namespace BloodborneLauncher.Views
         private readonly UniformGrid _grades = new() { Rows = 1, Margin = new Thickness(0, 16, 0, 0) };
         private readonly StackPanel _list = new();
         private readonly InfoBar _support;
+        private readonly TextBlock _logHint;
         private string _filter = "all";
 
         public TrophiesPage() : base("Trophies",
@@ -102,10 +103,34 @@ namespace BloodborneLauncher.Views
             Add(Card(SymbolRegular.PlayCircle24, "Try it", "Shows a sample notification and plays the sound",
                 SmallButton("Test", SymbolRegular.Trophy24, (_, _) => TrophyToast.Announce(TrophyTracker.ById[14])), out _));
             Add(Card(SymbolRegular.Folder24, "Trophy log", "", IconButton(SymbolRegular.Open24, "Open the saves folder",
-                (_, _) => Paths.OpenFolder(GameEnvironment.UserDir(S))), out var logHint));
-            SetHint(logHint, "trophies.log in the saves folder: one line per unlock (id and time)");
+                (_, _) => Paths.OpenFolder(GameEnvironment.UserDir(S))), out _logHint));
+            Add(Card(SymbolRegular.ArrowReset24, "Reset trophy progress", "Starts trophies and completion over, for a fresh run. The old log is kept as a backup",
+                SmallButton("Reset…", SymbolRegular.ArrowReset24, (_, _) => ResetProgress()), out _));
 
             Ws.TrophiesChanged += Refresh;
+        }
+
+        private void ResetProgress()
+        {
+            if (Ws.Trophies.Count == 0)
+            {
+                Prompt.Tell("Reset trophy progress", "There is no trophy progress to reset.");
+                return;
+            }
+            if (!Prompt.Confirm("Reset trophy progress",
+                    $"All {Ws.Trophies.Count} unlocked trophies and the completion rate start over. Your saves are not touched, " +
+                    "and the current trophy log is kept as a backup in the saves folder.", "Reset"))
+                return;
+            try
+            {
+                var backup = Ws.Trophies.Reset();
+                Ws.Log(backup == null ? "Trophy progress reset." : "Trophy progress reset. Backup: " + backup, LogLevel.Good);
+            }
+            catch (Exception e)
+            {
+                Ws.Log("Could not reset trophy progress: " + e.Message, LogLevel.Bad);
+            }
+            Refresh();
         }
 
         private static ProgressBar Bar(double height)
@@ -146,6 +171,7 @@ namespace BloodborneLauncher.Views
         private void Refresh()
         {
             var t = Ws.Trophies;
+            SetHint(_logHint, $"trophies.log in the saves folder of the {PlayerProfiles.Current(S)} profile: one line per unlock (id and time)");
             _percent.Text = $"{t.Completion * 100:0}%";
             _count.Text = $"{t.Count} of {TrophyTracker.All.Length} trophies";
             _points.Text = $"{t.EarnedPoints} of {t.TotalPoints} points (weighted by grade, as on PlayStation)";

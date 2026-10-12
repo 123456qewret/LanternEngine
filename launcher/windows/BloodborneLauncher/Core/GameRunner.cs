@@ -100,7 +100,7 @@ namespace BloodborneLauncher.Core
                 Directory.CreateDirectory(Path.GetDirectoryName(SessionLog)!);
                 var stream = new FileStream(SessionLog, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
                 _log = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
-                _log.WriteLine($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  Bloodborne Launcher {Updater.Current}");
+                _log.WriteLine($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  Bloodborne Launcher {Updater.CurrentLabel}");
             }
             catch { _log = null; /* read-only folder: the Log tab still has it */ }
         }

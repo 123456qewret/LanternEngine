@@ -124,13 +124,19 @@ namespace BloodborneLauncher.Core
         {
             try
             {
-                Latest = await Updater.LatestAsync();
+                var beta = Updater.BetaChannel(Settings);
+                Latest = await Updater.LatestAsync(beta);
                 CheckedAt = DateTime.Now;
-                Update = Latest != null && Latest.Version > Updater.Current ? Latest : null;
+                // On stable with a beta installed, the latest stable release is offered even when it is
+                // older: that is the way back.
+                Update = Latest != null && (Latest.IsNewerThan(Updater.Current, Updater.CurrentBeta) ||
+                                            !beta && Updater.CurrentBeta > 0 && Latest.Beta == 0)
+                    ? Latest
+                    : null;
                 if (Update != null)
-                    Log($"Launcher update available: {Update.Tag} (you have v{Updater.Current}).", LogLevel.Good);
+                    Log($"Launcher update available: {Update.Tag} (you have {Updater.CurrentLabel}).", LogLevel.Good);
                 else if (!quiet)
-                    Log(Latest == null ? "No launcher release is published yet." : $"The launcher is up to date (v{Updater.Current}).", LogLevel.Good);
+                    Log(Latest == null ? "No launcher release is published yet." : $"The launcher is up to date ({Updater.CurrentLabel}).", LogLevel.Good);
             }
             catch (Exception e)
             {

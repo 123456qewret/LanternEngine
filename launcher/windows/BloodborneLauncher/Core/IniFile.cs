@@ -20,7 +20,7 @@ namespace BloodborneLauncher.Core
             ("show_fps", "1"),
             ("output_res", "1920x1080"),
             ("model_lod", "0"),
-            ("live_resolution", "auto"),
+            ("live_resolution", "0"),
         };
 
         private readonly Dictionary<string, string?> _values = new(StringComparer.Ordinal);
