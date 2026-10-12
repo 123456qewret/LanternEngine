@@ -313,10 +313,49 @@ index a300d10..ae628fd 100644
      std::chrono::nanoseconds target_interval{};
      std::chrono::nanoseconds total_wait{};
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
-index 30de04f..6674bb4 100644
+index 30de04f..b229029 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
 +++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
-@@ -813,8 +813,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -372,6 +372,23 @@ static void PrintMemory() {
+ #endif
+ }
+ 
++/// bbport: the game's RAM and the PC's, once a minute in every session: steady growth over a
++/// session is a leak, and a crash right after "free" ran out is the PC running out of memory.
++static void LogRam() {
++    BbPlatform::Memory m;
++    if (!BbPlatform::GetMemory(m)) {
++        return;
++    }
++    const auto mib = [](u64 bytes) { return static_cast<unsigned long long>(bytes >> 20); };
++    std::printf("Memory: game %llu MiB in RAM (%llu MiB committed, peak %llu MiB); PC %llu of %llu "
++                "MiB free, %llu MiB commit left; GPU images %llu MiB, %llu MiB cached in %llu\n",
++                mib(m.working_set), mib(m.private_bytes), mib(m.peak_working_set), mib(m.free_phys),
++                mib(m.total_phys), mib(m.commit_left), mib(BbStats::vk_image_bytes.load()),
++                mib(BbStats::live_image_bytes.load()),
++                static_cast<unsigned long long>(BbStats::live_images.load()));
++    std::fflush(stdout);
++}
++
+ void VideoOutDriver::Flip(const Request& req) {
+     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
+     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
+@@ -381,6 +398,14 @@ void VideoOutDriver::Flip(const Request& req) {
+     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
+                                                 : 0);
+ 
++    {
++        static auto next_ram = std::chrono::steady_clock::now() + std::chrono::seconds(30);
++        if (const auto now = std::chrono::steady_clock::now(); now >= next_ram) {
++            next_ram = now + std::chrono::seconds(60);
++            LogRam();
++        }
++    }
++
+     // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
+     static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
+     if (frame_stats) {
+@@ -813,8 +838,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
                                            : std::chrono::nanoseconds(0);
      auto next_flip = std::chrono::steady_clock::now();
@@ -328,7 +367,7 @@ index 30de04f..6674bb4 100644
  
      const auto receive_request = [this] -> Request {
          std::scoped_lock lk{mutex};
-@@ -831,6 +832,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -831,6 +857,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      // next vblank tick.
      const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
  
@@ -466,7 +505,7 @@ index 30de04f..6674bb4 100644
      while (!token.stop_requested()) {
          timer.Start();
          const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
-@@ -864,29 +996,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -864,29 +1021,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
              }
          }
  
@@ -2588,7 +2627,7 @@ index 83e5538..0d54c45 100644
      font_config.FontDataOwnedByAtlas = false;
      io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
 diff --git a/gpu/shim/bbport_platform.cpp b/gpu/shim/bbport_platform.cpp
-index 8f2e888..e66ea2a 100644
+index 8f2e888..52f794d 100644
 --- a/gpu/shim/bbport_platform.cpp
 +++ b/gpu/shim/bbport_platform.cpp
 @@ -5,6 +5,7 @@
@@ -2599,7 +2638,33 @@ index 8f2e888..e66ea2a 100644
  #include <thread>
  #include <windows.h>
  #include <psapi.h>
-@@ -98,5 +99,30 @@ void MakeBackground() {
+@@ -36,6 +37,25 @@ bool GetUsage(bool thread, Usage& out) {
+     return true;
+ }
+ 
++bool GetMemory(Memory& out) {
++    PROCESS_MEMORY_COUNTERS_EX counters{};
++    MEMORYSTATUSEX status{};
++    status.dwLength = sizeof(status);
++    if (!GetProcessMemoryInfo(GetCurrentProcess(),
++                              reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
++                              sizeof(counters)) ||
++        !GlobalMemoryStatusEx(&status)) {
++        return false;
++    }
++    out.private_bytes = counters.PrivateUsage;
++    out.working_set = counters.WorkingSetSize;
++    out.peak_working_set = counters.PeakWorkingSetSize;
++    out.free_phys = status.ullAvailPhys;
++    out.total_phys = status.ullTotalPhys;
++    out.commit_left = status.ullAvailPageFile;
++    return true;
++}
++
+ std::uint32_t CurrentThreadId() {
+     return static_cast<std::uint32_t>(GetCurrentThreadId());
+ }
+@@ -98,5 +118,30 @@ void MakeBackground() {
      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
  }
  
@@ -2630,6 +2695,42 @@ index 8f2e888..e66ea2a 100644
 +
  } // namespace BbThreads
  #endif
+diff --git a/gpu/shim/bbport_platform.h b/gpu/shim/bbport_platform.h
+index 2a1ad78..cd531da 100644
+--- a/gpu/shim/bbport_platform.h
++++ b/gpu/shim/bbport_platform.h
+@@ -18,6 +18,12 @@
+ 
+ namespace BbPlatform {
+ 
++/// RAM of the game and of the PC (bytes).
++struct Memory {
++    std::uint64_t private_bytes = 0, working_set = 0, peak_working_set = 0;
++    std::uint64_t free_phys = 0, total_phys = 0, commit_left = 0;
++};
++
+ struct Usage {
+     std::uint64_t user_us = 0, sys_us = 0, invol_switches = 0, vol_switches = 0, minor_faults = 0;
+ };
+@@ -26,6 +32,7 @@ struct Usage {
+ /// CPU time and scheduling counters of the calling thread (thread = true) or of the process.
+ /// Windows has no per-thread context switch or fault counters: those stay 0 for threads.
+ bool GetUsage(bool thread, Usage& out);
++bool GetMemory(Memory& out);
+ /// OS id of the calling thread.
+ std::uint32_t CurrentThreadId();
+ /// A CPU clock of the calling thread that other threads can read (-1: unavailable): a
+@@ -38,6 +45,10 @@ void DescribeAddress(const void* address, char* out, std::size_t size);
+ std::size_t CaptureStack(void** frames, std::size_t count);
+ bool ReadProcessMemory(const void* source, void* destination, std::size_t size);
+ #else
++inline bool GetMemory(Memory&) {
++    return false;
++}
++
+ inline bool GetUsage(bool thread, Usage& out) {
+     rusage usage{};
+     if (getrusage(thread ? RUSAGE_THREAD : RUSAGE_SELF, &usage) != 0) {
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
 index cf4fbd8..1d2903c 100644
 --- a/gpu/shim/bbport_settings.cpp
@@ -3139,7 +3240,7 @@ index f475c39..8b574fb 100644
              continue;
          }
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..20948b6 100644
+index ea6daf1..3991891 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
 @@ -148,8 +148,10 @@ def main():
@@ -3154,8 +3255,34 @@ index ea6daf1..20948b6 100644
              try:
                  from engine_assets import prepare_mirror, verify_executable
                  os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
+@@ -192,8 +194,12 @@ def main():
+             print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
+         elif scaled_output:
+             os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
+-            os.environ.setdefault('BB_DMEM_MB', '9152')
+-            print(f'Output {scaled_output}: scene {scaled_render}, direct memory {os.environ["BB_DMEM_MB"]} MiB '
++            # The extra 4 GiB is for scenes above 1080p only: Windows counts the whole pool
++            # against RAM plus page file from the start, used or not.
++            if max(int(w) * int(h) for w, h in (s.split('x') for s in (scaled_render, scaled_output))) > 1920 * 1080:
++                os.environ.setdefault('BB_DMEM_MB', '9152')
++            dmem = os.environ.get('BB_DMEM_MB', '5056')
++            print(f'Output {scaled_output}: scene {scaled_render}, direct memory {dmem} MiB '
+                   '(live_resolution=1: live changes)')
+         run([PYTHON, SCRIPTS / 'patches.py', '--out', out, '--fps', fps, '--extra', os.environ.get('BB_PATCHES', ''),
+              '--settings', config, '--game-dir', merged, '--render-res', os.environ.get('BB_RENDER_RES', ''),
+@@ -219,7 +225,9 @@ def main():
+         except KeyboardInterrupt:
+             status = 130
+         print(f'bb-probe exited with code {status}', flush=True)
+-        return status
++        # Windows crash codes (0xC0000005) do not fit sys.exit: pass them on as the signed
++        # 32-bit value the launcher reads, not -1.
++        return status - (1 << 32) if status >= (1 << 31) else status
+     finally:
+         if overlay:
+             remove_overlay(overlay)
 diff --git a/src/probe.c b/src/probe.c
-index b0e7c32..b926998 100644
+index b0e7c32..90e1ee8 100644
 --- a/src/probe.c
 +++ b/src/probe.c
 @@ -8,6 +8,7 @@
@@ -3166,7 +3293,107 @@ index b0e7c32..b926998 100644
  #if !defined(__x86_64__) || !defined(__GNUC__)
  #error This prototype requires x86-64 GCC or Clang (including MinGW).
  #endif
-@@ -903,6 +904,20 @@ int main(int argc, char **argv) {
+@@ -436,6 +437,76 @@ static int fatal(DWORD code) {
+         return 0;
+     }
+ }
++/* A fault in host code, before any handler of its own runs. On a guest thread the handler
++ * search has to cross guest frames, which have no unwind data: Windows then ends the process
++ * with the fault's code and the unhandled filter never runs, so this note is the only trace.
++ * The first few only (a driver may fault on purpose); no stdio locks (the faulting thread may
++ * hold them). */
++static void note_host_fault(EXCEPTION_POINTERS *e) {
++    static volatile LONG notes;
++    EXCEPTION_RECORD *r = e->ExceptionRecord;
++    if (r->ExceptionCode == EXCEPTION_BREAKPOINT || InterlockedIncrement(&notes) > 4) return;
++    char line[1024], where[512], thread_name[64] = "";
++    describe(where, sizeof(where), (uintptr_t)e->ContextRecord->Rip);
++    PWSTR description = NULL;
++    if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &description)) && description) {
++        WideCharToMultiByte(CP_UTF8, 0, description, -1, thread_name, sizeof(thread_name), NULL, NULL);
++        LocalFree(description);
++    }
++    int n = snprintf(line, sizeof(line), "Host fault 0x%08lx at %s", r->ExceptionCode, where);
++    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2)
++        n += snprintf(line + n, sizeof(line) - n, ", %s address %p",
++                      r->ExceptionInformation[0] == 1 ? "writing" : r->ExceptionInformation[0] == 8 ? "executing" : "reading",
++                      (void *)r->ExceptionInformation[1]);
++    n += snprintf(line + n, sizeof(line) - n, " (thread %lu %s; if the game closes now, this is why)\n",
++                  GetCurrentThreadId(), thread_name);
++    HANDLE out = GetStdHandle(STD_ERROR_HANDLE);
++    DWORD written;
++    WriteFile(out, line, (DWORD)strlen(line), &written, NULL);
++    /* The host call chain: this handler, the dispatcher, then the faulting frames. */
++    void *frames[32];
++    USHORT depth = RtlCaptureStackBackTrace(0, 32, frames, NULL);
++    for (USHORT i = 0; i < depth; ++i) {
++        describe(where, sizeof(where), (uintptr_t)frames[i]);
++        snprintf(line, sizeof(line), "  host #%u %s\n", i, where);
++        WriteFile(out, line, (DWORD)strlen(line), &written, NULL);
++    }
++}
++/* The engine's own folder (out\: bb-probe.exe and the CLANG64 DLLs) as a mapped file name. */
++static char own_dir[MAX_PATH];
++static void find_own_dir(void) {
++    if (!GetMappedFileNameA(GetCurrentProcess(), (void *)find_own_dir, own_dir, sizeof(own_dir))) own_dir[0] = 0;
++    char *slash = strrchr(own_dir, '\\');
++    if (slash) slash[1] = 0;
++}
++/* Whether Windows' handler search can get past this host fault. It walks the frames by their
++ * unwind data; at a guest frame (none) it gives up and ends the process with the fault's code,
++ * without the unhandled filter. The same walk here: a frame with a handler of its own on the
++ * way (a driver's or Windows' __try) may still handle it; the engine's own frames only have the
++ * C++ personality routine, which leaves faults alone. A fault during the walk (a broken stack):
++ * not decided, the search goes on. */
++static int host_fault_dead_end(const CONTEXT *fault) {
++    if (!own_dir[0]) return 0;
++    CONTEXT c = *fault;
++    RuntimeRecoverBuf recover;
++    if (RUNTIME_RECOVER_SET(recover)) return 0;
++    runtime_fault_recover = &recover;
++    int dead_end = 0;
++    for (int depth = 0; depth < 64 && c.Rip; ++depth) {
++        if (guest_address((uintptr_t)c.Rip)) { dead_end = 1; break; }
++        DWORD64 base = 0;
++        RUNTIME_FUNCTION *function = RtlLookupFunctionEntry(c.Rip, &base, NULL);
++        if (!function) { c.Rip = *(DWORD64 *)c.Rsp; c.Rsp += 8; continue; } /* leaf */
++        void *handler_data;
++        DWORD64 frame;
++        PEXCEPTION_ROUTINE handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, base, c.Rip, function, &c, &handler_data, &frame, NULL);
++        char path[MAX_PATH];
++        if (handler && !(GetMappedFileNameA(GetCurrentProcess(), (void *)handler, path, sizeof(path)) &&
++                         !_strnicmp(path, own_dir, strlen(own_dir)))) break;
++    }
++    runtime_fault_recover = NULL;
++    return dead_end;
++}
+ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *e) {
+     EXCEPTION_RECORD *r = e->ExceptionRecord;
+     if (r->ExceptionCode == EXCEPTION_SINGLE_STEP && hw_watch_file && (e->ContextRecord->Dr6 & 1)) {
+@@ -458,8 +529,12 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *e) {
+             return EXCEPTION_CONTINUE_EXECUTION;
+         }
+     }
+-    /* Host code may handle its own exceptions (drivers probe memory under __try). */
+-    if (!fatal(r->ExceptionCode) || !guest_address((uintptr_t)e->ContextRecord->Rip)) return EXCEPTION_CONTINUE_SEARCH;
++    if (!fatal(r->ExceptionCode)) return EXCEPTION_CONTINUE_SEARCH;
++    /* Host code may handle its own exceptions (drivers probe memory under __try): only noted. */
++    if (!guest_address((uintptr_t)e->ContextRecord->Rip) && !host_fault_dead_end(e->ContextRecord)) {
++        note_host_fault(e);
++        return EXCEPTION_CONTINUE_SEARCH;
++    }
+     report_exception(e);
+     terminate(128 + 11);
+ }
+@@ -674,6 +749,7 @@ int main(int argc, char **argv) {
+     PROCESS_POWER_THROTTLING_STATE throttling = {PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                                                  PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0};
+     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
++    find_own_dir();
+     AddVectoredExceptionHandler(1, vectored_handler);
+     SetUnhandledExceptionFilter(unhandled_filter);
+     start_dump_thread();
+@@ -903,6 +979,20 @@ int main(int argc, char **argv) {
          memcpy(image + relocs[i].target, &value, 8);
      }
      if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
@@ -3187,6 +3414,26 @@ index b0e7c32..b926998 100644
  #ifdef _WIN32
      printf("Guest thread pointer reads: %" PRIu64 " use TEB TLS slot %u\n", patch_tls_reads(segments, ns), runtime_win_tls_slot());
  #endif
+diff --git a/src/runtime_ajm.c b/src/runtime_ajm.c
+index b36f136..d8be9be 100644
+--- a/src/runtime_ajm.c
++++ b/src/runtime_ajm.c
+@@ -313,9 +313,12 @@ static void run_job(Context *ctx, uint32_t id, Job *job) {
+     const unsigned char *input=NULL;
+     if (job->input_count==1) input=job->inputs[0].address;
+     else if (job->input_count>1) {
+-        joined=malloc(in_size ? in_size : 1);
+-        uint64_t at=0;
+-        for (int i=0;i<job->input_count;++i) { memcpy(joined+at,job->inputs[i].address,job->inputs[i].size); at+=job->inputs[i].size; }
++        /* The sizes come from the game: a bad job must not take the engine down. */
++        joined=in_size<=(UINT64_C(64)<<20) ? malloc(in_size ? in_size : 1) : NULL;
++        if (joined) {
++            uint64_t at=0;
++            for (int i=0;i<job->input_count;++i) { memcpy(joined+at,job->inputs[i].address,job->inputs[i].size); at+=job->inputs[i].size; }
++        } else { in_size=0; flags_result|=RESULT_INVALID_PARAMETER; }
+         input=joined;
+     }
+     Output out={job->outputs,job->output_count,0,0};
 diff --git a/src/runtime_host.c b/src/runtime_host.c
 index 73f3762..f783d21 100644
 --- a/src/runtime_host.c
@@ -3407,6 +3654,23 @@ index fac0ac7..96c326f 100644
      if (injected.touch_side>=0) touch_click(d,injected.touch_side);
      else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
      if (injected.buttons & BTN_L2) d->l2=255;
+diff --git a/src/runtime_savedata.c b/src/runtime_savedata.c
+index 99b3049..4f9b7ef 100644
+--- a/src/runtime_savedata.c
++++ b/src/runtime_savedata.c
+@@ -284,7 +284,11 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
+         size_t n=strlen(e->d_name);
+         if (e->d_name[0]=='.' || n>=32 || (n>8 && !strcmp(e->d_name+n-8,".sce_sys"))) continue;
+         if (cond->dir && cond->dir->data[0] && !like(e->d_name,cond->dir->data)) continue;
+-        if (count==capacity) { capacity=capacity ? capacity*2 : 16; entries=realloc(entries,capacity*sizeof(*entries)); }
++        if (count==capacity) {
++            Entry *grown=realloc(entries,(capacity ? capacity*2 : 16)*sizeof(*entries));
++            if (!grown) break;
++            entries=grown; capacity=capacity ? capacity*2 : 16;
++        }
+         snprintf(entries[count].name,32,"%s",e->d_name);
+         char meta[680]; snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,e->d_name);
+         read_param(meta,&entries[count].param);
 diff --git a/src/runtime_services.c b/src/runtime_services.c
 index 5f31782..97d2b4f 100644
 --- a/src/runtime_services.c

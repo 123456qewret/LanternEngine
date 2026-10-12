@@ -22,7 +22,7 @@ The launcher updates itself from the Releases page.
 - **Controls**: keyboard and mouse for every action, controller remapping, stick options, live controller detection, shareable profiles.
 - **Cheats**: Blood Vials and Quicksilver Bullets (infinite or a set amount), infinite consumables and stamina, stealth, no weapon wear, firearm range, keep echoes on death, echo multiplier. Each can be turned off.
 - **Trophies**: all 40, completion rate, in-game notification, reset.
-- **More**: mods and patches, online (shadNet), game log, crash helper with safe mode, stable or beta updates.
+- **More**: mods and patches, online (shadNet), game log, crash helper with safe mode, memory check before starting, stable or beta updates.
 
 ### Control profile format
 

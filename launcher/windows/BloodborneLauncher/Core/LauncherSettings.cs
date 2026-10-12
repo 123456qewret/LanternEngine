@@ -46,6 +46,7 @@ namespace BloodborneLauncher.Core
             ["check_updates"] = true,
             ["save_backups"] = true,
             ["safe_mode_next"] = false,
+            ["memory_check_off"] = false,
             ["hardware_offered"] = false,
             ["cheat_vials_amount"] = 20,
             ["cheat_bullets_amount"] = 20,

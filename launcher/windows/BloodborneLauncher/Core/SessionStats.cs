@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace BloodborneLauncher.Core
@@ -12,6 +12,7 @@ namespace BloodborneLauncher.Core
     {
         private static readonly Regex FrameStats = new(@"^Frame stats: ([\d.]+) FPS, worst frame ([\d.]+) ms", RegexOptions.Compiled);
         private static readonly Regex Stall = new(@"^Stall: ([\d.]+) ms frame", RegexOptions.Compiled);
+        private static readonly Regex Memory = new(@"^Memory: game (\d+) MiB in RAM", RegexOptions.Compiled);
 
         private readonly List<double> _fps = new();
 
@@ -22,6 +23,9 @@ namespace BloodborneLauncher.Core
         public double AverageFps => _fps.Count > 0 ? _fps.Average() : 0;
         public double LowestFps => _fps.Count > 0 ? _fps.Min() : 0;
         public bool HasFrameStats => _fps.Count > 0;
+        /// <summary>The game's RAM in MiB, first and last of the once-a-minute lines (0: none).</summary>
+        public long RamStartMiB { get; private set; }
+        public long RamEndMiB { get; private set; }
 
         public void Observe(string line)
         {
@@ -29,6 +33,11 @@ namespace BloodborneLauncher.Core
             {
                 _fps.Add(Parse(m.Groups[1].Value));
                 WorstFrameMs = Math.Max(WorstFrameMs, Parse(m.Groups[2].Value));
+            }
+            else if (line.StartsWith("Memory: game ", StringComparison.Ordinal) && Memory.Match(line) is { Success: true } r)
+            {
+                RamEndMiB = long.Parse(r.Groups[1].Value, CultureInfo.InvariantCulture);
+                if (RamStartMiB == 0) RamStartMiB = RamEndMiB;
             }
             else if (line.StartsWith("Stall: ", StringComparison.Ordinal) && Stall.Match(line) is { Success: true } s)
             {
@@ -44,7 +53,8 @@ namespace BloodborneLauncher.Core
             Duration(Length) + (HasFrameStats
                 ? $" · {AverageFps:0} FPS average (lowest {LowestFps:0}) · worst frame {WorstFrameMs:0} ms · " +
                   (Stutters == 1 ? "1 stutter" : $"{Stutters} stutters")
-                : " · turn on Frame statistics (More › Advanced) for FPS and stutters");
+                : " · turn on Frame statistics (More › Advanced) for FPS and stutters") +
+            (RamEndMiB > 0 ? $" · RAM {RamStartMiB / 1024.0:0.0} → {RamEndMiB / 1024.0:0.0} GB" : "");
 
         public static string Duration(TimeSpan time) =>
             time.TotalHours >= 1 ? $"{(int)time.TotalHours} h {time.Minutes} min" :

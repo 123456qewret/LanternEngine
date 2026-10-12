@@ -394,6 +394,13 @@ namespace BloodborneLauncher
                 }
             }
 
+            if (!s.Bool("memory_check_off") && MemoryCheck.Problem(ws.Ini) is { } memory)
+            {
+                var choice = Prompt.Choose("Windows may run out of memory", memory, "Cancel", "Don't ask again", "Start anyway");
+                if (choice <= 0) return;
+                if (choice == 1) s.Set("memory_check_off", true);
+            }
+
             var error = ws.StartGame();
             if (error != null)
             {

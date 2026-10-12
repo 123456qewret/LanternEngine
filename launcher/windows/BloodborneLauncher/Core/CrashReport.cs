@@ -1,5 +1,6 @@
 ﻿using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace BloodborneLauncher.Core
 {
@@ -17,6 +18,13 @@ namespace BloodborneLauncher.Core
         public static string Explain(int code)
         {
             var tail = Tail(GameRunner.SessionLog, 120).ToList();
+            var why = Cause(tail, EngineCode(tail, code));
+            var memory = LowMemory(tail);
+            return memory == null ? why : why + " " + memory;
+        }
+
+        private static string Cause(List<string> tail, long code)
+        {
             bool Has(string text) => tail.Any(l => l.Contains(text, StringComparison.OrdinalIgnoreCase));
             if (Has("Out of order flip IRQ"))
                 return "A frame reached the screen out of order (a timing race in the engine; Precise frame pacing makes it likelier).";
@@ -32,9 +40,73 @@ namespace BloodborneLauncher.Core
                 if (next.Length > 0 && !next.StartsWith("STOP:") && !next.Contains("exited with code")) message += " (" + next + ")";
                 return "The engine stopped on an internal check: " + message;
             }
-            return code == 23
-                ? "The engine stopped itself on an error (exit code 23); the report has the details."
-                : $"The game closed unexpectedly (exit code {code}).";
+            // "Guest fault 0xc0000005 at guest+0x1234, ..." / "Host fault 0xc0000005 at bb-probe.exe+0x1234, ...".
+            var fault = tail.LastOrDefault(l => FaultLine.IsMatch(l)) is { } f ? FaultLine.Match(f) : null;
+            if (fault != null)
+                return fault.Groups[1].Value == "Guest"
+                    ? $"The game's own code crashed ({fault.Groups[3].Value}), usually a rare timing race in the game."
+                    : $"The engine crashed in {fault.Groups[3].Value} ({Name(Convert.ToUInt32(fault.Groups[2].Value, 16))}).";
+            return code switch
+            {
+                23 => "The engine stopped itself on an error (exit code 23); the report has the details.",
+                0xC0000005 => "The engine crashed on a bad memory access (0xC0000005).",
+                0xC0000409 => "The engine stopped on a failed safety check (0xC0000409).",
+                0xC00000FD => "The engine ran out of stack (0xC00000FD).",
+                > 0xFFFF => $"The game closed unexpectedly (0x{code:X8}).",
+                _ => $"The game closed unexpectedly (exit code {code})."
+            };
+        }
+
+        private static string Name(uint code) => code switch
+        {
+            0xC0000005 => "bad memory access",
+            0xC000001D => "illegal instruction",
+            0xC0000094 => "division by zero",
+            _ => $"0x{code:X8}"
+        };
+
+        private static readonly Regex FaultLine = new(@"^(Host|Guest) fault 0x([0-9a-fA-F]{8}) at ([^,\s]+)", RegexOptions.Compiled);
+        private static readonly Regex ExitLine = new(@"bb-probe exited with code (-?\d+)", RegexOptions.Compiled);
+        private static readonly Regex MemoryLine = new(
+            @"^Memory: game (\d+) MiB in RAM \((\d+) MiB committed, peak (\d+) MiB\); PC (\d+) of (\d+) MiB free, (\d+) MiB commit left",
+            RegexOptions.Compiled);
+
+        /// <summary>The engine's own exit code: run_windows.py before 0.9.9 passed Windows crash
+        /// codes (0xC0000005) on as -1.</summary>
+        private static long EngineCode(List<string> tail, int code)
+        {
+            var line = tail.LastOrDefault(l => ExitLine.IsMatch(l));
+            var engine = line != null && long.TryParse(ExitLine.Match(line).Groups[1].Value, out var c) ? c : code;
+            return engine < 0 ? engine & 0xFFFFFFFF : engine;
+        }
+
+        /// <summary>A sentence when the last memory line shows Windows nearly out of RAM or commit.</summary>
+        private static string? LowMemory(List<string> tail)
+        {
+            var line = tail.LastOrDefault(l => l.StartsWith("Memory: game ", StringComparison.Ordinal));
+            if (line == null || MemoryLine.Match(line) is not { Success: true } m) return null;
+            long free = long.Parse(m.Groups[4].Value), total = long.Parse(m.Groups[5].Value), commit = long.Parse(m.Groups[6].Value);
+            return free * 100 < total * 4 || commit < 1024
+                ? $"Windows was nearly out of memory ({free} MiB of {total} MiB free, {commit} MiB commit left): closing other programs or a larger page file helps."
+                : null;
+        }
+
+        /// <summary>"RAM: 5210 MiB at the start, 5390 MiB at the end, peak 5502 MiB; PC ..." from
+        /// the once-a-minute memory lines (engines from 0.9.9 on).</summary>
+        private static string? RamTrend()
+        {
+            string? first = null, last = null;
+            foreach (var line in Tail(GameRunner.SessionLog, int.MaxValue))
+                if (line.StartsWith("Memory: game ", StringComparison.Ordinal) && MemoryLine.IsMatch(line))
+                {
+                    first ??= line;
+                    last = line;
+                }
+            if (first == null || last == null) return null;
+            Match a = MemoryLine.Match(first), b = MemoryLine.Match(last);
+            return $"RAM: game {a.Groups[1].Value} MiB at the start, {b.Groups[1].Value} MiB at the end " +
+                   $"({a.Groups[2].Value} → {b.Groups[2].Value} MiB committed, peak {b.Groups[3].Value} MiB); " +
+                   $"PC {b.Groups[4].Value} of {b.Groups[5].Value} MiB free, {b.Groups[6].Value} MiB commit left";
         }
 
         public static string Build(LauncherSettings s, IniFile ini, int code, int logLines = 150)
@@ -42,16 +114,24 @@ namespace BloodborneLauncher.Core
             var hw = Hardware.Detect();
             var text = new StringBuilder();
             text.AppendLine($"Bloodborne Launcher {Updater.CurrentLabel}, engine {Updater.LocalEngine() ?? "unknown"}");
-            text.AppendLine($"Exit code {code}: {Explain(code)}");
+            var tail = Tail(GameRunner.SessionLog, 120).ToList();
+            text.AppendLine($"Exit code 0x{EngineCode(tail, code):X}: {Explain(code)}");
             text.AppendLine($"{hw.Summary}, {hw.RamBytes >> 30} GB RAM, Windows {Environment.OSVersion.Version}");
+            if (RamTrend() is { } ram) text.AppendLine(ram);
             text.AppendLine($"Upscaler {ini.Get("upscaler")}, preset {ini.Get("preset")}, output {ini.Get("output_res")}, " +
                             $"FPS {s.Str("fps_mode")}, live resolution {ini.Get("live_resolution")}, mods {(s.Bool("mods_enabled") ? "on" : "off")}");
             text.AppendLine("Experimental: " + string.Join(", ", Experimental.Select(k => $"{k[4..].Replace('_', ' ')} {(s.Bool(k) ? "on" : "off")}")));
             text.AppendLine();
-            text.AppendLine($"Last {logLines} lines of logs\\last_session.log:");
+            text.AppendLine($"Last {logLines} lines of logs\\last_session.log (repeats folded):");
             text.AppendLine("```");
-            foreach (var line in Tail(GameRunner.SessionLog, logLines))
-                text.AppendLine(line);
+            // The game logs some lines hundreds of times (every autosave): folded, so the lines
+            // before them still fit.
+            var lines = new List<(string Line, int Count)>();
+            foreach (var line in Tail(GameRunner.SessionLog, 2000))
+                if (lines.Count > 0 && lines[^1].Line == line) lines[^1] = (line, lines[^1].Count + 1);
+                else lines.Add((line, 1));
+            foreach (var (line, count) in lines.Skip(Math.Max(0, lines.Count - logLines)))
+                text.AppendLine(count > 1 ? $"{line}  (x{count})" : line);
             text.AppendLine("```");
             var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             return home.Length > 3 ? text.ToString().Replace(home, "%USERPROFILE%", StringComparison.OrdinalIgnoreCase) : text.ToString();

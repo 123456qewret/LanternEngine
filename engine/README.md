@@ -22,10 +22,11 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | Controller: the pad in use takes over; swap sticks, invert camera, dead zone | `pad_swap_sticks`, `pad_invert_look_x/y`, `pad_deadzone` |
 | Controller: Cross/Circle in the name entry, held buttons ignored after menus | |
 | No 12-second minimum loading time after death | `BB_RESPAWN_DELAY_FIX=0` off |
-| Crash fixes: oversized command data, empty recording chunk, out-of-order flip IRQ, SnormNz packed formats; swapchain recreation | |
+| Crash fixes: oversized command data, empty recording chunk, out-of-order flip IRQ, SnormNz packed formats, failed allocations in audio decoding and the save list; swapchain recreation | |
+| Crash reports for host faults on game threads (Windows ended those without a trace); RAM in the log once a minute | |
 | DLSS texture LOD bias | `BB_DLSS_MIP_BIAS=0` off |
 | Optional FSR 4 balanced model | `BB_FSR4_BALANCED=1` |
-| Cheats: infinite or a set amount of Blood Vials and Quicksilver Bullets, live and revertible (in-game menu) | `cheat_vials`, `cheat_bullets` |
+| Cheats: Blood Vials and Quicksilver Bullets (infinite or a set amount), consumables, stamina, stealth, no weapon wear, firearm range, keep echoes, echo multiplier, add echoes/insight; live and revertible (in-game menu) | `cheat_*` |
 
 Parts are adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR),
 [AwesomeObserver/bloodborne_pc](https://github.com/AwesomeObserver/bloodborne_pc),
