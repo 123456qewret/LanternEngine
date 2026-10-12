@@ -15,6 +15,7 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | Precise frame pacing | `BB_PRECISE_PACING=0` off |
 | Render threads at above-normal priority | `BB_GPU_THREAD_PRIORITY=0` off |
 | Shorter spin at the end of the game's sleeps | `BB_SLEEP_SPIN_US=600` off |
+| Audio threads (FMOD, PS4 priority 256-300) above the game's other threads on Windows | `BB_AUDIO_THREAD_PRIORITY=0` off |
 | Pipelines created on compile threads (shorter hitches in new areas) | `BB_ASYNC_PIPELINES=0` off |
 | Occlusion culling: real occlusion query results, so the game skips hidden objects; a block reads hidden only after three empty results (no flicker) | `BB_OCCLUSION=0` off |
 | Cached texture, sampler and render target lookups kept across image (un)registration | `BB_MEMO_REVALIDATE=0`, `BB_SAMPLER_MEMO=0` off |
