@@ -120,6 +120,11 @@
             new("1500 nits", "1500"), new("2000 nits", "2000"), new("4000 nits", "4000"),
         };
 
+        public static readonly Choice[] HdrMode =
+        {
+            new("Native (default)", "native"), new("Expanded", "expand"),
+        };
+
         public static readonly Choice[] HdrBoost =
         {
             new("Off", "0"), new("Low (default)", "0.25"), new("Medium", "0.5"), new("High", "1"),

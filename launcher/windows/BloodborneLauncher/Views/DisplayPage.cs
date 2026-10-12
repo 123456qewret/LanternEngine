@@ -30,6 +30,9 @@ namespace BloodborneLauncher.Views
                     ? "Turn on Use HDR in Windows' display settings first (Settings › System › Display)"
                     : "This display shows no HDR";
             IniToggle(SymbolRegular.Hdr24, "HDR output", hdrHint, "hdr");
+            ComboRow(SymbolRegular.Lightbulb24, "HDR source",
+                "Native: highlights as bright as they are in the game's scene. Expanded: the SDR picture's bright parts made brighter",
+                Choices.HdrMode, () => Ini.Get("hdr_mode", "native"), v => Ini.Set("hdr_mode", v));
             ComboRow(SymbolRegular.BrightnessHigh24, "Paper white", "How bright the game's white is. Match it to Windows' SDR content brightness",
                 Choices.HdrPaperWhite, () => Ini.Get("hdr_paper_white", "200"), v => Ini.Set("hdr_paper_white", v));
             ComboRow(SymbolRegular.WeatherSunny24, "Peak brightness", "Your display's peak brightness; highlights stop there",
