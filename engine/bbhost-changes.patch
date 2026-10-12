@@ -3903,7 +3903,7 @@ index cf4fbd8..10a12e7 100644
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..2c8d777 100644
+index c0e8a94..36a8100 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -3936,7 +3936,7 @@ index c0e8a94..2c8d777 100644
 +/// HDR output (hdr_paper_white / hdr_peak in nits, hdr_boost 0..1): defaults and ranges.
 +inline constexpr float HdrPaperWhiteDefault = 200.0f, HdrPaperWhiteMin = 80.0f, HdrPaperWhiteMax = 500.0f;
 +inline constexpr float HdrPeakDefault = 1000.0f, HdrPeakMin = 400.0f, HdrPeakMax = 10000.0f;
-+inline constexpr float HdrBoostDefault = 0.5f;
++inline constexpr float HdrBoostDefault = 0.25f;
 +/// The swapchain's HDR signal (Values::hdr_output).
 +enum HdrOutput : int { HdrOutputOff = 0, HdrOutputHdr10 = 1, HdrOutputScRgb = 2 };
  
@@ -4821,7 +4821,7 @@ index bf0d998..86cde4b 100644
              'online_p2p_port':['0','65536','bad']}.items():
              for value in values:
 diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
-index 593fed4..6d91598 100644
+index 593fed4..c11a229 100644
 --- a/tests/test_settings.cpp
 +++ b/tests/test_settings.cpp
 @@ -1,58 +1,58 @@
@@ -4990,7 +4990,7 @@ index 593fed4..6d91598 100644
 +    assert(Read(path).find("hdr=0\n") != std::string::npos);
 +    assert(Read(path).find("hdr_paper_white=200\n") != std::string::npos);
 +    assert(Read(path).find("hdr_peak=1000\n") != std::string::npos);
-+    assert(Read(path).find("hdr_boost=0.50\n") != std::string::npos);
++    assert(Read(path).find("hdr_boost=0.25\n") != std::string::npos);
 +    { std::ofstream file(path); file << "hdr=1\nhdr_paper_white=250\nhdr_peak=20000\nhdr_boost=0.75\n"; }
 +    BbSettings::Load();
 +    assert(s.hdr && s.startup_hdr && s.hdr_paper_white == 250.0f && s.hdr_peak == 10000.0f &&
@@ -5027,10 +5027,10 @@ index 593fed4..6d91598 100644
 +}
 diff --git a/gpu/shadps4/video_core/host_shaders/hdr_output.frag b/gpu/shadps4/video_core/host_shaders/hdr_output.frag
 new file mode 100644
-index 0000000..655f19a
+index 0000000..e227a37
 --- /dev/null
 +++ b/gpu/shadps4/video_core/host_shaders/hdr_output.frag
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,84 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: HDR output. The game's SDR picture (letterboxed into a swapchain-sized sRGB-encoded
 +// image) and the settings menu's layer (premultiplied alpha, sRGB encoded) become the HDR
@@ -5054,8 +5054,9 @@ index 0000000..655f19a
 +const uint FLAG_SCRGB = 1u;   // scRGB output, else HDR10
 +const uint FLAG_OVERLAY = 2u; // the menu layer has something drawn
 +
-+// Linear brightness (SDR white = 1) above which the highlights are expanded.
-+const float KNEE = 0.65;
++// Linear brightness (SDR white = 1) above which the highlights are expanded: high, so large
++// bright areas (fog, sky) stay near paper white and only lamps, fire and sparks reach the peak.
++const float KNEE = 0.8;
 +
 +// BT.709 -> BT.2020 primaries (columns).
 +const mat3 BT709_TO_BT2020 = mat3(
@@ -5063,9 +5064,11 @@ index 0000000..655f19a
 +    0.3293, 0.9195, 0.0880,
 +    0.0433, 0.0114, 0.8956);
 +
-+// The sRGB EOTF, as Windows shows SDR content in HDR.
-+vec3 SrgbToLinear(vec3 c) {
-+    return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
++// The game's picture is made for SDR displays, which show it with a 2.2 power curve. The
++// piecewise sRGB curve (what Windows uses for SDR content in HDR) lifts the shadows: dark
++// scenes turn grey and foggy. Bloodborne is mostly shadows, so 2.2 it is.
++vec3 SdrToLinear(vec3 c) {
++    return pow(max(c, vec3(0.0)), vec3(2.2));
 +}
 +
 +// SMPTE ST 2084 inverse EOTF; y: luminance / 10000 nits.
@@ -5095,13 +5098,13 @@ index 0000000..655f19a
 +    ivec2 pixel = ivec2(gl_FragCoord.xy);
 +    vec3 game_srgb = texelFetch(game, pixel, 0).rgb;
 +    float white = max(mix(1.0, hdr.peak / hdr.paper_white, clamp(hdr.boost, 0.0, 1.0)), 1.0);
-+    vec3 linear = ExpandHighlights(SrgbToLinear(game_srgb), white);
++    vec3 linear = ExpandHighlights(SdrToLinear(game_srgb), white);
 +    if ((hdr.flags & FLAG_OVERLAY) != 0u) {
 +        // The menu over the frame as the SDR path draws it (blended in sRGB), at paper white:
 +        // the menu is not expanded.
 +        vec4 menu = texelFetch(overlay, pixel, 0);
 +        if (menu.a > 0.0) {
-+            vec3 sdr = SrgbToLinear(clamp(menu.rgb + game_srgb * (1.0 - menu.a), 0.0, 1.0));
++            vec3 sdr = SdrToLinear(clamp(menu.rgb + game_srgb * (1.0 - menu.a), 0.0, 1.0));
 +            linear = mix(linear, sdr, clamp(menu.a * 4.0, 0.0, 1.0));
 +        }
 +    }

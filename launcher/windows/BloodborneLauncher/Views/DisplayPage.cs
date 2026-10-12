@@ -35,7 +35,7 @@ namespace BloodborneLauncher.Views
             ComboRow(SymbolRegular.WeatherSunny24, "Peak brightness", "Your display's peak brightness; highlights stop there",
                 Choices.HdrPeak, () => Ini.Get("hdr_peak", "1000"), v => Ini.Set("hdr_peak", v));
             ComboRow(SymbolRegular.Sparkle24, "Highlight boost", "Off keeps the game's own look; higher makes lamps, fire and the sky brighter",
-                Choices.HdrBoost, () => Ini.Get("hdr_boost", "0.5"), v => Ini.Set("hdr_boost", v));
+                Choices.HdrBoost, () => Ini.Get("hdr_boost", "0.25"), v => Ini.Set("hdr_boost", v));
 
             Group("Frame rate");
             SettingCombo(SymbolRegular.Gauge24, "Frame rate", "30, 60 and 90 are fixed presets; 120 and Uncapped use the uncapped patch with the sprint fix", Choices.FpsModes, "fps_mode");
