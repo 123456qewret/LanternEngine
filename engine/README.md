@@ -38,6 +38,8 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Chromatic aberration, depth of field, motion blur and the game's own anti-aliasing off by default | `effect_*` |
 | Online: characters given no id (0x8000000000000000) ask again; summon sign timeout (droogie bbhost 566184a) | `BB_SIGN_TIMEOUT` (`online_sign_timeout`) |
 | The mouse cursor hidden 2 s after the mouse last moved (it was always shown on Windows unless the mouse camera was on) | `hide_cursor` |
+| Online: the client reports what it is after signing in (shadNet 0.0.34 signs out clients that report nothing); a rejection is logged and signs out at once | `BB_CLIENT_VERSION` |
+| Launch: the boot image (prepare, link_libc, link_modules, content profile) is reused while its inputs are unchanged, about 10 s a launch | `out/prepared.json` |
 | Online: a network drop of the shadNet connection keeps the game signed in for 90 s while it reconnects (it returned to the title menu) | |
 | Online co-op: shadNet server framing for signaling, UPnP port mapping (Supermedo 004d2c37), P2P port 3658 by default, play logs to the game server | `SHADPS4_P2P_PORT` |
 | In-game PC Colour page (brightness, contrast, saturation, hue from the game's own tone map) and a fog slider on PC Graphics, live; the same in the launcher's Picture tuning | `graphics_brightness`, `graphics_contrast`, `graphics_hue`, `graphics_fog` |

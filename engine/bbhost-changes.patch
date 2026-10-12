@@ -458,7 +458,7 @@ index 35faa3f..3f899cd 100644
  int P2PSignalingRecvFrom(void* buf, u32 len, u32* from_addr, u16* from_port);
  int P2PControlSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port);
 diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
-index d9ce291..8aecbaa 100644
+index d9ce291..c475700 100644
 --- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
 +++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
 @@ -56,7 +56,7 @@ std::pair<std::string, u16> NpHandler::ParseServerAddress() const {
@@ -517,9 +517,28 @@ index d9ce291..8aecbaa 100644
      LOG_INFO(NpHandler, "user_id={} disconnected", user_id);
  }
  
-@@ -358,12 +360,16 @@ void NpHandler::WorkerThread() {
+@@ -348,22 +350,33 @@ void NpHandler::WorkerThread() {
+         std::this_thread::sleep_for(INTERVAL);
+ 
+         // Collect ids of dropped clients
+-        std::vector<s32> dropped;
++        std::vector<s32> dropped, rejected;
+         {
+             std::lock_guard lock(m_mutex_clients);
+             for (auto& [uid, client] : m_clients) {
+                 if (!client->IsConnected())
+-                    dropped.push_back(uid);
++                    (client->WasRejected() ? rejected : dropped).push_back(uid);
+             }
          }
  
++        // bbport: turned away by the server (its message is in the log): signed out now, and no
++        // reconnecting into its login cooldown.
++        for (s32 uid : rejected) {
++            LOG_WARNING(NpHandler, "user_id={} turned away by the shadNet server; signed out", uid);
++            DisconnectUser(uid);
++        }
++
          for (s32 uid : dropped) {
 -            LOG_WARNING(NpHandler, "user_id={} connection dropped (network); will retry", uid);
 -            DisconnectUser(uid);   // reports SignedOut + stops/removes the dead client
@@ -537,7 +556,7 @@ index d9ce291..8aecbaa 100644
      }
  }
  
-@@ -372,13 +378,19 @@ void NpHandler::MarkForReconnect(s32 user_id) {
+@@ -372,13 +385,19 @@ void NpHandler::MarkForReconnect(s32 user_id) {
          return; // offline mode: nothing to reconnect to
      constexpr auto kInitialBackoff = std::chrono::milliseconds(2000);
      std::lock_guard lock(m_mutex_clients);
@@ -558,7 +577,7 @@ index d9ce291..8aecbaa 100644
      const auto now = std::chrono::steady_clock::now();
  
      std::vector<s32> due;
-@@ -398,12 +410,20 @@ void NpHandler::TryReconnect() {
+@@ -398,12 +417,20 @@ void NpHandler::TryReconnect() {
              m_reconnect.erase(uid);
              continue;
          }
@@ -581,7 +600,7 @@ index d9ce291..8aecbaa 100644
          } else if (auto it = m_reconnect.find(uid); it != m_reconnect.end()) {
              it->second.backoff = std::min(it->second.backoff * 2, kMaxBackoff);
              it->second.next_attempt = std::chrono::steady_clock::now() + it->second.backoff;
-@@ -416,7 +436,30 @@ void NpHandler::TryReconnect() {
+@@ -416,7 +443,30 @@ void NpHandler::TryReconnect() {
  bool NpHandler::IsPsnSignedIn(s32 user_id) const {
      std::lock_guard lock(m_mutex_clients);
      auto it = m_clients.find(user_id);
@@ -682,6 +701,133 @@ index 94882fd..6d59a31 100644
          return false;
      }
  
+diff --git a/gpu/bbnet/vendor/shadps4/shadnet/client.cpp b/gpu/bbnet/vendor/shadps4/shadnet/client.cpp
+index 7088df3..bffd6b3 100644
+--- a/gpu/bbnet/vendor/shadps4/shadnet/client.cpp
++++ b/gpu/bbnet/vendor/shadps4/shadnet/client.cpp
+@@ -3,6 +3,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <chrono>
+ #include <thread>
+ 
+@@ -524,6 +525,31 @@ u64 ShadNetClient::SetAppearOffline(bool enable) {
+     return SubmitRequest(CommandType::SetAppearOffline, MakeProtoPayload(req));
+ }
+ 
++// bbport: right after signing in, what this client is (SetClientVersion,
++// SetClientVersionRequest { string version = 1; }). shadNet 0.0.34 checks it against its
++// clientversions.cfg and signs out, after 15 s, a client that reports nothing - every session of
++// a build from before it. BB_CLIENT_VERSION is the launcher's ("BloodBorneButPc v0.9.12"): this
++// client says what it is, never another emulator's name.
++void ShadNetClient::SendClientVersion() {
++    const char* env = std::getenv("BB_CLIENT_VERSION");
++    const std::string version = env && *env ? env : "BloodBorneButPc";
++    std::string proto(1, '\x0a'); // field 1, length-delimited
++    for (u32 n = static_cast<u32>(version.size());; n >>= 7) {
++        if (n < 0x80) {
++            proto.push_back(static_cast<char>(n));
++            break;
++        }
++        proto.push_back(static_cast<char>((n & 0x7f) | 0x80));
++    }
++    proto += version;
++    const u32 len = static_cast<u32>(proto.size());
++    std::vector<u8> payload{static_cast<u8>(len), static_cast<u8>(len >> 8),
++                            static_cast<u8>(len >> 16), static_cast<u8>(len >> 24)};
++    payload.insert(payload.end(), proto.begin(), proto.end());
++    SubmitRequest(CommandType::SetClientVersion, payload);
++    LOG_INFO(ShadNet, "Client version reported: '{}'", version);
++}
++
+ bool ShadNetClient::RequestServerFeatures() {
+     const u64 pkt_id = m_pkt_counter.fetch_add(1);
+     std::vector<u8> empty_payload;
+@@ -622,6 +648,7 @@ void ShadNetClient::HandleLoginReply(const std::vector<u8>& payload) {
+                 m_authenticated = true;
+                 LOG_INFO(ShadNet, "Logged in npid='{}' userId={} friends={}", m_npid, m_user_id,
+                          m_friends.size());
++                SendClientVersion();
+ 
+                 const u64 pkt_id = m_pkt_counter.fetch_add(1);
+                 std::vector<u8> empty_payload;
+@@ -866,6 +893,33 @@ void ShadNetClient::HandleNotification(u16 cmd_raw, const std::vector<u8>& paylo
+             onRoomMessage(n);
+         break;
+     }
++    case NotificationType::ClientRejected: {
++        // NotifyClientRejected { uint32 reason = 1; string message = 2; string version = 3; }:
++        // the message is shown in the log; the server disconnects right after.
++        std::string message;
++        for (size_t i = 0; i < blob.size();) {
++            const u8 key = static_cast<u8>(blob[i++]);
++            u64 value = 0;
++            for (int shift = 0; i < blob.size() && shift < 64; shift += 7) {
++                const u8 b = static_cast<u8>(blob[i++]);
++                value |= u64(b & 0x7f) << shift;
++                if (!(b & 0x80))
++                    break;
++            }
++            if ((key & 7) == 2) {
++                const size_t n = std::min<size_t>(value, blob.size() - i);
++                if ((key >> 3) == 2)
++                    message.assign(blob, i, n);
++                i += n;
++            } else if ((key & 7) != 0) {
++                break;
++            }
++        }
++        m_rejected = true;
++        LOG_ERROR(ShadNet, "The shadNet server turned this client away: {}",
++                  message.empty() ? std::string("(no reason given)") : message);
++        break;
++    }
+     case NotificationType::WebApiPushEvent: {
+         // Length-prefixed fields: npServiceName, npServiceLabel(u32 LE), dataType,
+         // data, fromNpid, toNpid. ExtractBlob returns {} past the end, so a short
+diff --git a/gpu/bbnet/vendor/shadps4/shadnet/client.h b/gpu/bbnet/vendor/shadps4/shadnet/client.h
+index 5c0d041..cfe8e4b 100644
+--- a/gpu/bbnet/vendor/shadps4/shadnet/client.h
++++ b/gpu/bbnet/vendor/shadps4/shadnet/client.h
+@@ -67,6 +67,7 @@ enum class CommandType : u16 {
+     AddBlock = 10,
+     RemoveBlock = 11,
+     GetServerFeatures = 12,
++    SetClientVersion = 13, // bbport: shadNet 0.0.34 signs out clients that report none
+     GetBoardInfos = 30,
+     RecordScore = 31,
+     RecordScoreData = 32,
+@@ -105,6 +106,7 @@ enum class NotificationType : u16 {
+     RoomEvent = 10,
+     RoomMessage = 11,
+     WebApiPushEvent = 17, // Generic NP WebApi push event
++    ClientRejected = 19,  // bbport: the server won't keep this client signed in (its message), then disconnects
+ };
+ 
+ enum class ErrorType : uint8_t {
+@@ -268,6 +270,11 @@ public:
+ 
+     bool IsConnected() const;
+     bool IsAuthenticated() const;
++    /// bbport: the server turned this client away (notification 19): reconnecting only meets
++    /// its login cooldown.
++    bool WasRejected() const {
++        return m_rejected;
++    }
+     ShadNetState GetState() const;
+ 
+     const std::string& GetAvatarUrl() const;
+@@ -350,6 +357,8 @@ private:
+     std::atomic<bool> m_terminate{false};
+     std::atomic<bool> m_connected{false};
+     std::atomic<bool> m_authenticated{false};
++    std::atomic<bool> m_rejected{false};
++    void SendClientVersion();
+     std::atomic<ShadNetState> m_state{ShadNetState::Ok};
+ 
+     std::binary_semaphore m_sem_connected{0};
 diff --git a/gpu/shadps4/common/thread.cpp b/gpu/shadps4/common/thread.cpp
 index e2061f7..724dbe2 100644
 --- a/gpu/shadps4/common/thread.cpp
@@ -8595,10 +8741,87 @@ index fdbf8c4..d0e1ad9 100644
 +    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..3991891 100644
+index ea6daf1..3f34338 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
-@@ -148,8 +148,10 @@ def main():
+@@ -10,12 +10,15 @@ The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_
+ the port is (re)built first through MSYS2 (build.sh in the CLANG64 environment)."""
+ import atexit
+ from datetime import datetime
++import hashlib
++import json
+ import os
+ from pathlib import Path
+ import shlex
+ import subprocess
+ import sys
+ import struct
++import time
+ import zlib
+ from mods import remove_overlay
+ 
+@@ -78,6 +81,50 @@ def build():
+     run([bash, '-lc', 'bash build.sh'], env=env)
+ 
+ 
++# The image the engine boots (prepare.py, link_libc.py, link_modules.py, content_profile.py):
++# about 300 MB written and 235,000 relocations applied, the same every launch for the same game.
++# It is made again only when what it is made from changes - the game's executable, modules and
++# parameters, the content SKU, these scripts - and reused otherwise (out/prepared.json).
++PREPARE_SCRIPTS = ('prepare.py', 'link_libc.py', 'link_modules.py', 'content_profile.py', 'game_check.py')
++PREPARED = ('boot.bin', 'eboot.elf', 'entry.bin', 'analysis.json', 'boot-libc.bin', 'libc-link.json',
++            'boot-linked.bin', 'link.json', 'content.bin', 'content-profile.json')
++
++
++def prepare_key(game, sku):
++    digest = hashlib.sha256()
++    modules = sorted((game / 'sce_module').iterdir()) if (game / 'sce_module').is_dir() else []
++    for path in [game / 'eboot.bin', game / 'sce_sys/param.sfo', *modules, *(SCRIPTS / s for s in PREPARE_SCRIPTS)]:
++        digest.update(path.name.encode('utf-8') + b'\0')
++        if path.is_file():
++            with path.open('rb') as f:
++                while chunk := f.read(1 << 20):
++                    digest.update(chunk)
++        digest.update(b'\0')
++    digest.update(f'sku={sku};check={os.environ.get("BB_SKIP_GAME_CHECK", "")}'.encode('utf-8'))
++    return digest.hexdigest()
++
++
++def prepare_image(game, out):
++    """The boot image for `game` in `out`: reused when unchanged, else made by the scripts."""
++    started = time.monotonic()
++    sku = os.environ.get('BB_CONTENT_SKU', 'full')
++    stamp = out / 'prepared.json'
++    key = prepare_key(game, sku)
++    try:
++        reusable = json.loads(stamp.read_text(encoding='utf-8')).get('key') == key
++    except (OSError, ValueError, AttributeError):
++        reusable = False
++    if reusable and all((out / name).is_file() for name in PREPARED):
++        print(f'Boot image unchanged: reused ({time.monotonic() - started:.1f} s)', flush=True)
++        return
++    stamp.unlink(missing_ok=True)  # a run stopped half way leaves no stamp behind
++    for script, extra in (('prepare.py', []), ('link_libc.py', []), ('link_modules.py', []),
++                          ('content_profile.py', ['--sku', sku])):
++        run([PYTHON, SCRIPTS / script, game, '--out', out, *extra])
++    stamp.write_text(json.dumps({'key': key}) + '\n', encoding='utf-8')
++    print(f'Boot image prepared in {time.monotonic() - started:.1f} s (reused on later launches)', flush=True)
++
++
+ def settings_value(config, key):
+     if not config.is_file():
+         return None
+@@ -139,17 +186,17 @@ def main():
+                        '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
+     overlay = merged if merged.resolve() != original else None
+     try:
+-        for script, extra in (('prepare.py', []), ('link_libc.py', []), ('link_modules.py', []),
+-                              ('content_profile.py', ['--sku', os.environ.get('BB_CONTENT_SKU', 'full')])):
+-            run([PYTHON, SCRIPTS / script, merged, '--out', out, *extra])
++        prepare_image(merged, out)
+         prebuilt = os.environ.get('BB_PREBUILT') == '1'
+         if not prebuilt:
+             build()
          # Engine features are prepared locally and only mounted after runtime byte checks.
          for key in ('BB_DREAM_MIRROR_ASSET', 'BB_ENGINE_IMAGE_SHA256', 'BB_PC_MENU_ASSETS', 'BB_REBIRTH_ASSET'):
              os.environ.pop(key, None)
@@ -8610,7 +8833,7 @@ index ea6daf1..3991891 100644
              try:
                  from engine_assets import prepare_mirror, verify_executable
                  os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
-@@ -192,8 +194,12 @@ def main():
+@@ -192,8 +239,12 @@ def main():
              print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
          elif scaled_output:
              os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
@@ -8625,7 +8848,7 @@ index ea6daf1..3991891 100644
                    '(live_resolution=1: live changes)')
          run([PYTHON, SCRIPTS / 'patches.py', '--out', out, '--fps', fps, '--extra', os.environ.get('BB_PATCHES', ''),
               '--settings', config, '--game-dir', merged, '--render-res', os.environ.get('BB_RENDER_RES', ''),
-@@ -219,7 +225,9 @@ def main():
+@@ -219,7 +270,9 @@ def main():
          except KeyboardInterrupt:
              status = 130
          print(f'bb-probe exited with code {status}', flush=True)
