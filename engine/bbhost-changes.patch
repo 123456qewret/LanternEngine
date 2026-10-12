@@ -457,6 +457,210 @@ index 35faa3f..3f899cd 100644
  int P2PSignalingSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port);
  int P2PSignalingRecvFrom(void* buf, u32 len, u32* from_addr, u16* from_port);
  int P2PControlSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port);
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
+index d9ce291..8aecbaa 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.cpp
+@@ -56,7 +56,7 @@ std::pair<std::string, u16> NpHandler::ParseServerAddress() const {
+     return {host, port};
+ }
+ 
+-bool NpHandler::ConnectUserById(s32 user_id) {
++bool NpHandler::ConnectUserById(s32 user_id, bool announce) {
+     if (!EmulatorSettings.IsShadNetEnabled())
+         return false;
+ 
+@@ -82,7 +82,7 @@ bool NpHandler::ConnectUserById(s32 user_id) {
+ 
+     const auto [host, port] = ParseServerAddress();
+     return ConnectUser(u->user_id, host, port, u->shadnet_npid, u->shadnet_password,
+-                       u->shadnet_token);
++                       u->shadnet_token, announce);
+ }
+ 
+ void NpHandler::StartWorker() {
+@@ -195,7 +195,7 @@ void NpHandler::Shutdown() {
+ }
+ 
+ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, const std::string& npid,
+-                            const std::string& password, const std::string& token) {
++                            const std::string& password, const std::string& token, bool announce) {
+     LOG_INFO(NpHandler, "Connecting user_id={} npid='{}' to {}:{} (timeout {}s)", user_id, npid,
+              host, port, ShadNet::SHAD_CONNECT_TIMEOUT_MS / 1000);
+ 
+@@ -296,7 +296,8 @@ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, cons
+         m_clients[user_id] = std::move(client);
+     }
+ 
+-    FireStateCallback(user_id, NpManager::OrbisNpState::SignedIn);
++    if (announce)
++        FireStateCallback(user_id, NpManager::OrbisNpState::SignedIn);
+     return true;
+ }
+ 
+@@ -309,7 +310,7 @@ void NpHandler::SetAppearOffline(bool enable) {
+     }
+ }
+ 
+-void NpHandler::DisconnectUser(s32 user_id) {
++void NpHandler::DisconnectUser(s32 user_id, bool report) {
+     std::shared_ptr<ShadNet::ShadNetClient> client;
+     {
+         std::lock_guard lock(m_mutex_clients);
+@@ -324,7 +325,8 @@ void NpHandler::DisconnectUser(s32 user_id) {
+         m_friend_state.erase(user_id);
+     }
+     client->Stop();
+-    FireStateCallback(user_id, NpManager::OrbisNpState::SignedOut);
++    if (report)
++        FireStateCallback(user_id, NpManager::OrbisNpState::SignedOut);
+     LOG_INFO(NpHandler, "user_id={} disconnected", user_id);
+ }
+ 
+@@ -358,12 +360,16 @@ void NpHandler::WorkerThread() {
+         }
+ 
+         for (s32 uid : dropped) {
+-            LOG_WARNING(NpHandler, "user_id={} connection dropped (network); will retry", uid);
+-            DisconnectUser(uid);   // reports SignedOut + stops/removes the dead client
+-            MarkForReconnect(uid); // schedule transparent reconnect (network drop, not logout)
++            LOG_WARNING(NpHandler,
++                        "user_id={} connection dropped (network); reconnecting - still signed in "
++                        "for the game for up to {}s",
++                        uid, kReconnectGrace.count());
++            DisconnectUser(uid, false); // stops/removes the dead client; the game is not told
++            MarkForReconnect(uid);      // schedule transparent reconnect (network drop, not logout)
+         }
+ 
+         TryReconnect();
++        ExpireReconnectGrace();
+     }
+ }
+ 
+@@ -372,13 +378,19 @@ void NpHandler::MarkForReconnect(s32 user_id) {
+         return; // offline mode: nothing to reconnect to
+     constexpr auto kInitialBackoff = std::chrono::milliseconds(2000);
+     std::lock_guard lock(m_mutex_clients);
++    const bool already = m_reconnect.count(user_id) != 0;
+     auto& st = m_reconnect[user_id];
+     st.backoff = kInitialBackoff;
+     st.next_attempt = std::chrono::steady_clock::now() + st.backoff;
++    if (!already) {
++        st.since = std::chrono::steady_clock::now();
++        st.reported_out = false;
++    }
+ }
+ 
+ void NpHandler::TryReconnect() {
+-    constexpr auto kMaxBackoff = std::chrono::milliseconds(30000);
++    // bbport: 10 s at most between attempts (was 30): within the grace, several of them.
++    constexpr auto kMaxBackoff = std::chrono::milliseconds(10000);
+     const auto now = std::chrono::steady_clock::now();
+ 
+     std::vector<s32> due;
+@@ -398,12 +410,20 @@ void NpHandler::TryReconnect() {
+             m_reconnect.erase(uid);
+             continue;
+         }
++        // The game hears of the reconnect only if it was told of the drop (the grace ran out).
++        bool told = true;
++        {
++            std::lock_guard lock(m_mutex_clients);
++            if (auto it = m_reconnect.find(uid); it != m_reconnect.end())
++                told = it->second.reported_out;
++        }
+         // ConnectUserById locks m_mutex_clients internally; call it unlocked.
+-        const bool ok = ConnectUserById(uid);
++        const bool ok = ConnectUserById(uid, told);
+         std::lock_guard lock(m_mutex_clients);
+         if (ok || m_clients.count(uid)) {
+             m_reconnect.erase(uid);
+-            LOG_INFO(NpHandler, "user_id={} reconnected to shadNet", uid);
++            LOG_INFO(NpHandler, "user_id={} reconnected to shadNet{}", uid,
++                     told ? "" : " (the game stayed signed in)");
+         } else if (auto it = m_reconnect.find(uid); it != m_reconnect.end()) {
+             it->second.backoff = std::min(it->second.backoff * 2, kMaxBackoff);
+             it->second.next_attempt = std::chrono::steady_clock::now() + it->second.backoff;
+@@ -416,7 +436,30 @@ void NpHandler::TryReconnect() {
+ bool NpHandler::IsPsnSignedIn(s32 user_id) const {
+     std::lock_guard lock(m_mutex_clients);
+     auto it = m_clients.find(user_id);
+-    return it != m_clients.end() && it->second->IsAuthenticated();
++    if (it != m_clients.end() && it->second->IsAuthenticated())
++        return true;
++    // bbport: reconnecting after a network drop, within the grace: still signed in for the game.
++    const auto r = m_reconnect.find(user_id);
++    return r != m_reconnect.end() && !r->second.reported_out;
++}
++
++void NpHandler::ExpireReconnectGrace() {
++    const auto now = std::chrono::steady_clock::now();
++    std::vector<s32> expired;
++    {
++        std::lock_guard lock(m_mutex_clients);
++        for (auto& [uid, st] : m_reconnect) {
++            if (!st.reported_out && now - st.since >= kReconnectGrace) {
++                st.reported_out = true;
++                expired.push_back(uid);
++            }
++        }
++    }
++    for (s32 uid : expired) {
++        LOG_WARNING(NpHandler, "user_id={} could not reconnect to shadNet within {}s: signed out",
++                    uid, kReconnectGrace.count());
++        FireStateCallback(uid, NpManager::OrbisNpState::SignedOut);
++    }
+ }
+ 
+ bool NpHandler::IsAnySignedIn() const {
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h
+index 38dc51e..8e8fc17 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_handler.h
+@@ -221,10 +221,11 @@ private:
+ 
+     /// Connect one user.  Blocks until connected+authenticated or failed.
+     bool ConnectUser(s32 user_id, const std::string& host, u16 port, const std::string& npid,
+-                     const std::string& password, const std::string& token);
++                     const std::string& password, const std::string& token, bool announce = true);
+ 
+     // Connect a single logged-in user by id (looks up credentials, parses server).
+-    bool ConnectUserById(s32 user_id);
++    /// `announce`: tell the game it signed in (not after a drop it was never told of).
++    bool ConnectUserById(s32 user_id, bool announce = true);
+ 
+     // Parse the configured shadNet server "host:port" (default port 31313).
+     std::pair<std::string, u16> ParseServerAddress() const;
+@@ -233,7 +234,10 @@ private:
+     void StartWorker();
+ 
+     // Disconnect and remove one user's client.
+-    void DisconnectUser(s32 user_id);
++    /// `report`: tell the game it signed out (not for a network drop being reconnected).
++    void DisconnectUser(s32 user_id, bool report = true);
++    /// bbport: a dropped user whose reconnect has not come within the grace: signed out now.
++    void ExpireReconnectGrace();
+ 
+     void WorkerThread();
+     // Transparent reconnect after a network drop
+@@ -297,11 +301,16 @@ private:
+     std::atomic<bool> m_worker_running{false};
+     std::thread m_worker_thread;
+ 
+-    // Users dropped by a network error and awaiting transparent reconnect
++    // Users dropped by a network error and awaiting transparent reconnect. bbport: for
++    // kReconnectGrace the game is not told: it stays signed in (IsPsnSignedIn), so a moment's
++    // drop of the server's connection no longer returns it to the title menu mid-play.
+     struct ReconnectState {
+         std::chrono::steady_clock::time_point next_attempt{};
+         std::chrono::milliseconds backoff{0};
++        std::chrono::steady_clock::time_point since{};
++        bool reported_out = false; // the grace ran out: the game was told it signed out
+     };
++    static constexpr std::chrono::seconds kReconnectGrace{90};
+     std::unordered_map<s32, ReconnectState> m_reconnect;
+ 
+     mutable std::mutex m_mutex_pending_invites;
 diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
 index 94882fd..6d59a31 100644
 --- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
@@ -9807,7 +10011,7 @@ index d51b554..60e312c 100644
  }
  
 diff --git a/tools/engine/pc_option_messages.tsv b/tools/engine/pc_option_messages.tsv
-index 2199381..664431c 100644
+index 2199381..5b25308 100644
 --- a/tools/engine/pc_option_messages.tsv
 +++ b/tools/engine/pc_option_messages.tsv
 @@ -7,7 +7,7 @@
@@ -9841,6 +10045,22 @@ index 2199381..664431c 100644
  121020	PC Camera	
  121000	Camera Distance	How far behind the character the camera sits. 5 is the game's own.
  121001	Camera Height	How high above the character the camera looks. 5 is the game's own.
+@@ -120,9 +126,9 @@
+ 14000336	Undo Rebirth	
+ 
+ 118005	Camera Auto Rotation	Allow the camera to turn automatically while using the mouse.
+-117040	2560x1080
+-117041	3440x1440
+-117042	3840x1600
+-117043	3840x1080
+-117044	5120x1440
+-117045	5120x2160
++117040	2560x1080 (21:9)
++117041	3440x1440 (21:9)
++117042	3840x1600 (24:10)
++117043	3840x1080 (32:9)
++117044	5120x1440 (32:9)
++117045	5120x2160 (21:9)
 diff --git a/docs/hdr.md b/docs/hdr.md
 new file mode 100644
 index 0000000..8db00a1

@@ -33,6 +33,13 @@
             new("1920 × 1080", "1920x1080"),
             new("2560 × 1440", "2560x1440"),
             new("3840 × 2160", "3840x2160"),
+            // Ultrawide: the engine widens the camera to the screen (Widescreen, on by default).
+            new("2560 × 1080 (21:9)", "2560x1080"),
+            new("3440 × 1440 (21:9)", "3440x1440"),
+            new("3840 × 1600 (24:10)", "3840x1600"),
+            new("5120 × 2160 (21:9)", "5120x2160"),
+            new("3840 × 1080 (32:9)", "3840x1080"),
+            new("5120 × 1440 (32:9)", "5120x1440"),
         };
 
         // Chromatic aberration, depth of field, motion blur and the game's own anti-aliasing start off:

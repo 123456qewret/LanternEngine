@@ -37,6 +37,7 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Trophies a save already earned: the 19 boss trophies whose defeat flags are set count once a character is in the world ("earned in this save") | |
 | Chromatic aberration, depth of field, motion blur and the game's own anti-aliasing off by default | `effect_*` |
 | Online: characters given no id (0x8000000000000000) ask again; summon sign timeout (droogie bbhost 566184a) | `BB_SIGN_TIMEOUT` (`online_sign_timeout`) |
+| Online: a network drop of the shadNet connection keeps the game signed in for 90 s while it reconnects (it returned to the title menu) | |
 | Online co-op: shadNet server framing for signaling, UPnP port mapping (Supermedo 004d2c37), P2P port 3658 by default, play logs to the game server | `SHADPS4_P2P_PORT` |
 | In-game PC Colour page (brightness, contrast, saturation, hue from the game's own tone map) and a fog slider on PC Graphics, live; the same in the launcher's Picture tuning | `graphics_brightness`, `graphics_contrast`, `graphics_hue`, `graphics_fog` |
 | HDR output: HDR10 or scRGB swapchain with paper white, peak and highlight boost; native mode takes highlight brightness from the game's scene (a gain map), expand mode from the SDR picture | `hdr`, `hdr_mode`, `hdr_paper_white`, `hdr_peak`, `hdr_boost` |
