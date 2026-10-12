@@ -60,7 +60,8 @@ namespace BloodborneLauncher.Core
             ["exp_thread_priority"] = false,
             ["exp_sleep_spin"] = false,
             ["exp_async_pipelines"] = true,
-            ["exp_occlusion"] = false,
+            ["exp_occlusion"] = true,
+            ["occlusion_default_on"] = true,
             ["section_stats"] = false,
             ["trophy_notifications"] = true,
             ["trophy_sound"] = true,
@@ -81,6 +82,10 @@ namespace BloodborneLauncher.Core
                 {
                     foreach (var (key, value) in saved)
                         _data[key] = value?.DeepClone();
+                    // Occlusion culling no longer flickers and is on by default; files from earlier
+                    // versions saved the old default (off), so it is switched on once.
+                    if (!saved.ContainsKey("occlusion_default_on"))
+                        _data["exp_occlusion"] = true;
                 }
             }
             catch

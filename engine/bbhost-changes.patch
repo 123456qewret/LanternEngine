@@ -16,10 +16,15 @@ index 267b5c1..6ef1bf1 100644
            out/gpu/image-overlap-test.exe
            out/gpu/settings-test.exe
 diff --git a/build.sh b/build.sh
-index 7a41a21..a1921e1 100644
+index 7a41a21..858148e 100644
 --- a/build.sh
 +++ b/build.sh
-@@ -38,11 +38,27 @@ fi
+@@ -35,14 +35,32 @@ if [[ -n $windows ]]; then
+     libraries=("${libraries[@]/-mwindows/-mconsole}")
+     cstd=(-std=gnu11 -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0A00)
+ fi
++# BB_JOBS=N: at most N compile and link-time optimization jobs (less memory, e.g. while the
++# game runs).
  # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libbbgpu.so.
  # BB_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
  # Default: use the profile in pgo/ when there is one. BB_LTO=OFF disables link-time optimization.
@@ -49,7 +54,7 @@ index 7a41a21..a1921e1 100644
  # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
  # to FSR-Vulkan (gpu/patches/fsr-vulkan), applied to its working tree once.
  if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
-@@ -53,9 +69,18 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
+@@ -53,11 +71,20 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
          git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
      fi
  done
@@ -69,9 +74,12 @@ index 7a41a21..a1921e1 100644
 +fi
 +echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}, march ${BB_MARCH:-default}"
  # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
- if ! ninja -C out/gpu bbgpu bb-engine-assets > out/gpu-build.log 2>&1; then
+-if ! ninja -C out/gpu bbgpu bb-engine-assets > out/gpu-build.log 2>&1; then
++if ! ninja -C out/gpu ${BB_JOBS:+-j "$BB_JOBS"} bbgpu bb-engine-assets > out/gpu-build.log 2>&1; then
      grep -v '^\[' out/gpu-build.log | tail -40 >&2
-@@ -72,7 +97,11 @@ if [[ -n $windows ]]; then
+     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
+ fi
+@@ -72,7 +99,11 @@ if [[ -n $windows ]]; then
      runtime+=(src/win32_*.c)
      # The static library's link-time optimization (ThinLTO in lld) runs here; on Linux it runs in
      # the .so link.
@@ -79,7 +87,7 @@ index 7a41a21..a1921e1 100644
 +    # The ThinLTO cache keeps each module's optimized code: a rebuild after a small change
 +    # optimizes only the modules it touched (and what inlines from them), on every thread.
 +    link=(-Wl,--disable-dynamicbase,--disable-high-entropy-va -lwinmm -lws2_32 -lpsapi -flto=thin
-+          -Wl,--thinlto-cache-dir="$PWD/out/thinlto-cache" -Wl,--thinlto-jobs=all
++          -Wl,--thinlto-cache-dir="$PWD/out/thinlto-cache" -Wl,--thinlto-jobs="${BB_JOBS:-all}"
 +          -Wl,--thinlto-cache-policy=cache_size_bytes=6g:prune_after=1209600s)
  fi
  # Third-party decoders: compiled once, without this project's -Werror policy.
@@ -345,10 +353,18 @@ index a300d10..ae628fd 100644
      std::chrono::nanoseconds target_interval{};
      std::chrono::nanoseconds total_wait{};
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
-index 30de04f..b229029 100644
+index 30de04f..fe45c0c 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
 +++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
-@@ -372,6 +372,23 @@ static void PrintMemory() {
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cmath>
+ #include <vector>
+ #include <chrono>
+@@ -372,6 +373,23 @@ static void PrintMemory() {
  #endif
  }
  
@@ -372,7 +388,7 @@ index 30de04f..b229029 100644
  void VideoOutDriver::Flip(const Request& req) {
      // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
      RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
-@@ -381,6 +398,14 @@ void VideoOutDriver::Flip(const Request& req) {
+@@ -381,6 +399,14 @@ void VideoOutDriver::Flip(const Request& req) {
      Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                  : 0);
  
@@ -387,7 +403,28 @@ index 30de04f..b229029 100644
      // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
      static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
      if (frame_stats) {
-@@ -813,8 +838,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -753,8 +779,18 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
+     {
+         std::unique_lock lock{port->port_mutex};
+         if (index != -1 && port->flip_status.flip_pending_num > 16) {
+-            LOG_ERROR(Lib_VideoOut, "Flip queue is full");
+-            return false;
++            // bbport: an EOP flip has nobody to return the error to: refusing it ended the game
++            // (assertion, exit 23), and dropping it would keep its buffer's label (the game may
++            // wait for it). It is queued anyway; frame preparation waits for a free frame.
++            if (!is_eop) {
++                LOG_ERROR(Lib_VideoOut, "Flip queue is full");
++                return false;
++            }
++            static std::atomic<u32> notes{0};
++            if (notes.fetch_add(1, std::memory_order_relaxed) < 4) {
++                std::printf("VideoOut: %d flips pending; EOP flip queued anyway\n",
++                            port->flip_status.flip_pending_num);
++            }
+         }
+ 
+         if (is_eop) {
+@@ -813,8 +849,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
                                            : std::chrono::nanoseconds(0);
      auto next_flip = std::chrono::steady_clock::now();
@@ -399,7 +436,7 @@ index 30de04f..b229029 100644
  
      const auto receive_request = [this] -> Request {
          std::scoped_lock lk{mutex};
-@@ -831,6 +857,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -831,6 +868,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      // next vblank tick.
      const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
  
@@ -537,7 +574,7 @@ index 30de04f..b229029 100644
      while (!token.stop_requested()) {
          timer.Start();
          const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
-@@ -864,29 +1021,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -864,29 +1032,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
              }
          }
  
@@ -613,8 +650,45 @@ index 1cf6d2a..43f2e98 100644
              const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
              ASSERT_MSG(result, "EOP flip submission failed");
          });
+diff --git a/gpu/shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp b/gpu/shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+index 9175131..2715c6e 100644
+--- a/gpu/shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
++++ b/gpu/shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+@@ -37,6 +37,10 @@ void EnsureSrtFaultHandler();
+ 
+ namespace Shader {
+ 
++void RegisterSrtFaultHandler() {
++    EnsureSrtFaultHandler();
++}
++
+ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+     // bbport: walkers restored from the pipeline cache fault on null SRT pointers like freshly
+     // generated ones; without the handler the first such fault ended the process.
+@@ -888,6 +892,8 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
+ 
+ namespace Shader {
+ 
++void RegisterSrtFaultHandler() {}
++
+ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+     UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
+ }
+diff --git a/gpu/shadps4/shader_recompiler/ir/passes/srt.h b/gpu/shadps4/shader_recompiler/ir/passes/srt.h
+index 918b832..1fc2fb5 100644
+--- a/gpu/shadps4/shader_recompiler/ir/passes/srt.h
++++ b/gpu/shadps4/shader_recompiler/ir/passes/srt.h
+@@ -15,6 +15,8 @@ namespace Shader {
+ 
+ using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
+ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
++/// bbport: registers the walkers' fault handler (at startup, before guest threads run).
++void RegisterSrtFaultHandler();
+ 
+ struct PersistentSrtInfo {
+     // Special case when fetch shader uses step rates.
 diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.cpp b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
-index fa7e146..5132271 100644
+index fa7e146..4abf4e5 100644
 --- a/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 +++ b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 @@ -36,6 +36,7 @@
@@ -625,15 +699,32 @@ index fa7e146..5132271 100644
  #include "video_core/renderer_vulkan/vk_rasterizer.h"
  
  extern "C" int runtime_memory_vma_info(uintptr_t address, int* prot, int* type, uintptr_t* end);
-@@ -122,6 +123,7 @@ void Liverpool::ProcessCommands() {
+@@ -120,8 +121,24 @@ void Liverpool::ProcessCommands() {
+     }
+ }
  
++namespace {
++/// bbport BB_SUBMIT_END_TASKS (default on; 0: off): see the end of Liverpool::Process.
++bool SubmitEndTasks() {
++    static const bool on = [] {
++        const char* env = std::getenv("BB_SUBMIT_END_TASKS");
++        const bool enabled = !(env && env[0] == '0');
++        std::printf("GPU: end of decoded work handed to the draw recording thread: %s "
++                    "(BB_SUBMIT_END_TASKS)\n",
++                    enabled ? "on" : "off");
++        return enabled;
++    }();
++    return on;
++}
++} // namespace
++
  void Liverpool::Process(std::stop_token stoken) {
      Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
 +    BbThreads::MakeCritical(); // bbport: Windows, see bbport_platform.cpp
      if (const int clock = BbPlatform::ThreadCpuClock(); clock != -1) {
          BbStats::gpu_thread_clock.store(clock);
      }
-@@ -167,7 +169,7 @@ void Liverpool::Process(std::stop_token stoken) {
+@@ -167,7 +184,7 @@ void Liverpool::Process(std::stop_token stoken) {
                  if (const char* env = std::getenv("BB_GPU_SPIN_US")) {
                      return std::max(0, std::atoi(env));
                  }
@@ -642,7 +733,60 @@ index fa7e146..5132271 100644
              }());
              if (spin_time.count() > 0) {
                  const auto spin_until = idle_start + spin_time;
-@@ -341,6 +343,11 @@ namespace {
+@@ -243,9 +260,41 @@ void Liverpool::Process(std::stop_token stoken) {
+             }
+         }
+ 
++        // bbport BB_SUBMIT_END_TASKS (default on; 0: the drains below): without honest labels the
++        // end of the decoded work is handed to the draw recording thread in order instead of this
++        // thread draining it (OnSubmit waited 27-35% of the time in dense areas, and the
++        // recording thread ran dry meanwhile and until the next submission was decoded). GPU
++        // idle comes from the deferred signal chain, after every fence before it, as the drain
++        // and WaitDeferredSignals below gave it; only if nothing was submitted since
++        // (SignalGpuIdle). It goes before the frame's cache work, which no longer delays it.
++        const bool end_tasks =
++            rasterizer && !Vulkan::Rasterizer::HonestLabels() && SubmitEndTasks();
++        if (end_tasks) {
++            struct IdleSignal {
++                Liverpool* self;
++                u64 generation;
++            } signal{this, 0};
++            bool decoded;
++            {
++                std::scoped_lock lk{submit_mutex};
++                decoded = num_submits == 0;
++                signal.generation = submissions_total;
++            }
++            // Not everything decoded: a submission came after the loop; it runs again.
++            if (decoded) {
++                rasterizer->RunInOrder(
++                    [](Vulkan::Rasterizer& r, const u8* data) {
++                        IdleSignal idle;
++                        std::memcpy(&idle, data, sizeof(idle));
++                        r.SignalAfterHostCopies(
++                            [idle] { idle.self->SignalGpuIdle(idle.generation); });
++                    },
++                    &signal, sizeof(signal), BbToggle::PipelinedTasks, false);
++            }
++        }
+         if (submit_done) {
+             VideoCore::EndCapture();
+-            if (rasterizer && rasterizer->PipeSignals()) {
++            if (rasterizer && (rasterizer->PipeSignals() || end_tasks)) {
+                 // BB_PIPE_SIGNALS: the frame's cache work runs on the recording thread after the
+                 // frame (this thread decodes the next one meanwhile instead of waiting for it).
+                 static constexpr u8 none = 0;
+@@ -263,6 +312,9 @@ void Liverpool::Process(std::stop_token stoken) {
+         }
+         // BB_SUBMIT_LOCK=decode: a frame ended after its submissions were all decoded.
+         SignalDecodedFrames();
++        if (end_tasks) {
++            continue;
++        }
+ 
+         // bbport: the guest takes GPU idle (sceGnmSubmitDone) as its work being done and frees
+         // the objects that hold its fence labels. The labels must be written before: the draw
+@@ -341,6 +393,11 @@ namespace {
  /// work on earlier draws (register state, draws it hands over, nested buffers). Every other
  /// packet first waits for that thread to run dry (Rasterizer::DrainDrawPipe).
  bool PipelinedOpcode(PM4ItOpcode opcode) {
@@ -654,7 +798,23 @@ index fa7e146..5132271 100644
      switch (opcode) {
      case PM4ItOpcode::Nop:
      case PM4ItOpcode::ContextControl:
-@@ -1009,6 +1016,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -466,8 +523,13 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
+         BbCopy::AfterCopies([eop, seq] { SignalEop(eop, seq); });
+     } else if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
+         // The draw recording thread does not wait: the Vulkan recording thread signals the
+-        // fence after the copies queued before it.
+-        rasterizer.SignalAfterHostCopies([eop, seq] { SignalEop(eop, seq); });
++        // fence after the copies queued before it. A fence right behind this one (already in
++        // the draw pipe, run next) hands both to the recording threads at once.
++        const bool next_is_fence = rasterizer.NextPacketIsTask(&RunEventWriteEop);
++        if (next_is_fence) {
++            rasterizer.merged_fence_kicks.fetch_add(1, std::memory_order_relaxed);
++        }
++        rasterizer.SignalAfterHostCopies([eop, seq] { SignalEop(eop, seq); }, !next_is_fence);
+     } else {
+         // Labels are written in order: not before the ones deferred to the recording thread.
+         rasterizer.WaitHostCopies();
+@@ -1009,6 +1071,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
          seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
      if (draw_prep) {
          draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum);
@@ -662,7 +822,7 @@ index fa7e146..5132271 100644
      }
      static const bool dcb_stats = EmulatorSettingsImpl::Flag("BB_DCB_STATS", false);
      const int dcb_depth = g_dcb_depth;
-@@ -1209,6 +1217,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1209,6 +1272,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  break; // registers: ApplyGraphicsRegisterPacket
              }
              case PM4ItOpcode::SetPredication: {
@@ -675,7 +835,7 @@ index fa7e146..5132271 100644
                  LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
                  break;
              }
-@@ -1417,6 +1431,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1417,6 +1486,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
                      // registers: ApplyGraphicsRegisterPacket
                  } else if (event->event_index.Value() == EventIndex::ZpassDone) {
@@ -690,7 +850,7 @@ index fa7e146..5132271 100644
                      if (event->event_type.Value() == EventType::PixelPipeStatDump) {
                          static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                          static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
-@@ -1592,6 +1614,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1592,6 +1669,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                      if (rasterizer && rasterizer->HasUnsubmittedSignals()) {
                          rasterizer->Flush();
                      }
@@ -702,6 +862,53 @@ index fa7e146..5132271 100644
                      YIELD_GFX();
                  }
                  break;
+@@ -1616,7 +1698,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 break;
+             }
+             case PM4ItOpcode::WaitOnCeCounter: {
+-                while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
++                // bbport: a signed distance, right across the u32 wrap.
++                while (static_cast<s32>(cblock.ce_count - cblock.de_count) <= 0 &&
++                       !ce_task.handle.done()) {
+                     RESUME_GFX(ce_task);
+                 }
+                 break;
+diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.h b/gpu/shadps4/video_core/amdgpu/liverpool.h
+index c641a56..e7b0207 100644
+--- a/gpu/shadps4/video_core/amdgpu/liverpool.h
++++ b/gpu/shadps4/video_core/amdgpu/liverpool.h
+@@ -281,7 +281,8 @@ private:
+         }
+ 
+         [[nodiscard]] u32 Diff() const {
+-            ASSERT_MSG(ce_count >= de_count, "DE counter is ahead of CE");
++            // bbport: compared as a signed distance, right across the u32 wrap.
++            ASSERT_MSG(static_cast<s32>(ce_count - de_count) >= 0, "DE counter is ahead of CE");
+             return ce_count - de_count;
+         }
+ 
+diff --git a/gpu/shadps4/video_core/amdgpu/pixel_format.cpp b/gpu/shadps4/video_core/amdgpu/pixel_format.cpp
+index d88b05f..3acd697 100644
+--- a/gpu/shadps4/video_core/amdgpu/pixel_format.cpp
++++ b/gpu/shadps4/video_core/amdgpu/pixel_format.cpp
+@@ -74,7 +74,7 @@ std::string_view NameOf(DataFormat fmt) {
+     case DataFormat::FormatBc7:
+         return "FormatBc7";
+     default:
+-        UNREACHABLE();
++        return "Unknown"; // bbport: reached while logging a garbage descriptor (was exit 23)
+     }
+ }
+ 
+@@ -107,7 +107,7 @@ std::string_view NameOf(NumberFormat fmt) {
+     case NumberFormat::Ubscaled:
+         return "Unscaled";
+     default:
+-        UNREACHABLE();
++        return "Unknown"; // bbport: as above
+     }
+ }
+ 
 diff --git a/gpu/shadps4/video_core/amdgpu/pixel_format.h b/gpu/shadps4/video_core/amdgpu/pixel_format.h
 index 8b83639..aeac901 100644
 --- a/gpu/shadps4/video_core/amdgpu/pixel_format.h
@@ -718,6 +925,489 @@ index 8b83639..aeac901 100644
          }
      }
      default:
+diff --git a/gpu/shadps4/video_core/amdgpu/resource.h b/gpu/shadps4/video_core/amdgpu/resource.h
+index 8255184..ef9c006 100644
+--- a/gpu/shadps4/video_core/amdgpu/resource.h
++++ b/gpu/shadps4/video_core/amdgpu/resource.h
+@@ -491,7 +491,9 @@ struct Sampler {
+         case AnisoRatio::Sixteen:
+             return 16.0f;
+         default:
+-            UNREACHABLE();
++            // bbport: 5-7 (reserved, a stale or garbage sharp) clamp to 16x as the hardware's
++            // maximum; this ended the game (UNREACHABLE, exit 23).
++            return 16.0f;
+         }
+     }
+ };
+diff --git a/gpu/shadps4/video_core/amdgpu/tiling.cpp b/gpu/shadps4/video_core/amdgpu/tiling.cpp
+index fa3476b..8eb8214 100644
+--- a/gpu/shadps4/video_core/amdgpu/tiling.cpp
++++ b/gpu/shadps4/video_core/amdgpu/tiling.cpp
+@@ -1,7 +1,11 @@
+ // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
++#include <atomic>
++#include <bit>
+ #include "common/assert.h"
++#include "common/logging/log.h"
+ #include "video_core/amdgpu/tiling.h"
+ 
+ #include <magic_enum/magic_enum.hpp>
+@@ -11,6 +15,16 @@ namespace AmdGpu {
+ static constexpr u32 MICROTILE_SIZE = 8;
+ static constexpr u32 DRAM_ROW_SIZE = 1024;
+ 
++/// bbport: a mode outside the tables (a garbage or unsupported descriptor) is reported a few
++/// times and treated as a known one (linear, 1x1_16 banks); it ended the game (UNREACHABLE,
++/// exit 23). At worst that surface renders wrong.
++static void NoteUnknown(const char* what, u32 value) {
++    static std::atomic<u32> notes{0};
++    if (notes.fetch_add(1, std::memory_order_relaxed) < 8) {
++        LOG_ERROR(Render, "Unknown {} = {}, using a fallback", what, value);
++    }
++}
++
+ std::string_view NameOf(TileMode tile_mode) {
+     return magic_enum::enum_name(tile_mode);
+ }
+@@ -61,7 +75,8 @@ ArrayMode GetArrayMode(TileMode tile_mode) {
+     case TileMode::DisplayLinearGeneral:
+         return ArrayMode::ArrayLinearGeneral;
+     default:
+-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
++        NoteUnknown("tile mode", u32(tile_mode));
++        return ArrayMode::ArrayLinearAligned;
+     }
+ }
+ 
+@@ -100,7 +115,8 @@ MicroTileMode GetMicroTileMode(TileMode tile_mode) {
+     case TileMode::Thick3DXThick:
+         return MicroTileMode::Thick;
+     default:
+-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
++        NoteUnknown("tile mode", u32(tile_mode));
++        return MicroTileMode::Display;
+     }
+ }
+ 
+@@ -138,7 +154,8 @@ PipeConfig GetPipeConfig(TileMode tile_mode) {
+     case TileMode::DisplayLinearGeneral:
+         return PipeConfig::P2;
+     default:
+-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
++        NoteUnknown("tile mode", u32(tile_mode));
++        return PipeConfig::P8_32x32_16x16;
+     }
+ }
+ 
+@@ -175,7 +192,8 @@ PipeConfig GetAltPipeConfig(TileMode tile_mode) {
+     case TileMode::DisplayLinearGeneral:
+         return PipeConfig::P2;
+     default:
+-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
++        NoteUnknown("tile mode", u32(tile_mode));
++        return PipeConfig::P16_32x32_8x16;
+     }
+ }
+ 
+@@ -212,7 +230,8 @@ u32 GetSampleSplit(TileMode tile_mode) {
+     case TileMode::Thin3DThinPrt:
+         return 2;
+     default:
+-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
++        NoteUnknown("tile mode", u32(tile_mode));
++        return 1;
+     }
+ }
+ 
+@@ -252,7 +271,8 @@ u32 GetTileSplitHw(TileMode tile_mode) {
+     case TileMode::Depth2DThinPrt1K:
+         return 1024;
+     default:
+-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
++        NoteUnknown("tile mode", u32(tile_mode));
++        return 64;
+     }
+ }
+ 
+@@ -276,7 +296,8 @@ u32 GetBankWidth(MacroTileMode mode) {
+     case MacroTileMode::Mode_1x1_2_Dup3:
+         return 1;
+     default:
+-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
++        NoteUnknown("macro tile mode", u32(mode));
++        return 1;
+     }
+ }
+ 
+@@ -303,7 +324,8 @@ u32 GetBankHeight(MacroTileMode mode) {
+     case MacroTileMode::Mode_1x8_16:
+         return 8;
+     default:
+-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
++        NoteUnknown("macro tile mode", u32(mode));
++        return 1;
+     }
+ }
+ 
+@@ -330,7 +352,8 @@ u32 GetNumBanks(MacroTileMode mode) {
+     case MacroTileMode::Mode_1x1_16_Dup2:
+         return 16;
+     default:
+-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
++        NoteUnknown("macro tile mode", u32(mode));
++        return 16;
+     }
+ }
+ 
+@@ -356,7 +379,8 @@ u32 GetMacrotileAspect(MacroTileMode mode) {
+     case MacroTileMode::Mode_1x4_16_Dup:
+         return 4;
+     default:
+-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
++        NoteUnknown("macro tile mode", u32(mode));
++        return 2;
+     }
+ }
+ 
+@@ -382,7 +406,8 @@ u32 GetAltBankHeight(MacroTileMode mode) {
+     case MacroTileMode::Mode_1x4_16_Dup:
+         return 4;
+     default:
+-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
++        NoteUnknown("macro tile mode", u32(mode));
++        return 2;
+     }
+ }
+ 
+@@ -409,7 +434,8 @@ u32 GetAltNumBanks(MacroTileMode mode) {
+     case MacroTileMode::Mode_1x8_16:
+         return 16;
+     default:
+-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
++        NoteUnknown("macro tile mode", u32(mode));
++        return 8;
+     }
+ }
+ 
+@@ -434,7 +460,8 @@ u32 GetAltMacrotileAspect(MacroTileMode mode) {
+     case MacroTileMode::Mode_1x4_16_Dup:
+         return 2;
+     default:
+-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
++        NoteUnknown("macro tile mode", u32(mode));
++        return 1;
+     }
+ }
+ 
+@@ -459,7 +486,8 @@ bool IsMacroTiled(ArrayMode array_mode) {
+     case ArrayMode::ArrayPrt3DTiledThick:
+         return true;
+     default:
+-        UNREACHABLE_MSG("Unknown array mode = {}", u32(array_mode));
++        NoteUnknown("array mode", u32(array_mode));
++        return false;
+     }
+ }
+ 
+@@ -484,7 +512,8 @@ bool IsPrt(ArrayMode array_mode) {
+     case ArrayMode::Array3DTiledXThick:
+         return false;
+     default:
+-        UNREACHABLE_MSG("Unknown array mode = {}", u32(array_mode));
++        NoteUnknown("array mode", u32(array_mode));
++        return false;
+     }
+ }
+ 
+@@ -510,7 +539,8 @@ u32 GetMicroTileThickness(ArrayMode array_mode) {
+     case ArrayMode::Array3DTiledXThick:
+         return 8;
+     default:
+-        UNREACHABLE_MSG("Unknown array mode = {}", u32(array_mode));
++        NoteUnknown("array mode", u32(array_mode));
++        return 1;
+     }
+ }
+ 
+@@ -524,7 +554,8 @@ u32 GetPipeCount(PipeConfig pipe_cfg) {
+     case PipeConfig::P16_32x32_8x16:
+         return 16;
+     default:
+-        UNREACHABLE_MSG("Unknown pipe config = {}", u32(pipe_cfg));
++        NoteUnknown("pipe config", u32(pipe_cfg));
++        return 8;
+     }
+ }
+ 
+@@ -541,19 +572,29 @@ u32 CalculateTileSplit(TileMode tile_mode, ArrayMode array_mode, MicroTileMode m
+ }
+ 
+ MacroTileMode CalculateMacrotileMode(TileMode tile_mode, u32 bpp, u32 num_samples) {
+-    ASSERT_MSG(std::has_single_bit(num_samples) && num_samples <= 16, "Invalid sample count {}",
+-               num_samples);
+-    ASSERT_MSG(bpp >= 1 && bpp <= 128, "Invalid bpp {}", bpp);
++    // bbport: input out of range (a garbage sharp: MSAA levels, format) is clamped and reported
++    // (NoteUnknown) instead of the assertions that ended the game.
++    if (!std::has_single_bit(num_samples) || num_samples > 16) {
++        NoteUnknown("sample count", num_samples);
++        num_samples = 1;
++    }
++    if (bpp < 1 || bpp > 128) {
++        NoteUnknown("bits per element", bpp);
++        bpp = std::clamp(bpp, 1u, 128u);
++    }
+ 
+     const ArrayMode array_mode = GetArrayMode(tile_mode);
+-    ASSERT_MSG(IsMacroTiled(array_mode), "Tile mode not macro tiled");
++    if (!IsMacroTiled(array_mode)) {
++        NoteUnknown("macro tiled mode", u32(tile_mode));
++        return MacroTileMode::Mode_1x1_16;
++    }
+ 
+     const MicroTileMode micro_tile_mode = GetMicroTileMode(tile_mode);
+     const u32 tile_thickness = GetMicroTileThickness(array_mode);
+     const u32 tile_bytes_1x = bpp * MICROTILE_SIZE * MICROTILE_SIZE * tile_thickness / 8;
+     const u32 tilesplic = CalculateTileSplit(tile_mode, array_mode, micro_tile_mode, bpp);
+     const u32 tile_bytes = std::min(tilesplic, num_samples * tile_bytes_1x);
+-    const u32 mtm_idx = std::bit_width(tile_bytes / 64) - 1;
++    const u32 mtm_idx = std::bit_width(std::max(tile_bytes / 64, 1u)) - 1;
+     return IsPrt(array_mode) ? MacroTileMode(mtm_idx + 8) : MacroTileMode(mtm_idx);
+ }
+ 
+diff --git a/gpu/shadps4/video_core/page_manager.cpp b/gpu/shadps4/video_core/page_manager.cpp
+index 128e922..c79e2dd 100644
+--- a/gpu/shadps4/video_core/page_manager.cpp
++++ b/gpu/shadps4/video_core/page_manager.cpp
+@@ -234,6 +234,17 @@ void PageManager::ReportFaultSites() {
+     std::printf("\n");
+ }
+ 
++/// bbport: a watcher count that would leave its range, reported (a few times) instead of the
++/// assertion that ended the game (exit 23), or the 7-bit count wrapping to 0 with the page still
++/// protected.
++static void NoteWatcherCount(u64 page, const char* what) {
++    static std::atomic<u32> notes{0};
++    if (notes.fetch_add(1, std::memory_order_relaxed) < 8) {
++        std::printf("GPU: page tracking: %s at page %#llx; tracking goes on\n", what,
++                    static_cast<unsigned long long>(page << 12));
++    }
++}
++
+ struct PageManager::Impl {
+     struct PageState {
+         u8 num_write_watchers : 7;
+@@ -241,6 +252,8 @@ struct PageManager::Impl {
+         // And buffers cannot overlap, thus only 1 can exist per page.
+         u8 num_read_watchers : 1;
+ 
++        static constexpr u8 MaxWriteWatchers = 127;
++
+         Core::MemoryPermission WritePerm() const noexcept {
+             return num_write_watchers == 0 ? Core::MemoryPermission::Write
+                                            : Core::MemoryPermission::None;
+@@ -255,22 +268,46 @@ struct PageManager::Impl {
+             return ReadPerm() | WritePerm();
+         }
+ 
++        /// bbport: `page` (its number) for the counts past the bit fields (SpillWatcher). Called
++        /// with the page's lock held.
+         template <s32 delta, bool is_read>
+-        u8 AddDelta() {
++        u8 AddDelta(u64 page) {
+             if constexpr (is_read) {
+                 if constexpr (delta == 1) {
++                    if (num_read_watchers == 1) [[unlikely]] {
++                        NoteWatcherCount(page, "a second read watcher");
++                        return num_read_watchers;
++                    }
+                     return ++num_read_watchers;
+                 } else if (delta == -1) {
+-                    ASSERT_MSG(num_read_watchers > 0, "Not enough watchers");
++                    if (num_read_watchers == 0) [[unlikely]] {
++                        NoteWatcherCount(page, "not enough read watchers");
++                        return 0;
++                    }
+                     return --num_read_watchers;
+                 } else {
+                     return num_read_watchers;
+                 }
+             } else {
+                 if constexpr (delta == 1) {
++                    // 128 or more watchers (images piling up on one page): the count stays at
++                    // its maximum, the page protected, and the excess is kept aside.
++                    if (num_write_watchers == MaxWriteWatchers) [[unlikely]] {
++                        if (!SpillWatcher(page, 1)) {
++                            NoteWatcherCount(page, "write watchers beyond the overflow table");
++                        }
++                        return num_write_watchers;
++                    }
+                     return ++num_write_watchers;
+                 } else if (delta == -1) {
+-                    ASSERT_MSG(num_write_watchers > 0, "Not enough watchers");
++                    if (num_write_watchers == MaxWriteWatchers && SpillWatcher(page, -1))
++                        [[unlikely]] {
++                        return num_write_watchers;
++                    }
++                    if (num_write_watchers == 0) [[unlikely]] {
++                        NoteWatcherCount(page, "not enough write watchers");
++                        return 0;
++                    }
+                     return --num_write_watchers;
+                 } else {
+                     return num_write_watchers;
+@@ -279,6 +316,39 @@ struct PageManager::Impl {
+         }
+     };
+ 
++    /// bbport: write watchers past a page's 7-bit count. +1 keeps one more (false: the table is
++    /// full, the watcher is lost and the page may be unprotected early); -1 takes one back
++    /// (false: none kept for the page). Nests inside the page locks; nothing else takes it.
++    struct SpilledWatchers {
++        u64 page;
++        u32 extra;
++    };
++    inline static std::array<SpilledWatchers, 256> spilled_watchers{};
++    inline static std::atomic_flag spill_lock{};
++
++    static bool SpillWatcher(u64 page, s32 delta) {
++        while (spill_lock.test_and_set(std::memory_order_acquire)) {
++        }
++        bool done = false;
++        SpilledWatchers* free_entry = nullptr;
++        for (auto& entry : spilled_watchers) {
++            if (entry.extra != 0 && entry.page == page) {
++                entry.extra += delta;
++                done = true;
++                break;
++            }
++            if (entry.extra == 0 && !free_entry) {
++                free_entry = &entry;
++            }
++        }
++        if (!done && delta > 0 && free_entry) {
++            *free_entry = {page, 1};
++            done = true;
++        }
++        spill_lock.clear(std::memory_order_release);
++        return done;
++    }
++
+     static constexpr size_t ADDRESS_BITS = 40;
+     static constexpr size_t NUM_ADDRESS_PAGES = 1ULL << (40 - PM_PAGE_BITS);
+     static constexpr size_t NUM_ADDRESS_LOCKS = NUM_ADDRESS_PAGES / PAGES_PER_LOCK;
+@@ -315,7 +385,9 @@ struct PageManager::Impl {
+         } else {
+             BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
+             BbStats::Timer timer{BbStats::t_read_faults};
+-            return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
++            // bbport: within the faulting page (see Rasterizer::OnWriteFault).
++            return rasterizer->ReadMemory(addr, std::min<u64>(8, GetNextPageAddr(addr) - addr),
++                                          is_gpu_thread);
+         }
+         return false;
+     }
+@@ -360,7 +432,7 @@ struct PageManager::Impl {
+             PageState& state = cached_pages[page];
+ 
+             // Apply the change to the page state
+-            const u8 new_count = state.AddDelta<track ? 1 : -1, is_read>();
++            const u8 new_count = state.AddDelta<track ? 1 : -1, is_read>(page);
+ 
+             if (auto new_perms = state.Perms(); new_perms != perms) [[unlikely]] {
+                 // If the protection changed add pending (un)protect action
+@@ -425,7 +497,8 @@ struct PageManager::Impl {
+ 
+             // Apply the change to the page state
+             const u8 new_count =
+-                update ? state.AddDelta<track ? 1 : -1, is_read>() : state.AddDelta<0, is_read>();
++                update ? state.AddDelta<track ? 1 : -1, is_read>(base_page + page)
++                       : state.AddDelta<0, is_read>(base_page + page);
+ 
+             if (auto new_perms = state.Perms(); new_perms != perms) [[unlikely]] {
+                 // If the protection changed add pending (un)protect action
+@@ -635,8 +708,11 @@ struct SignalImpl : public PageManager::Impl {
+         }
+         auto* memory = Core::Memory::Instance();
+         auto& impl = memory->GetAddressSpace();
+-        ASSERT_MSG(perms != Core::MemoryPermission::Write,
+-                   "Attempted to protect region as write-only which is not a valid permission");
++        // bbport: write-only (a read watcher on a page without write watchers, BB_READBACKS=2)
++        // cannot be expressed; reads must fault, so writes do too (the assertion ended the game).
++        if (perms == Core::MemoryPermission::Write) {
++            perms = Core::MemoryPermission::None;
++        }
+         impl.Protect(address, size, perms);
+     }
+ 
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/liverpool_to_vk.cpp b/gpu/shadps4/video_core/renderer_vulkan/liverpool_to_vk.cpp
+index 21a2260..fc52fad 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/liverpool_to_vk.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/liverpool_to_vk.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <atomic>
+ #include "common/assert.h"
+ #include "common/number_utils.h"
+ #include "video_core/amdgpu/pixel_format.h"
+@@ -786,10 +787,30 @@ vk::Format TrySurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat
+ 
+ vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
+     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
+-    bool found =
+-        result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
+-    ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
+-               static_cast<u32>(num_format));
++    if (result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid)
++        [[likely]] {
++        return result;
++    }
++    // bbport: a combination the table lacks (a garbage descriptor) ended the game (assertion,
++    // exit 23). The same data format with another number format keeps the texel size; reported
++    // a few times. At worst that surface renders wrong.
++    using AmdGpu::NumberFormat;
++    for (const NumberFormat other : {NumberFormat::Unorm, NumberFormat::Uint, NumberFormat::Float,
++                                     NumberFormat::Snorm, NumberFormat::Sint}) {
++        result = surface_format_table[GetSurfaceFormatTableIndex(data_format, other)];
++        if (result != vk::Format::eUndefined) {
++            break;
++        }
++    }
++    if (result == vk::Format::eUndefined) {
++        result = vk::Format::eR8G8B8A8Unorm;
++    }
++    static std::atomic<u32> notes{0};
++    if (notes.fetch_add(1, std::memory_order_relaxed) < 8) {
++        LOG_ERROR(Render_Vulkan, "Unknown data_format={} and num_format={}, using {}",
++                  static_cast<u32>(data_format), static_cast<u32>(num_format),
++                  vk::to_string(result));
++    }
+     return result;
+ }
+ 
+@@ -1177,8 +1198,15 @@ vk::SampleCountFlagBits RawNumSamples(u32 num_samples) {
+         return vk::SampleCountFlagBits::e8;
+     case 16:
+         return vk::SampleCountFlagBits::e16;
+-    default:
+-        UNREACHABLE();
++    default: {
++        // bbport: not a sample count (a garbage register or sharp): one sample, reported a few
++        // times; this ended the game (UNREACHABLE, exit 23).
++        static std::atomic<u32> notes{0};
++        if (notes.fetch_add(1, std::memory_order_relaxed) < 8) {
++            LOG_ERROR(Render_Vulkan, "Invalid sample count {}, using 1", num_samples);
++        }
++        return vk::SampleCountFlagBits::e1;
++    }
+     }
+ }
+ 
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
 index a123982..a9c39b6 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_compute_pipeline.cpp
@@ -771,10 +1461,27 @@ index a123982..a9c39b6 100644
  
  } // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
-index 0e80933..a7375d4 100644
+index 0e80933..6a947e6 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_pipe.h
-@@ -197,6 +197,7 @@ private:
+@@ -168,6 +168,16 @@ public:
+     [[nodiscard]] u64 Consumed() const noexcept {
+         return consumed.load(std::memory_order_acquire);
+     }
++    /// Stage B, inside the handler: the payload of the packet after the one running when stage A
++    /// has committed it already (it runs next), else null.
++    [[nodiscard]] const u8* PeekNext() const noexcept {
++        const u64 next = running_end;
++        if (published.load(std::memory_order_acquire) <= next) {
++            return nullptr;
++        }
++        const auto* header = reinterpret_cast<const Header*>(ring.get() + next % Capacity);
++        return header->size != 0 ? reinterpret_cast<const u8*>(header + 1) : nullptr;
++    }
+     /// Stage B: bytes of packets committed and not run yet (the work queued for this thread).
+     [[nodiscard]] u64 Backlog() const noexcept {
+         return published.load(std::memory_order_acquire) - consumed.load(std::memory_order_relaxed);
+@@ -197,6 +207,7 @@ private:
  
      void Run(std::stop_token stop) {
          Common::SetCurrentThreadName("bb:DrawRec");
@@ -782,7 +1489,7 @@ index 0e80933..a7375d4 100644
          on_stage_b = true;
          BbSections::recording_thread = true;
          stage_b_tid.store(BbPlatform::CurrentThreadId(), std::memory_order_release);
-@@ -212,7 +213,7 @@ private:
+@@ -212,7 +223,7 @@ private:
                      if (const char* env = std::getenv("BB_PIPE_SPIN_US")) {
                          return std::max(0, std::atoi(env));
                      }
@@ -791,6 +1498,45 @@ index 0e80933..a7375d4 100644
                  }());
                  const auto spin_until = std::chrono::steady_clock::now() + spin_time;
                  for (u32 spins = 1; available == at; ++spins) {
+@@ -239,6 +250,7 @@ private:
+                 continue;
+             }
+             const u64 start = __rdtsc();
++            running_end = at + header->size;
+             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
+             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+             at += header->size;
+@@ -256,6 +268,7 @@ private:
+     alignas(64) std::atomic<u64> published{0};
+     alignas(64) std::atomic<u64> consumed{0};
+     std::atomic<u64> consumed_packets{0}; ///< packets stage B has run (NextPacket numbers)
++    u64 running_end = 0; ///< stage B: the end of the packet it runs (PeekNext; its cache line)
+     alignas(64) std::atomic<u32> wake{0};
+     std::atomic<bool> sleeping{false};
+     std::atomic<u32> stage_b_tid{0};
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_prep.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_prep.cpp
+index e71cccf..2bf24a8 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_draw_prep.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_draw_prep.cpp
+@@ -51,9 +51,15 @@ u32 DefaultWorkerCount() {
+     if (const char* env = std::getenv("BB_PREP_WORKERS")) {
+         return static_cast<u32>(std::clamp(std::atoi(env), 0, 16));
+     }
+-    // Workers are SCHED_IDLE and claim whole buffers, so more of them only use more idle
+-    // cores: half the hardware threads (Steam Deck 4, 16-thread desktop 8).
+-    return std::clamp<u32>(BbThreads::Available() / 2, 1, 8);
++    // Workers are SCHED_IDLE (Windows: THREAD_PRIORITY_IDLE) and claim whole buffers. Below 16
++    // hardware threads idle ones still share cores with the render chain (GPU command thread,
++    // draw recording, Vulkan recording and copy threads) and the game's threads: a quarter of
++    // them (8 threads 2, 12 threads 3). From 16 on, 3/8 of them, 6 to 8.
++    const u32 available = BbThreads::Available();
++    if (available < 16) {
++        return std::max<u32>(available / 4, 1);
++    }
++    return std::clamp<u32>(available * 3 / 8, 6, 8);
+ }
+ 
+ /// Flattened user data of one submission: chunks never move, so the GPU thread can read a
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
 index 995eb38..d2f9c82 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
@@ -1418,7 +2164,7 @@ index c171d07..cb211e2 100644
  concept VulkanHandleType = vk::isVulkanHandleType<T>::value;
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
-index 602cb30..9480479 100644
+index 602cb30..fa4ee4d 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
 @@ -13,6 +13,7 @@
@@ -1656,6 +2402,24 @@ index 602cb30..9480479 100644
          const vk::Extent2D extent = swapchain.GetExtent();
          SetExpectedGameSize(s32(extent.width), s32(extent.height));
          const vk::ImageSubresourceRange color_range{
+@@ -714,11 +919,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
+     scheduler.Flush(info);
+ 
+     // Present to swapchain.
++    bool presented;
+     {
+         std::scoped_lock submit_lock{Scheduler::submit_mutex};
+-        if (!swapchain.Present()) {
+-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+-        }
++        presented = swapchain.Present();
++    }
++    // bbport: recreated after the lock: its device wait takes it (Swapchain::WaitIdle).
++    if (!presented) {
++        swapchain.Recreate(window.GetWidth(), window.GetHeight());
+     }
+ 
+     free_frame();
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.h b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.h
 index 0b3dc78..a636b6e 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.h
@@ -1709,10 +2473,18 @@ index 0b3dc78..a636b6e 100644
      AmdGpu::Liverpool* liverpool;
      Scheduler draw_scheduler;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index 5fd360b..ac6e1ad 100644
+index 5fd360b..12510b4 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -30,6 +30,7 @@
+@@ -5,6 +5,7 @@
+ #include <dlfcn.h>
+ #endif
+ #include "bbport_platform.h"
++#include <bit>
+ #include <map>
+ #include <unordered_set>
+ #include <xxhash.h>
+@@ -30,6 +31,7 @@
  #include "video_core/buffer_cache/buffer_cache.h"
  #include "video_core/renderer_vulkan/liverpool_to_vk.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
@@ -1720,7 +2492,7 @@ index 5fd360b..ac6e1ad 100644
  #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
  #include "video_core/renderer_vulkan/vk_rasterizer.h"
  #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
-@@ -80,6 +81,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
+@@ -80,6 +82,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
      memory->SetRasterizer(this);
  
      GpuProfiler::Init(instance, scheduler);
@@ -1728,7 +2500,113 @@ index 5fd360b..ac6e1ad 100644
      if (DrawPipeWanted()) {
          constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
          draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
-@@ -1396,6 +1398,9 @@ bool Rasterizer::FilterDrawPasses() const {
+@@ -462,6 +465,19 @@ bool Rasterizer::FilterDraw() {
+     return true;
+ }
+ 
++template <typename Memo>
++bool Rasterizer::RevalidateTarget(Memo& memo, u64 generation) {
++    // Images were (un)registered since: an exact match still registered is what FindImage
++    // would find again (TextureCache::IsExactMatch). ~0: invalidated, never revalidated.
++    if (!memo.exact || memo.generation == ~0ULL || !MemoRevalidation() ||
++        !texture_cache.IsRegisteredImage(memo.image_id, memo.uid)) {
++        return false;
++    }
++    memo.generation = generation;
++    ++target_lookups_revalidated;
++    return true;
++}
++
+ template <typename... Parts>
+ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::ImageDesc& desc,
+                                                   LastTarget& last, auto&& make_desc,
+@@ -476,16 +492,19 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
+     (append(parts), ...);
+     const u64 generation = texture_cache.RegistryGeneration();
+     const bool memo_enabled = !BbToggle::Disabled(BbToggle::TextureBindingMemo);
+-    if (memo_enabled && last.generation == generation && last.key_size == key_size &&
+-        std::memcmp(last.key.data(), key.data(), key_size) == 0) {
++    if (memo_enabled && last.key_size == key_size &&
++        std::memcmp(last.key.data(), key.data(), key_size) == 0 &&
++        (last.generation == generation || RevalidateTarget(last, generation))) {
+         texture_cache.MarkFound(last.image_id);
+         return last.image_id;
+     }
+-    const auto remember = [&](VideoCore::ImageId image_id) {
++    const auto remember = [&](VideoCore::ImageId image_id, bool exact, u64 uid) {
+         last.key = key;
+         last.key_size = key_size;
+         last.generation = generation;
+         last.image_id = image_id;
++        last.exact = exact;
++        last.uid = uid;
+     };
+     u64 hash = 0xCBF29CE484222325ull;
+     for (u32 i = 0; i < key_size; i += 8) {
+@@ -495,22 +514,30 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
+         hash ^= hash >> 29;
+     }
+     auto& memo = target_memo[hash % target_memo.size()];
+-    if (memo.generation == generation && memo.key_size == key_size &&
+-        std::memcmp(memo.key.data(), key.data(), key_size) == 0 && memo_enabled) {
++    if (memo_enabled && memo.key_size == key_size &&
++        std::memcmp(memo.key.data(), key.data(), key_size) == 0 &&
++        (memo.generation == generation || RevalidateTarget(memo, generation))) {
+         desc = memo.desc;
+         texture_cache.MarkFound(memo.image_id);
+-        remember(memo.image_id);
++        remember(memo.image_id, memo.exact, memo.uid);
+         return memo.image_id;
+     }
+     make_desc();
++    const auto range = desc.view_info.range;
+     const VideoCore::ImageId image_id = texture_cache.FindImage(desc);
+     if (generation == texture_cache.RegistryGeneration()) {
++        // FindImage moved no view into another image's mips or layers, and found the
++        // registered image of exactly this description.
++        const bool exact =
++            desc.view_info.range == range && texture_cache.IsExactMatch(image_id, desc.info);
+         memo.key = key;
+         memo.key_size = key_size;
+         memo.generation = generation;
+         memo.image_id = image_id;
++        memo.exact = exact;
++        memo.uid = texture_cache.ImageUid(image_id);
+         memo.desc = desc;
+-        remember(image_id);
++        remember(image_id, exact, memo.uid);
+     } else {
+         last.generation = ~0ULL;
+     }
+@@ -1115,6 +1142,18 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
+     return true;
+ }
+ 
++bool Rasterizer::NextPacketIsTask(OrderedTask task) const {
++    if (!draw_pipe || !DrawPipe::OnStageB()) {
++        return false;
++    }
++    const u8* next = draw_pipe->PeekNext();
++    if (!next) {
++        return false;
++    }
++    const auto& packet = *reinterpret_cast<const TaskPacket*>(next);
++    return packet.kind == PacketKind::Task && packet.task == task;
++}
++
+ namespace {
+ // BB_SECTIONS: ordered tasks by function (cycles, count), stage B only.
+ constexpr std::size_t TaskKinds = 16;
+@@ -1352,6 +1391,8 @@ void Rasterizer::PrintPipeStats() {
+             last_task_counts[k] = n;
+         }
+     }
++    std::printf("\n  fences handed over with the next one: %.0f/s",
++                double(merged_fence_kicks.exchange(0, std::memory_order_relaxed)) / seconds);
+     std::printf("\n  stage A waits over 0.5%%:");
+     for (const auto& [function, lines] : drain_sites) {
+         for (const auto& [line, waited] : lines) {
+@@ -1396,6 +1437,9 @@ bool Rasterizer::FilterDrawPasses() const {
  void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
      RENDERER_TRACE;
      BbStats::draws.fetch_add(1, std::memory_order_relaxed);
@@ -1738,7 +2616,7 @@ index 5fd360b..ac6e1ad 100644
      // bbport debugging: BB_IMAGE_DUMP_TRIGGER=<file> holding hex guest addresses, one per line;
      // the images registered there are written to BB_CAPTURE_DIR (TextureCache::DumpImagesAt).
      if (static const char* trigger = std::getenv("BB_IMAGE_DUMP_TRIGGER"); trigger) {
-@@ -1460,6 +1465,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+@@ -1460,6 +1504,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
          FrameCapture::Poll();
          scheduler.PopPendingOperations();
      }
@@ -1749,7 +2627,7 @@ index 5fd360b..ac6e1ad 100644
      // bbport (BB_PREUPLOAD): once a frame, guest GPU memory the CPU wrote and then left alone is
      // uploaded ahead of its use, BB_PREUPLOAD_MB (16) at most per frame.
      if (const u32 frame = BbStats::frame_number.load(std::memory_order_relaxed);
-@@ -1644,13 +1653,23 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+@@ -1644,13 +1692,23 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
          .program = {vs_info.ProgramBase(), ps_info ? ps_info->ProgramBase() : 0},
          .count = {num_indices, num_instances, 0},
      };
@@ -1773,7 +2651,7 @@ index 5fd360b..ac6e1ad 100644
      });
      if (FrameCapture::Active()) {
          const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-@@ -1676,6 +1695,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
+@@ -1676,6 +1734,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                                u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                                u16 instance_sgpr_offset) {
      RENDERER_TRACE;
@@ -1783,7 +2661,7 @@ index 5fd360b..ac6e1ad 100644
      // bbport: like direct draws, handed to the recording thread after the pipeline selection
      // (else the GPU thread waited here for a whole frame of queued draws).
      const bool pipelined = UseDrawPipe() && FilterDrawPasses() &&
-@@ -1711,6 +1733,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+@@ -1711,6 +1772,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
          FrameCapture::Poll();
          scheduler.PopPendingOperations();
      }
@@ -1793,7 +2671,7 @@ index 5fd360b..ac6e1ad 100644
      const VAddr count_address = indirect.count;
      const u32 stride = indirect.stride;
      const u32 max_count = indirect.max_count;
-@@ -1780,8 +1805,13 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+@@ -1780,8 +1844,13 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
          .address = indirect.args,
          .count = {max_count, stride, 0},
      };
@@ -1807,7 +2685,7 @@ index 5fd360b..ac6e1ad 100644
          if (is_indexed) {
              if (counts) {
                  cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
-@@ -1794,6 +1824,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+@@ -1794,6 +1863,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
          } else {
              cmdbuf.drawIndirect(args, args_offset, max_count, stride);
          }
@@ -1817,7 +2695,7 @@ index 5fd360b..ac6e1ad 100644
      });
      DebugState.IncDrawCall();
  
-@@ -1950,6 +1983,68 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
+@@ -1950,6 +2022,68 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
      scheduler.KickRecording();
  }
  
@@ -1886,8 +2764,412 @@ index 5fd360b..ac6e1ad 100644
  u64 Rasterizer::Flush() {
      BB_SECTION(Flush);
      DrainDrawPipe();
+@@ -2051,10 +2185,10 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
+             !IsKnownFormat(data_fmt, num_fmt)) {
+             continue; // null descriptor
+         }
+-        const auto& entry =
++        auto& entry =
+             prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
+                      : CachedImageDescEntry(tsharp, image_desc);
+-        if (entry.found_generation != generation) {
++        if (!LookupMemoized(entry, generation)) {
+             return false;
+         }
+         VideoCore::ImageId image_id = entry.found_id;
+@@ -2848,11 +2982,39 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
+         entry.sharp = key;
+         entry.flags = flags;
+         entry.found_generation = ~0ULL;
++        entry.found_exact = false;
+         entry.view_memo = {};
+     }
+     return entry;
+ }
+ 
++bool Rasterizer::MemoRevalidation() {
++    static const bool on = [] {
++        const char* env = std::getenv("BB_MEMO_REVALIDATE");
++        return !(env && env[0] == '0');
++    }();
++    return on;
++}
++
++bool Rasterizer::LookupMemoized(ImageDescCacheEntry& entry, u64 generation) {
++    if (entry.found_generation == generation) {
++        return true;
++    }
++    // An image (un)registered since: an exact match still registered is what FindImage would
++    // find again (TextureCache::IsExactMatch).
++    if (!entry.found_exact || entry.found_generation == ~0ULL || !MemoRevalidation() ||
++        !texture_cache.IsRegisteredImage(entry.found_id, entry.found_uid)) {
++        return false;
++    }
++    entry.found_generation = generation;
++    // A view memoized behind a depth redirect: that image may have been replaced in its slot.
++    if (entry.view_memo.image_id != entry.found_id) {
++        entry.view_memo = {};
++    }
++    ++texture_lookups_revalidated;
++    return true;
++}
++
+ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* prepared,
+                               Shader::Backend::Bindings& binding, u32& write_index,
+                               bool& barrier, bool on_helper) {
+@@ -2882,7 +3044,19 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
+     // TextureSetMemo: what this call resolves, to remember when the set qualifies.
+     std::array<TextureSetEntry, TextureSet::MaxImages> resolved{};
++    std::array<u64, TextureSet::MaxImages> resolved_uids{};
+     bool set_ok = set_slot != nullptr;
++    // Every lookup an exact match without a depth redirect, every null descriptor a null T#
++    // (TextureSet::exact).
++    bool set_exact = set_ok;
++    const auto note_found = [&](u32 binding_index, VideoCore::ImageId found, u64 uid,
++                                bool exact) {
++        if (binding_index < resolved.size()) {
++            resolved[binding_index].found = found;
++            resolved_uids[binding_index] = uid;
++        }
++        set_exact &= exact;
++    };
+     // SampleSceneProxies: bindings that may read a reduced scene proxy instead of the native
+     // image (normalized sampling only; see Shader::ImageResource::needs_native).
+     boost::container::small_vector<bool, 16> binding_proxy_ok;
+@@ -2916,6 +3090,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+                         "data_format={}, num_format={}",
+                         tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
+                         static_cast<u32>(num_fmt));
++            set_exact = false; // may resolve once the memory is mapped
+             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
+             image_binding_entries.push_back(nullptr);
+             binding_proxy_ok.push_back(false);
+@@ -2951,9 +3126,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+             // bbport: a plain binding (no mip override) of the same T# resolves to the same image
+             // while no image was registered or unregistered.
+             if (mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
+-                desc_entry.found_generation == texture_cache.RegistryGeneration() &&
+-                !BbToggle::Disabled(BbToggle::TextureBindingMemo)) {
++                !BbToggle::Disabled(BbToggle::TextureBindingMemo) &&
++                LookupMemoized(desc_entry, texture_cache.RegistryGeneration())) {
+                 desc_entry.pinned = bind_epoch;
++                note_found(static_cast<u32>(image_bindings.size()), desc_entry.found_id,
++                           desc_entry.found_uid, desc_entry.found_exact);
+                 auto& [image_id, _] =
+                     image_bindings.emplace_back(desc_entry.found_id, &desc_entry.found_desc);
+                 image_binding_entries.push_back(&desc_entry);
+@@ -2963,6 +3140,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+                 if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+                     image_id = depth_image_id;
+                     image = &texture_cache.GetImage(image_id);
++                    set_exact = false;
+                 }
+                 debug_native(*image);
+                 if (image->binding.is_bound) {
+@@ -2986,21 +3164,32 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+             }
+ 
+             const u64 generation = texture_cache.RegistryGeneration();
++            const u32 binding_index = static_cast<u32>(image_bindings.size() - 1);
+             image_id = texture_cache.FindImage(desc);
++            // FindImage moved no view into another image's mips or layers, and found the
++            // registered image of exactly this description.
++            const bool exact = mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
++                               desc.view_info.range == desc_entry.desc.view_info.range &&
++                               texture_cache.IsExactMatch(image_id, desc.info);
++            const u64 uid = texture_cache.ImageUid(image_id);
+             if (mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
+                 generation == texture_cache.RegistryGeneration() &&
+                 desc_entry.pinned != bind_epoch) {
+                 desc_entry.found_generation = generation;
+                 desc_entry.found_id = image_id;
+                 desc_entry.found_desc = desc;
++                desc_entry.found_exact = exact;
++                desc_entry.found_uid = uid;
+                 desc_entry.view_memo = {};
+             }
++            note_found(binding_index, image_id, uid, exact);
+             auto* image = &texture_cache.GetImage(image_id);
+             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+                 // If this image has an associated depth image, it's a stencil attachment.
+                 // Redirect the access to the actual depth-stencil buffer.
+                 image_id = depth_image_id;
+                 image = &texture_cache.GetImage(image_id);
++                set_exact = false;
+             }
+             debug_native(*image);
+             if (image->binding.is_bound) {
+@@ -3049,7 +3238,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+                     image.usage.texture = 1u;
+                     image_infos.emplace_back(VK_NULL_HANDLE, proxy->view, proxy->layout);
+                     if (set_ok && binding_index < resolved.size()) {
+-                        resolved[binding_index] = {image_id, proxy->view, image.backing,
++                        resolved[binding_index] = {image_id, resolved[binding_index].found,
++                                                   proxy->view, image.backing,
+                                                    desc.view_info.range, true};
+                     }
+                     ++proxy_samples;
+@@ -3098,18 +3288,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+             }
+             image_infos.emplace_back(VK_NULL_HANDLE, view, layout);
+             if (set_ok && binding_index < resolved.size()) {
+-                resolved[binding_index] = {image_id, *image_view.image_view, image.backing,
++                resolved[binding_index] = {image_id, resolved[binding_index].found,
++                                           *image_view.image_view, image.backing,
+                                            desc.view_info.range};
+                 set_ok = !is_storage && !binding.force_general && !binding.is_target;
+             }
+         }
+     }
+     if (set_ok && image_bindings.size() == stage.images.size()) {
+-        // Remember the set: the same T#s resolve the same way while no image is (un)registered.
++        // Remember the set: the same T#s resolve the same way while no image is (un)registered,
++        // and with exact matches while their images stay registered (RevalidateTextureSet).
+         set_slot->generation = texture_cache.RegistryGeneration();
+         set_slot->scene_generation = scene_targets->Generation();
+         set_slot->count = static_cast<u32>(stage.images.size());
++        set_slot->exact = set_exact;
+         std::copy_n(resolved.begin(), set_slot->count, set_slot->entries.begin());
++        std::copy_n(resolved_uids.begin(), set_slot->count, set_slot->found_uids.begin());
+     } else if (set_slot) {
+         set_slot->key = 0;
+     }
+@@ -3150,7 +3344,9 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+         static std::atomic<u64> seen{0};
+         const u32 kind = u32(sharp.xy_min_filter.Value()) * 3 * 5 + u32(sharp.mip_filter.Value()) * 5 +
+                          u32(sharp.max_aniso.Value());
+-        if (kind < 64 && !(seen.fetch_or(1ull << kind) & (1ull << kind))) {
++        // A plain load first: the locked read-modify-write ran for every sampler of every draw.
++        if (kind < 64 && !(seen.load(std::memory_order_relaxed) & (1ull << kind)) &&
++            !(seen.fetch_or(1ull << kind) & (1ull << kind))) {
+             std::printf("Sampler: game uses min filter %u, mip filter %u, anisotropy %.0fx\n",
+                         u32(sharp.xy_min_filter.Value()), u32(sharp.mip_filter.Value()),
+                         sharp.MaxAniso());
+@@ -3175,6 +3371,41 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+     sharp.max_aniso.Assign(ratio);
+ }
+ 
++vk::Sampler Rasterizer::CachedSampler(const AmdGpu::Sampler& sharp, bool is_depth,
++                                      float lod_bias) {
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_SAMPLER_MEMO");
++        return !(env && env[0] == '0');
++    }();
++    if (!enabled) {
++        return texture_cache.GetSampler(sharp, Regs().ta_bc_base, is_depth, lod_bias);
++    }
++    static_assert(sizeof(AmdGpu::Sampler) == sizeof(SamplerMemoEntry::sharp));
++    std::array<u64, 2> words;
++    std::memcpy(words.data(), &sharp, sizeof(words));
++    const u64 variant = u64(is_depth) << 32 | std::bit_cast<u32>(lod_bias);
++    u64 hash = (words[0] ^ std::rotl(words[1], 29) ^ variant) * 0x9E3779B97F4A7C15ull;
++    hash ^= hash >> 32;
++    auto& entry = sampler_memo[hash % sampler_memo.size()];
++    // Read here, not after GetSampler: only the collector changes them, never while this runs.
++    const u64 generation = texture_cache.SamplerGeneration();
++    const u64 tick = texture_cache.GcTick();
++    if (entry.generation == generation && entry.sharp == words && entry.variant == variant) {
++        if (entry.touched_tick != tick) {
++            texture_cache.TouchSampler(entry.lru_id);
++            entry.touched_tick = tick;
++        }
++        ++sampler_memo_hits;
++        return entry.handle;
++    }
++    ++sampler_memo_misses;
++    size_t lru_id = 0;
++    const vk::Sampler handle =
++        texture_cache.GetSampler(sharp, Regs().ta_bc_base, is_depth, lod_bias, &lru_id);
++    entry = {words, variant, handle, lru_id, generation, tick};
++    return handle;
++}
++
+ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
+                               Shader::Backend::Bindings& binding, u32& write_index) {
+     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
+@@ -3182,8 +3413,8 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
+         auto ssharp =
+             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+         ForceAnisotropy(ssharp, sampler.is_depth);
+-        const auto vk_sampler = texture_cache.GetSampler(
+-            ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
++        const auto vk_sampler = CachedSampler(ssharp, sampler.is_depth,
++                                              sampler.is_depth ? 0.0f : sampler_lod_bias);
+         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
+         auto& set_write = set_writes[write_index++];
+         set_write.dstSet = VK_NULL_HANDLE;
+@@ -3224,6 +3455,31 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
+     return sig;
+ }
+ 
++bool Rasterizer::RevalidateTextureSet(TextureSet& set, u64 generation) {
++    // Images were (un)registered since the set was remembered. Its lookups were exact matches:
++    // FindImage would find the same images again while each is still registered (uids: slots
++    // are reused) and has no depth redirect (TextureCache::IsExactMatch). Views and backings
++    // belong to those images, so the per-image checks of a hit stay as they are.
++    if (!set.exact || set.generation == ~0ull || !MemoRevalidation()) {
++        return false;
++    }
++    for (u32 i = 0; i < set.count; ++i) {
++        const auto& entry = set.entries[i];
++        if (!entry.id) {
++            continue; // a null T#
++        }
++        if (entry.found != entry.id ||
++            !texture_cache.IsRegisteredImage(entry.found, set.found_uids[i]) ||
++            texture_cache.GetAssociatedDepth(texture_cache.GetImage(entry.found))) {
++            set.exact = false;
++            return false;
++        }
++    }
++    set.generation = generation;
++    ++texture_set_revalidated;
++    return true;
++}
++
+ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
+                                      u32 first_image_idx, bool& barrier, TextureSet*& slot) {
+     const u32 count = static_cast<u32>(stage.images.size());
+@@ -3242,11 +3498,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+     auto& set = texture_sets[key % texture_sets.size()];
+     slot = &set;
+     const u64 generation = texture_cache.RegistryGeneration();
+-    const bool match = set.key == key && set.stage == &stage && set.count == count &&
+-                       set.generation == generation &&
+-                       set.scene_generation == scene_targets->Generation() &&
+-                       std::equal(set.hashes.begin(), set.hashes.begin() + count,
+-                                  prepared->image_hashes);
++    const bool same_set = set.key == key && set.stage == &stage && set.count == count &&
++                          set.scene_generation == scene_targets->Generation() &&
++                          std::equal(set.hashes.begin(), set.hashes.begin() + count,
++                                     prepared->image_hashes);
++    const bool match =
++        same_set && (set.generation == generation || RevalidateTextureSet(set, generation));
+     if (!match) {
+         const bool generation_miss = set.key == key && set.stage == &stage && set.count == count &&
+                                      set.generation != generation;
+@@ -3285,6 +3542,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+         set.stage = &stage;
+         set.count = 0;
+         set.generation = ~0ull;
++        set.exact = false;
+         std::copy_n(prepared->image_hashes, count, set.hashes.begin());
+         return false;
+     }
+@@ -3308,6 +3566,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+             ++texture_set_why[2];
+             ++texture_set_misses;
+             set.generation = ~0ull;
++            set.exact = false;
+             return false;
+         }
+     }
+@@ -3341,26 +3600,70 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+     return true;
+ }
+ 
++void Rasterizer::RememberBeginTargets() {
++    const auto& ids = begin_memo.signature.ids;
++    for (u32 i = 0; i < ids.size(); ++i) {
++        begin_memo.uids[i] = ids[i] ? texture_cache.ImageUid(ids[i]) : 0;
++        begin_memo.backings[i] = ids[i] ? texture_cache.GetImage(ids[i]).backing : nullptr;
++    }
++    begin_memo.scene_generation = scene_targets->Generation();
++}
++
++bool Rasterizer::RevalidateBeginMemo(const BeginSignature& signature) {
++    // Images were (un)registered since the memo: it holds when nothing else changed and every
++    // target is still the same registered image with the same backing (its views, layouts).
++    if (signature.generation == begin_memo.signature.generation || !MemoRevalidation() ||
++        begin_memo.scene_generation != scene_targets->Generation()) {
++        return false;
++    }
++    BeginSignature same = signature;
++    same.generation = begin_memo.signature.generation;
++    if (!(same == begin_memo.signature)) {
++        return false;
++    }
++    for (u32 i = 0; i < signature.ids.size(); ++i) {
++        const auto id = signature.ids[i];
++        if (id && (!texture_cache.IsRegisteredImage(id, begin_memo.uids[i]) ||
++                   texture_cache.GetImage(id).backing != begin_memo.backings[i])) {
++            return false;
++        }
++    }
++    begin_memo.signature.generation = signature.generation;
++    ++begin_memo_revalidated;
++    return true;
++}
++
+ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+     BB_SECTION(BeginRendering);
+     // bbport: RenderStateMemo (see BeginMemo).
+     const bool memo_on = !BbToggle::Disabled(BbToggle::RenderStateMemo) && !FrameCapture::Active();
+     if (BbStats::enabled && ((begin_memo_hits + begin_memo_misses) & 0x3FFFF) == 0x3FFFF) {
+-        std::printf("Render state memo: %llu hits, %llu misses; texture sets: %llu hits, %llu "
+-                    "misses\n",
++        std::printf("Render state memo: %llu hits (%llu revalidated), %llu misses; texture sets: "
++                    "%llu hits (%llu revalidated), %llu misses; lookups revalidated: textures "
++                    "%llu, targets %llu\n",
+                     static_cast<unsigned long long>(begin_memo_hits),
++                    static_cast<unsigned long long>(begin_memo_revalidated),
+                     static_cast<unsigned long long>(begin_memo_misses),
+                     static_cast<unsigned long long>(texture_set_hits),
+-                    static_cast<unsigned long long>(texture_set_misses));
++                    static_cast<unsigned long long>(texture_set_revalidated),
++                    static_cast<unsigned long long>(texture_set_misses),
++                    static_cast<unsigned long long>(texture_lookups_revalidated),
++                    static_cast<unsigned long long>(target_lookups_revalidated));
+         std::printf("  texture set misses: other key %llu, generation %llu, image check %llu, "
+                     "other %llu\n",
+                     (unsigned long long)texture_set_why[0], (unsigned long long)texture_set_why[1],
+                     (unsigned long long)texture_set_why[2], (unsigned long long)texture_set_why[3]);
+         std::printf("  scene proxies sampled directly: %llu bindings\n",
+                     static_cast<unsigned long long>(proxy_samples));
++        std::printf("  samplers: %llu memo hits, %llu looked up\n",
++                    static_cast<unsigned long long>(sampler_memo_hits),
++                    static_cast<unsigned long long>(sampler_memo_misses));
++        sampler_memo_hits = sampler_memo_misses = 0;
+         proxy_samples = 0;
+         texture_set_why = {};
+         begin_memo_hits = begin_memo_misses = texture_set_hits = texture_set_misses = 0;
++        begin_memo_revalidated = texture_set_revalidated = texture_lookups_revalidated = 0;
++        target_lookups_revalidated = 0;
+     }
+     BeginSignature signature;
+     if (memo_on) {
+@@ -3369,7 +3672,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+         bool usable = begin_memo.valid && scheduler.IsRenderingWith(begin_memo.state) &&
+                       !regs.depth_render_control.depth_clear_enable &&
+                       !regs.depth_render_control.stencil_clear_enable &&
+-                      signature == begin_memo.signature;
++                      (signature == begin_memo.signature || RevalidateBeginMemo(signature));
+         for (const auto id : signature.ids) {
+             if (usable && id) {
+                 const auto& image = texture_cache.GetImage(id);
+@@ -3399,6 +3702,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+             // Recomputed after the full path: it may have started the scene (scene_started).
+             begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
+                           target_scale,target_offset};
++            RememberBeginTargets();
+         }
+     }
+     return state;
+@@ -3909,7 +4213,10 @@ void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
+ 
+ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks, u64 guest_rip) {
+     DrainDrawPipe();
+-    if (!InvalidateMemory(addr, 8, assume_locks)) {
++    // bbport: within the faulting page. 8 bytes from a write to the last bytes of a mapping
++    // reached past its end: IsMapped failed and the fault went unhandled (the game ended).
++    const u64 size = std::min<u64>(8, VideoCore::PageManager::GetNextPageAddr(addr) - addr);
++    if (!InvalidateMemory(addr, size, assume_locks)) {
+         return false;
+     }
+     buffer_cache.ExtendWriteFault(addr, guest_rip);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
-index 64f1e31..eb04dd3 100644
+index 64f1e31..0101c7a 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
 @@ -36,6 +36,7 @@ class MemoryManager;
@@ -1916,7 +3198,156 @@ index 64f1e31..eb04dd3 100644
      void ScopeMarker(fmt::string_view fmt, fmt::format_args args, auto&& func) {
          if (host_markers_enabled) {
              ScopeMarkerBegin(fmt::vformat(fmt, args));
-@@ -650,6 +662,9 @@ private:
+@@ -183,9 +195,16 @@ public:
+         scheduler.WaitDeferredSignals();
+     }
+     /// Runs `signal` after the guest memory copies issued so far, without waiting here.
+-    void SignalAfterHostCopies(std::function<void()> signal) {
+-        scheduler.SignalAfterHostCopies(std::move(signal));
++    /// `kick` false: another one is queued right after (Scheduler::SignalAfterHostCopies).
++    template <typename Func>
++    void SignalAfterHostCopies(Func&& signal, bool kick = true) {
++        scheduler.SignalAfterHostCopies(std::forward<Func>(signal), kick);
+     }
++    /// Stage B, running a packet: whether the next one is already committed and is ordered
++    /// task `task` (it runs right after this one).
++    [[nodiscard]] bool NextPacketIsTask(OrderedTask task) const;
++    /// Stage B: fences handed to the recording threads together with the next one (statistics).
++    std::atomic<u64> merged_fence_kicks{0};
+     /// bbport BB_HONEST_LABELS=1: runs `signal` once the GPU has finished every command recorded
+     /// before this call (the submission of the current tick), in call order, on a thread that
+     /// waits on the work semaphore: fences the guest sees when the work is done, not when it is
+@@ -292,8 +311,22 @@ private:
+         u32 scene_size = 0;
+         std::array<float, 2> target_scale{};
+         std::array<float,2> target_offset{};
++        /// The targets' images as memoized (signature.ids): after other images were
++        /// (un)registered the memo still holds while each is the same registered image with
++        /// the same backing (RevalidateBeginMemo).
++        std::array<u64, AmdGpu::NUM_COLOR_BUFFERS + 1> uids{};
++        std::array<const void*, AmdGpu::NUM_COLOR_BUFFERS + 1> backings{};
++        u64 scene_generation = 0; ///< SceneTargets::Generation (proxy attachments)
+     } begin_memo;
+     u64 begin_memo_hits = 0, begin_memo_misses = 0;
++    u64 begin_memo_revalidated = 0; ///< hits after a registry generation change
++    /// Takes begin_memo into `signature`'s registry generation when nothing else differs and
++    /// its targets are unchanged.
++    bool RevalidateBeginMemo(const BeginSignature& signature);
++    void RememberBeginTargets();
++    /// bbport: BB_MEMO_REVALIDATE=0 drops memoized texture/target lookups on every image
++    /// (un)registration as before, instead of revalidating them (IsExactMatch).
++    static bool MemoRevalidation();
+     void Resolve();
+     void DepthStencilCopy(bool is_depth, bool is_stencil);
+     void EliminateFastClear();
+@@ -354,10 +387,28 @@ private:
+     void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const;
+     void BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
+                       Shader::Backend::Bindings& binding, u32& write_index);
++    /// bbport (SamplerMemo): TextureCache::GetSampler hashed, locked and looked the sampler up
++    /// for every sampler of every draw. Direct-mapped by the S# (after ForceAnisotropy), the
++    /// depth flag and the extra bias: what GetSampler returned for them, while no sampler was
++    /// freed since (SamplerGeneration), touched for the collector once per GC period. Only the
++    /// thread binding textures uses it (stage B, or the bind helper while stage B waits for it).
++    /// BB_SAMPLER_MEMO=0: GetSampler every time.
++    struct SamplerMemoEntry {
++        std::array<u64, 2> sharp{};
++        u64 variant = ~0ull; ///< is_depth << 32 | the extra bias's bits
++        vk::Sampler handle{};
++        size_t lru_id = 0;
++        u64 generation = ~0ull;   ///< TextureCache::SamplerGeneration when looked up
++        u64 touched_tick = ~0ull; ///< TextureCache::GcTick of the last LRU touch
++    };
++    std::array<SamplerMemoEntry, 1024> sampler_memo{};
++    u64 sampler_memo_hits = 0, sampler_memo_misses = 0;
++    vk::Sampler CachedSampler(const AmdGpu::Sampler& sharp, bool is_depth, float lod_bias);
+     /// bbport: a stage's resolved textures remembered by its prepared T# hashes
+     /// (TextureSetMemo): a hit only redoes the per-draw effects (binding flags, transitions).
+     struct TextureSetEntry {
+         VideoCore::ImageId id{}; ///< after the depth redirect; null descriptor when invalid
++        VideoCore::ImageId found{}; ///< what FindImage returned (before the depth redirect)
+         vk::ImageView view;
+         const void* backing = nullptr;
+         VideoCore::SubresourceRange range;
+@@ -369,13 +420,22 @@ private:
+         u64 generation = ~0ull;
+         u64 scene_generation = 0; ///< SceneTargets::Generation of the proxy views
+         u32 count = 0;
++        /// Every lookup was an exact match (TextureCache::IsExactMatch) and every null
++        /// descriptor a null T#: the set survives other images' (un)registration while its
++        /// images stay registered (RevalidateTextureSet).
++        bool exact = false;
+         static constexpr u32 MaxImages = 16; ///< larger sets are not memoized
+         std::array<u64, MaxImages> hashes{};
+         std::array<TextureSetEntry, MaxImages> entries{};
++        std::array<u64, MaxImages> found_uids{}; ///< image uids of entries[].found
+     };
+     std::array<TextureSet, 32768> texture_sets{};
+     u64 texture_set_hits = 0, texture_set_misses = 0;
+     std::array<u64, 4> texture_set_why{}; ///< misses: other key, generation, image check, new
++    /// Hits after a registry generation change: texture sets, and single texture lookups
++    /// (ImageDescCacheEntry) outside them.
++    u64 texture_set_revalidated = 0, texture_lookups_revalidated = 0;
++    bool RevalidateTextureSet(TextureSet& set, u64 generation);
+     /// Returns true when the stage's images were bound from the memo.
+     bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
+                              u32 first_image_idx, bool& barrier, TextureSet*& slot);
+@@ -470,6 +530,11 @@ private:
+         // Memoized FindImage for bindings without mip overrides (TextureBindingMemo).
+         u64 found_generation = ~0ULL;
+         VideoCore::ImageId found_id{};
++        /// found_id was an exact match (TextureCache::IsExactMatch, found_desc unchanged by
++        /// FindImage): the memo outlives other images' (un)registration while image found_uid
++        /// stays registered (LookupMemoized).
++        bool found_exact = false;
++        u64 found_uid = 0;
+         VideoCore::TextureCache::ImageDesc found_desc;
+         u64 pinned = 0; ///< bind_epoch of the BindTextures call referencing found_desc
+         u64 last_use = 0;
+@@ -486,11 +551,15 @@ private:
+     u64 bind_epoch = 0;
+     // bbport: render/depth target lookups memoized by their raw register bytes while image
+     // registrations are unchanged (the descriptions depend only on those registers).
++    // An exact match (TextureCache::IsExactMatch, description unchanged by FindImage) outlives
++    // other images' (un)registration while image `uid` stays registered (RevalidateTarget).
+     struct TargetMemo {
+         std::array<u8, 256> key{};
+         u32 key_size = 0;
+         u64 generation = ~0ULL;
+         VideoCore::ImageId image_id{};
++        bool exact = false;
++        u64 uid = 0;
+         VideoCore::TextureCache::ImageDesc desc;
+     };
+     std::array<TargetMemo, 64> target_memo{};
+@@ -499,10 +568,15 @@ private:
+     struct LastTarget {
+         std::array<u8, 256> key{};
+         u32 key_size = 0;
+-        u64 generation = ~0ULL;
++        u64 generation = ~0ULL; ///< ~0: invalid (FindImage may have rewritten the description)
+         VideoCore::ImageId image_id{};
++        bool exact = false;
++        u64 uid = 0;
+     };
+     std::array<LastTarget, AmdGpu::NUM_COLOR_BUFFERS + 1> last_targets{}; ///< CBs, then DB
++    u64 target_lookups_revalidated = 0;
++    template <typename Memo>
++    bool RevalidateTarget(Memo& memo, u64 generation);
+     template <typename... Parts>
+     VideoCore::ImageId FindTargetMemoized(VideoCore::TextureCache::ImageDesc& desc,
+                                           LastTarget& last, auto&& make_desc,
+@@ -512,6 +586,9 @@ private:
+     /// `hash` is ImageDescHash(sharp, res), computed by a draw-preparation worker or here.
+     ImageDescCacheEntry& CachedImageDescEntry(const AmdGpu::Image& sharp,
+                                               const Shader::ImageResource& res, u64 hash);
++    /// Whether the entry's FindImage memo holds in registry generation `generation`: memoized
++    /// in it, or an exact match still registered (then taken into it).
++    bool LookupMemoized(ImageDescCacheEntry& entry, u64 generation);
+     ImageDescCacheEntry& CachedImageDescEntry(const AmdGpu::Image& sharp,
+                                               const Shader::ImageResource& res) {
+         return CachedImageDescEntry(sharp, res, ImageDescHash(sharp, res));
+@@ -650,6 +727,9 @@ private:
      std::unique_ptr<ConstantRing> constant_ring;
      /// Submissions (prepared draws) kept alive until stage B reaches the position.
      std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
@@ -1927,10 +3358,35 @@ index 64f1e31..eb04dd3 100644
  
      /// BB_HONEST_LABELS (SignalAfterGpu). Last: its thread stops before the scheduler goes.
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
-index 06eadfd..068c41e 100644
+index 06eadfd..4af437a 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
-@@ -449,7 +449,7 @@ void Scheduler::KickRecording(bool force) {
+@@ -322,24 +322,6 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
+     return chunk;
+ }
+ 
+-void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
+-    // A direct segment queues it too: signals queued before it must not be overtaken.
+-    if (!IsRecordingDeferred() && !direct_segment) {
+-        WaitHostCopies();
+-        signal();
+-        return;
+-    }
+-    BbCopy::FlushBatch();
+-    deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
+-    RecordOrdered([signal = std::move(signal), done = deferred_signals_done]() mutable {
+-        BbCopy::AfterCopies([signal = std::move(signal), done = std::move(done)] {
+-            signal();
+-            done->fetch_add(1, std::memory_order_release);
+-        });
+-    });
+-    KickRecording(true);
+-}
+-
+ void Scheduler::WaitDeferredSignals() {
+     const u64 issued = deferred_signals_issued.load(std::memory_order_relaxed);
+     if (deferred_signals_done->load(std::memory_order_acquire) >= issued ||
+@@ -449,7 +431,7 @@ void Scheduler::KickRecording(bool force) {
          MaybeSplit();
      }
      // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
@@ -1939,7 +3395,7 @@ index 06eadfd..068c41e 100644
          return;
      }
      HandOver();
-@@ -461,7 +461,7 @@ void Scheduler::MaybeSplit() {
+@@ -461,7 +443,7 @@ void Scheduler::MaybeSplit() {
          return;
      }
      // Cutting inside a render pass closes and reopens it: only after a longer stretch.
@@ -1948,7 +3404,7 @@ index 06eadfd..068c41e 100644
      if (bytes < (is_rendering ? 2 * split_bytes : split_bytes)) {
          return;
      }
-@@ -510,6 +510,11 @@ void Scheduler::HandOver() {
+@@ -510,6 +492,11 @@ void Scheduler::HandOver() {
      if (!commands && !ordered) {
          return;
      }
@@ -1960,7 +3416,7 @@ index 06eadfd..068c41e 100644
      Worker& worker = *workers[current_segment % workers.size()];
      bool wake = false;
      {
-@@ -521,11 +526,12 @@ void Scheduler::HandOver() {
+@@ -521,11 +508,12 @@ void Scheduler::HandOver() {
                  worker.queue.push_back(std::move(chunk));
                  ++batch->handed[current_segment];
              }
@@ -1978,7 +3434,7 @@ index 06eadfd..068c41e 100644
                  ++batch->handed[current_segment];
              }
              worker.queued.store(worker.queue.size(), std::memory_order_release);
-@@ -542,8 +548,9 @@ void Scheduler::HandOver() {
+@@ -542,8 +530,9 @@ void Scheduler::HandOver() {
              for (auto& chunk : ordered_full) {
                  queue(std::move(chunk));
              }
@@ -1990,7 +3446,7 @@ index 06eadfd..068c41e 100644
              }
              ordered_queued.store(ordered_queue.size(), std::memory_order_release);
              // Any thread may run them; the current segment's thread is woken for them (when it
-@@ -622,7 +629,7 @@ void Scheduler::EnterDirectMode() {
+@@ -622,7 +611,7 @@ void Scheduler::EnterDirectMode() {
          }
          // A segment nothing was handed to yet is not begun: it becomes the direct one.
          const bool untouched =
@@ -1999,7 +3455,7 @@ index 06eadfd..068c41e 100644
          if (!untouched) {
              // Its recording thread ends the segment's command buffer (the pool is that thread's).
              Record([](vk::CommandBuffer cmdbuf) { Check(cmdbuf.end()); });
-@@ -675,6 +682,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
+@@ -675,6 +664,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
          std::snprintf(name, sizeof(name), "bb:VkRecorder%u", index);
          Common::SetCurrentThreadName(name);
      }
@@ -2007,7 +3463,7 @@ index 06eadfd..068c41e 100644
      Worker& worker = *workers[index];
      std::vector<std::unique_ptr<RecordChunk>> ordered;
      const auto has_work = [&] {
-@@ -687,7 +695,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
+@@ -687,7 +677,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
          // take time from guest threads. The others sleep until a new segment reaches them.
          if (active_worker.load(std::memory_order_relaxed) == index) {
              static const auto spin_time =
@@ -2017,10 +3473,18 @@ index 06eadfd..068c41e 100644
              for (u32 spins = 1; worker.queued.load(std::memory_order_acquire) == 0 &&
                                  ordered_queued.load(std::memory_order_acquire) == 0;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
-index a0c6485..7297871 100644
+index a0c6485..8cc64fe 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
-@@ -601,6 +601,37 @@ struct SubmissionBatch {
+@@ -19,6 +19,7 @@
+ #include <thread>
+ #include <queue>
+ 
++#include "bbport_copy.h"
+ #include "bbport_toggles.h"
+ #include "common/assert.h"
+ #include "common/interval_set.h"
+@@ -601,6 +602,37 @@ struct SubmissionBatch {
  class RecordChunk {
  public:
      static constexpr size_t Capacity = 128 * 1024;
@@ -2058,7 +3522,7 @@ index a0c6485..7297871 100644
  
      /// Returns false (and leaves `func` untouched) when the chunk has no room.
      template <typename Func>
-@@ -625,8 +656,19 @@ public:
+@@ -625,8 +657,19 @@ public:
  
      /// Raw storage in the chunk for a command's variable-length data; null when full.
      void* Allocate(size_t bytes, size_t align) {
@@ -2079,7 +3543,7 @@ index a0c6485..7297871 100644
              return nullptr;
          }
          used = offset + bytes;
-@@ -643,6 +685,9 @@ public:
+@@ -643,6 +686,9 @@ public:
          }
          first = last = nullptr;
          used = 0;
@@ -2089,7 +3553,7 @@ index a0c6485..7297871 100644
      }
  
      [[nodiscard]] bool Empty() const noexcept {
-@@ -650,7 +695,7 @@ public:
+@@ -650,7 +696,7 @@ public:
      }
  
      [[nodiscard]] size_t Size() const noexcept {
@@ -2098,7 +3562,7 @@ index a0c6485..7297871 100644
      }
  
      u32 segment = 0; ///< the command buffer segment the chunk is recorded into (Scheduler)
-@@ -687,6 +732,9 @@ private:
+@@ -687,6 +733,9 @@ private:
  
      alignas(64) std::byte storage[Capacity];
      size_t used = 0;
@@ -2108,7 +3572,7 @@ index a0c6485..7297871 100644
      CommandBase* first{};
      CommandBase* last{};
  };
-@@ -812,9 +860,9 @@ public:
+@@ -812,9 +861,9 @@ public:
              func(current_cmdbuf);
              return;
          }
@@ -2120,7 +3584,7 @@ index a0c6485..7297871 100644
              ASSERT(pushed);
          }
      }
-@@ -861,12 +909,15 @@ public:
+@@ -861,12 +910,15 @@ public:
      /// Makes room for `bytes` of RecordData() plus the command that uses them in the current
      /// chunk: data and command must share a chunk, which is recycled once executed.
      void ReserveRecordData(size_t bytes) {
@@ -2138,7 +3602,7 @@ index a0c6485..7297871 100644
          }
      }
  
-@@ -882,6 +933,7 @@ public:
+@@ -882,6 +934,7 @@ public:
          const size_t bytes = data.size_bytes();
          ReserveRecordData(bytes + alignof(T));
          auto* dst = static_cast<T*>(record_chunk->Allocate(bytes, alignof(T)));
@@ -2146,7 +3610,41 @@ index a0c6485..7297871 100644
          std::memcpy(dst, data.data(), bytes);
          return {dst, data.size()};
      }
-@@ -1011,12 +1063,32 @@ private:
+@@ -923,8 +976,31 @@ public:
+ 
+     /// bbport: runs `signal` once the guest memory copies issued so far are done, without
+     /// waiting here: the recording thread reaches it after the copies queued before it and hands
+-    /// it to the copy threads' completion (BbCopy::AfterCopies).
+-    void SignalAfterHostCopies(std::function<void()> signal);
++    /// it to the copy threads' completion (BbCopy::AfterCopies). `signal` goes into the ordered
++    /// chunk as it is (no std::function allocated on this thread: ~450 fences a frame on the
++    /// draw recording thread). `kick` false: the caller queues another one right after this one,
++    /// which hands both to the recording threads (KickRecording) at once.
++    template <typename Func>
++    void SignalAfterHostCopies(Func&& signal, bool kick = true) {
++        // A direct segment queues it too: signals queued before it must not be overtaken.
++        if (!IsRecordingDeferred() && !direct_segment) {
++            WaitHostCopies();
++            signal();
++            return;
++        }
++        BbCopy::FlushBatch();
++        deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
++        RecordOrdered([signal = std::forward<Func>(signal),
++                       done = deferred_signals_done]() mutable {
++            BbCopy::AfterCopies([signal = std::move(signal), done = std::move(done)]() mutable {
++                signal();
++                done->fetch_add(1, std::memory_order_release);
++            });
++        });
++        if (kick) {
++            KickRecording(true);
++        }
++    }
+ 
+     /// bbport: before a guest-visible write that is not deferred (WriteData, end-of-shader
+     /// fences, flip): waits until every signal handed to SignalAfterHostCopies ran, so that
+@@ -1011,12 +1087,32 @@ private:
  
      std::unique_ptr<RecordChunk> AcquireChunk();
  
@@ -2183,7 +3681,7 @@ index a0c6485..7297871 100644
      }
  
      /// Waits for the recording threads, then records on this thread into the current segment's
-@@ -1058,10 +1130,11 @@ private:
+@@ -1058,10 +1154,11 @@ private:
              return;
          }
          auto command = [func = std::forward<Func>(func)](vk::CommandBuffer) mutable { func(); };
@@ -2199,15 +3697,228 @@ index a0c6485..7297871 100644
              ASSERT(pushed);
          }
      }
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp
+index f777aac..b7bda6f 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp
+@@ -1,6 +1,13 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <array>
++#include <bit>
++#include <chrono>
++#include <cstdio>
++#include <span>
++#include <vector>
++
+ #include "shader_recompiler/info.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
+ #include "video_core/renderer_vulkan/vk_runtime.h"
+@@ -135,6 +142,104 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
+     return true;
+ }
+ 
++namespace {
++/// One batch of the copy shader's ranges: the end of its ranges and their bounds.
++struct CopyBatch {
++    u32 end;
++    vk::DeviceSize src_min, src_max, dst_min, dst_max;
++};
++
++/// The batches of the greedy merge: consecutive ranges while both their source and their
++/// destination bounds stay within `max_distance` bytes.
++void FindBatches(std::span<const vk::BufferCopy> copies, vk::DeviceSize max_distance,
++                 std::vector<CopyBatch>& batches) {
++    batches.clear();
++    for (u32 i = 0; i < copies.size();) {
++        CopyBatch batch{0, copies[i].srcOffset, copies[i].srcOffset + copies[i].size,
++                        copies[i].dstOffset, copies[i].dstOffset + copies[i].size};
++        for (++i; i < copies.size(); ++i) {
++            const auto& [src_offset, dst_offset, size] = copies[i];
++            const auto src_min = std::min(batch.src_min, src_offset);
++            const auto src_max = std::max(batch.src_max, src_offset + size);
++            if (src_max - src_min > max_distance) {
++                break;
++            }
++            const auto dst_min = std::min(batch.dst_min, dst_offset);
++            const auto dst_max = std::max(batch.dst_max, dst_offset + size);
++            if (dst_max - dst_min > max_distance) {
++                break;
++            }
++            batch = {0, src_min, src_max, dst_min, dst_max};
++        }
++        batch.end = i;
++        batches.push_back(batch);
++    }
++}
++
++/// bbport: the guest lists its ranges in its own order and batches merge only neighbours in it,
++/// so a shuffled list takes a batch (two ObtainBuffer calls and a dispatch) per few ranges.
++/// `grouped` gets them by destination window of 2^window_shift bytes (windows in order of first
++/// appearance, the guest's order within each). False, and nothing reordered, when that could
++/// change the result: source and destination overlap in guest memory, or a range crosses a
++/// window (ranges that may overlap then share a window and keep their order). The hardware runs
++/// the ranges as unordered threads of one dispatch anyway.
++bool GroupByDestination(std::span<const vk::BufferCopy> copies, u32 window_shift, VAddr src_base,
++                        VAddr dst_base, std::vector<vk::BufferCopy>& grouped) {
++    constexpr u32 Slots = 512;
++    constexpr u32 MaxGroups = 256;
++    std::array<u64, Slots> windows;
++    windows.fill(~0ull);
++    std::array<u16, Slots> ids;
++    std::array<u32, MaxGroups + 1> starts{};
++    thread_local std::vector<u16> group_of;
++    group_of.resize(copies.size());
++    u32 groups = 0;
++    u64 last_window = ~0ull;
++    u16 last_id = 0;
++    vk::DeviceSize src_min = ~0ull, src_max = 0, dst_min = ~0ull, dst_max = 0;
++    for (u32 i = 0; i < copies.size(); ++i) {
++        const auto& [src_offset, dst_offset, size] = copies[i];
++        const u64 window = dst_offset >> window_shift;
++        if (((dst_offset + size - 1) >> window_shift) != window) {
++            return false;
++        }
++        src_min = std::min(src_min, src_offset);
++        src_max = std::max(src_max, src_offset + size);
++        dst_min = std::min(dst_min, dst_offset);
++        dst_max = std::max(dst_max, dst_offset + size);
++        if (window != last_window) {
++            u32 slot = static_cast<u32>((window * 0x9E3779B97F4A7C15ull) >> 55);
++            while (windows[slot] != ~0ull && windows[slot] != window) {
++                slot = (slot + 1) & (Slots - 1);
++            }
++            if (windows[slot] == ~0ull) {
++                if (groups == MaxGroups) {
++                    return false;
++                }
++                windows[slot] = window;
++                ids[slot] = static_cast<u16>(groups++);
++            }
++            last_window = window;
++            last_id = ids[slot];
++        }
++        group_of[i] = last_id;
++        ++starts[last_id + 1];
++    }
++    if (groups < 2 ||
++        (src_base + src_min < dst_base + dst_max && dst_base + dst_min < src_base + src_max)) {
++        return false;
++    }
++    for (u32 g = 1; g <= groups; ++g) {
++        starts[g] += starts[g - 1];
++    }
++    grouped.resize(copies.size());
++    for (u32 i = 0; i < copies.size(); ++i) {
++        grouped[starts[group_of[i]]++] = copies[i];
++    }
++    return true;
++}
++} // namespace
++
+ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                                  Rasterizer& rasterizer) {
+     auto& runtime = rasterizer.GetRuntime();
+@@ -176,38 +281,57 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
+         const char* env = std::getenv("BB_COPY_MERGE_KB");
+         return env ? vk::DeviceSize(std::strtoull(env, nullptr, 10)) * 1024 : vk::DeviceSize(64_KB);
+     }();
+-    u32 batch_start = 0;
+-    u32 batch_end = 0;
+-
+-    while (batch_end < copies.size()) {
+-        // Place first copy into the current batch
+-        const auto& copy = copies[batch_start];
+-        auto src_offset_min = copy.srcOffset;
+-        auto src_offset_max = copy.srcOffset + copy.size;
+-        auto dst_offset_min = copy.dstOffset;
+-        auto dst_offset_max = copy.dstOffset + copy.size;
+-
+-        for (++batch_end; batch_end < copies.size(); batch_end++) {
+-            // Compute new src and dst bounds if we were to batch this copy
+-            const auto& [src_offset, dst_offset, size] = copies[batch_end];
+-            auto new_src_offset_min = std::min(src_offset_min, src_offset);
+-            auto new_src_offset_max = std::max(src_offset_max, src_offset + size);
+-            if (new_src_offset_max - new_src_offset_min > MaxDistanceForMerge) {
+-                break;
+-            }
+-
+-            auto new_dst_offset_min = std::min(dst_offset_min, dst_offset);
+-            auto new_dst_offset_max = std::max(dst_offset_max, dst_offset + size);
+-            if (new_dst_offset_max - new_dst_offset_min > MaxDistanceForMerge) {
+-                break;
+-            }
+-
+-            // We can batch this copy
+-            src_offset_min = new_src_offset_min;
+-            src_offset_max = new_src_offset_max;
+-            dst_offset_min = new_dst_offset_min;
+-            dst_offset_max = new_dst_offset_max;
++    static std::vector<CopyBatch> batches, grouped_batches;
++    static std::vector<vk::BufferCopy> grouped;
++    FindBatches(copies, MaxDistanceForMerge, batches);
++    // Statistics (BB_FRAME_STATS) and the throttle of the grouping: this runs on one thread at a
++    // time (the draw recording thread, or the GPU command thread after a drain).
++    static u64 stat_dispatches = 0, stat_ranges = 0, stat_batches = 0, stat_saved = 0;
++    static u32 grouping_misses = 0, grouping_pause = 0;
++    const size_t in_order = batches.size();
++    // Worth a try with a few batches or more (each costs a few microseconds, the grouping a few
++    // nanoseconds per range); paused for a while after attempts that did not help.
++    if (in_order >= 4 && !BbToggle::Disabled(BbToggle::MultiCopyShader)) {
++        const u32 window_shift =
++            static_cast<u32>(std::bit_width(std::max<u64>(MaxDistanceForMerge, 2)) - 1);
++        if (grouping_pause) {
++            --grouping_pause;
++        } else if (GroupByDestination(copies, window_shift, src_buf_sharp.base_address,
++                                      dst_buf_sharp.base_address, grouped) &&
++                   (FindBatches(grouped, MaxDistanceForMerge, grouped_batches),
++                    grouped_batches.size() < in_order)) {
++            copies.swap(grouped);
++            batches.swap(grouped_batches);
++            grouping_misses = 0;
++        } else if (++grouping_misses >= 4) {
++            grouping_misses = 0;
++            grouping_pause = 64;
+         }
++    }
++    if (BbStats::enabled) {
++        ++stat_dispatches;
++        stat_ranges += copies.size();
++        stat_batches += batches.size();
++        stat_saved += in_order - batches.size();
++        static auto window = std::chrono::steady_clock::now();
++        const auto now = std::chrono::steady_clock::now();
++        if (now - window >= std::chrono::seconds(5)) {
++            const double seconds = std::chrono::duration<double>(now - window).count();
++            std::printf("HLE copy shader per second: %.0f dispatches, %.0f ranges, %.0f batches "
++                        "(%.0f fewer by destination grouping)\n",
++                        stat_dispatches / seconds, stat_ranges / seconds, stat_batches / seconds,
++                        stat_saved / seconds);
++            window = now;
++            stat_dispatches = stat_ranges = stat_batches = stat_saved = 0;
++        }
++    }
++    u32 batch_start = 0;
++    for (const auto& batch : batches) {
++        const u32 batch_end = batch.end;
++        const auto src_offset_min = batch.src_min;
++        const auto src_offset_max = batch.src_max;
++        const auto dst_offset_min = batch.dst_min;
++        const auto dst_offset_max = batch.dst_max;
+ 
+         // Obtain buffers for the total source and destination ranges.
+         const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-index ed0b5ca..ed8092f 100644
+index ed0b5ca..d2aeaf5 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-@@ -2,13 +2,17 @@
+@@ -2,24 +2,55 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include <algorithm>
 +#include <array>
++#include <atomic>
 +#include <cstdio>
  #include <limits>
 +#include "bbport_settings.h"
@@ -2218,10 +3929,22 @@ index ed0b5ca..ed8092f 100644
  #include "sdl_window.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
 +#include "video_core/renderer_vulkan/vk_platform.h"
++#include "video_core/renderer_vulkan/vk_scheduler.h"
  #include "video_core/renderer_vulkan/vk_swapchain.h"
  
  namespace Vulkan {
-@@ -18,8 +22,24 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
+ 
++/// bbport: display events (a lost surface, a failed swapchain) are reported a few times and the
++/// presenter skips frames until a new swapchain works; they ended the game (exit 23).
++static void NoteDisplayEvent(const char* what, vk::Result result) {
++    static std::atomic<u32> notes{0};
++    if (notes.fetch_add(1, std::memory_order_relaxed) < 16) {
++        std::printf("Display: %s: %s\n", what, vk::to_string(result).c_str());
++    }
++}
++
+ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
+     .format = vk::Format::eA2B10G10R10UnormPack32,
      .colorSpace = vk::ColorSpaceKHR::eHdr10St2084EXT,
  };
  
@@ -2246,7 +3969,27 @@ index ed0b5ca..ed8092f 100644
      FindPresentFormat();
      FindPresentMode();
  
-@@ -58,8 +78,22 @@ void Swapchain::Create(u32 width_, u32 height_) {
+@@ -37,9 +68,18 @@ void Swapchain::Create(u32 width_, u32 height_) {
+     height = height_;
+     needs_recreation = false;
+ 
++    // bbport: a lost surface (VK_ERROR_SURFACE_LOST_KHR: a display or driver reset) is made again
++    // on the same window before a swapchain can be created on it.
++    if (surface_lost) {
++        RecreateSurface();
++    }
++
+     // bbport: a minimised window has a 0x0 surface (issue #31); no swapchain can have that extent.
+     // The old one stays (presents are skipped) until the window is back.
+-    SetSurfaceProperties();
++    if (!SetSurfaceProperties()) {
++        needs_recreation = true;
++        return;
++    }
+     if (extent.width == 0 || extent.height == 0) {
+         zero_extent = true;
+         needs_recreation = true;
+@@ -58,8 +98,22 @@ void Swapchain::Create(u32 width_, u32 height_) {
      const u32 queue_family_indices_count = exclusive ? 1u : 2u;
      const vk::SharingMode sharing_mode =
          exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
@@ -2270,7 +4013,21 @@ index ed0b5ca..ed8092f 100644
          .surface = surface,
          .minImageCount = image_count,
          .imageFormat = format.format,
-@@ -85,6 +119,66 @@ void Swapchain::Create(u32 width_, u32 height_) {
+@@ -79,12 +133,78 @@ void Swapchain::Create(u32 width_, u32 height_) {
+     };
+ 
+     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+-    ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
+-               vk::to_string(swapchain_result));
++    if (swapchain_result != vk::Result::eSuccess) {
++        // bbport: no swapchain now (IsPresentable is false): presents are skipped and the next
++        // one tries again.
++        NoteDisplayEvent("creating the swapchain failed", swapchain_result);
++        surface_lost = swapchain_result == vk::Result::eErrorSurfaceLostKHR;
++        needs_recreation = true;
++        return;
++    }
+     swapchain = chain;
  
      SetupImages();
      RefreshSemaphores();
@@ -2337,7 +4094,31 @@ index ed0b5ca..ed8092f 100644
  }
  
  void Swapchain::Recreate(u32 width_, u32 height_) {
-@@ -120,6 +214,11 @@ bool Swapchain::AcquireNextImage() {
+@@ -98,11 +218,7 @@ void Swapchain::SetHDR(bool hdr) {
+         return;
+     }
+ 
+-    auto result = instance.GetDevice().waitIdle();
+-    if (result != vk::Result::eSuccess) {
+-        LOG_WARNING(ImGui, "Failed to wait for Vulkan device idle on mode change: {}",
+-                    vk::to_string(result));
+-    }
++    WaitIdle();
+ 
+     needs_hdr = hdr;
+     Recreate(width, height);
+@@ -111,6 +227,10 @@ void Swapchain::SetHDR(bool hdr) {
+ }
+ 
+ bool Swapchain::AcquireNextImage() {
++    if (!swapchain) {
++        needs_recreation = true; // the last Create failed
++        return false;
++    }
+     vk::Device device = instance.GetDevice();
+     vk::Result result =
+         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
+@@ -120,15 +240,25 @@ bool Swapchain::AcquireNextImage() {
      case vk::Result::eSuccess:
          break;
      case vk::Result::eSuboptimalKHR:
@@ -2347,9 +4128,39 @@ index ed0b5ca..ed8092f 100644
 +        needs_recreation = true;
 +        return true;
      case vk::Result::eErrorSurfaceLostKHR:
++        NoteDisplayEvent("acquiring a swapchain image", result);
++        surface_lost = true;
++        needs_recreation = true;
++        break;
      case vk::Result::eErrorOutOfDateKHR:
      case vk::Result::eErrorUnknown:
-@@ -158,20 +257,13 @@ bool Swapchain::Present() {
+         needs_recreation = true;
+         break;
+     default:
+-        LOG_CRITICAL(Render_Vulkan, "Swapchain acquire returned unknown result {}",
+-                     vk::to_string(result));
+-        UNREACHABLE();
++        // bbport: e.g. a timeout or a lost exclusive fullscreen: recreated like out-of-date
++        // (this was UNREACHABLE, exit 23).
++        NoteDisplayEvent("acquiring a swapchain image", result);
++        needs_recreation = true;
+         break;
+     }
+ 
+@@ -147,6 +277,12 @@ bool Swapchain::Present() {
+     auto result = instance.GetPresentQueue().presentKHR(present_info);
+     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+         needs_recreation = true;
++    } else if (result != vk::Result::eSuccess && result != vk::Result::eErrorDeviceLost) {
++        // bbport: a lost surface (display or driver reset) or another display event: recreated
++        // like out-of-date (this was an assertion, exit 23). A lost device still stops below.
++        NoteDisplayEvent("presenting", result);
++        surface_lost = result == vk::Result::eErrorSurfaceLostKHR;
++        needs_recreation = true;
+     } else {
+         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
+                    vk::to_string(result));
+@@ -158,20 +294,13 @@ bool Swapchain::Present() {
  }
  
  void Swapchain::FindPresentFormat() {
@@ -2377,7 +4188,7 @@ index ed0b5ca..ed8092f 100644
  
      // If there is a single undefined surface format, the device doesn't care, so we'll just use
      // RGBA sRGB.
-@@ -181,24 +273,62 @@ void Swapchain::FindPresentFormat() {
+@@ -181,24 +310,62 @@ void Swapchain::FindPresentFormat() {
          return;
      }
  
@@ -2452,37 +4263,89 @@ index ed0b5ca..ed8092f 100644
      if (modes_result != vk::Result::eSuccess) {
          LOG_ERROR(Render, "Failed to query available present modes, falling back to Fifo as "
                            "guaranteed supported option.");
-@@ -229,10 +359,25 @@ void Swapchain::FindPresentMode() {
+@@ -228,11 +395,31 @@ void Swapchain::FindPresentMode() {
+     }
  }
  
- void Swapchain::SetSurfaceProperties() {
+-void Swapchain::SetSurfaceProperties() {
 -    const auto [capabilities_result, capabilities] =
 -        instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
 -    ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
 -               "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
++bool Swapchain::SetSurfaceProperties() {
 +    vk::SurfaceCapabilitiesKHR capabilities{};
++    vk::Result capabilities_result{};
 +    if (full_screen_exclusive) {
 +        // The same chain as the swapchain's creation (VK_EXT_full_screen_exclusive).
 +        const vk::PhysicalDeviceSurfaceInfo2KHR surface_info{
 +            .pNext = FullScreenExclusiveDisallowed(true),
 +            .surface = surface,
 +        };
-+        const auto [capabilities_result, capabilities2] =
++        const auto [result2, capabilities2] =
 +            instance.GetPhysicalDevice().getSurfaceCapabilities2KHR(surface_info);
-+        ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
-+                   "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
++        capabilities_result = result2;
 +        capabilities = capabilities2.surfaceCapabilities;
 +    } else {
-+        const auto [capabilities_result, capabilities1] =
++        const auto [result1, capabilities1] =
 +            instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
-+        ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
-+                   "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
++        capabilities_result = result1;
 +        capabilities = capabilities1;
++    }
++    if (capabilities_result != vk::Result::eSuccess) {
++        // bbport: this was an assertion (exit 23); a lost surface is made again at the next try.
++        NoteDisplayEvent("querying the surface capabilities failed", capabilities_result);
++        surface_lost = capabilities_result == vk::Result::eErrorSurfaceLostKHR;
++        return false;
 +    }
  
      extent = capabilities.currentExtent;
      if (capabilities.currentExtent.width == std::numeric_limits<u32>::max()) {
-@@ -329,7 +474,7 @@ void Swapchain::SetupImages() {
+@@ -259,23 +446,41 @@ void Swapchain::SetSurfaceProperties() {
+     if (!(capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque)) {
+         composite_alpha = vk::CompositeAlphaFlagBitsKHR::eInherit;
+     }
++    return true;
+ }
+ 
+-void Swapchain::Destroy() {
+-    vk::Device device = instance.GetDevice();
+-    const auto wait_result = device.waitIdle();
++void Swapchain::WaitIdle() {
++    // bbport: vkDeviceWaitIdle needs every queue of the device externally synchronized: the
++    // recording threads submit to the same queue under this lock (Scheduler::submit_mutex).
++    std::scoped_lock submit_lock{Scheduler::submit_mutex};
++    const auto wait_result = instance.GetDevice().waitIdle();
+     if (wait_result != vk::Result::eSuccess) {
+         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",
+                     vk::to_string(wait_result));
+     }
++}
++
++void Swapchain::RecreateSurface() {
++    Destroy(); // a swapchain goes before its surface
++    instance.GetInstance().destroySurfaceKHR(surface);
++    surface = CreateSurface(instance.GetInstance(), window);
++    surface_lost = false;
++    std::printf("Display: the window's surface was lost; created again\n");
++}
++
++void Swapchain::Destroy() {
++    vk::Device device = instance.GetDevice();
++    WaitIdle();
+ 
+     for (auto& image_view : images_view) {
+         device.destroyImageView(image_view);
+     }
+     images_view.clear();
++    images.clear();
+ 
+     if (swapchain) {
+         device.destroySwapchainKHR(swapchain);
++        swapchain = nullptr; // bbport: a failed Create leaves none (IsPresentable)
+     }
+ 
+     for (const auto& sem : image_acquired) {
+@@ -329,7 +534,7 @@ void Swapchain::SetupImages() {
          auto [im_view_result, im_view] = device.createImageView(vk::ImageViewCreateInfo{
              .image = images[i],
              .viewType = vk::ImageViewType::e2D,
@@ -2492,7 +4355,7 @@ index ed0b5ca..ed8092f 100644
                  {
                      .aspectMask = vk::ImageAspectFlagBits::eColor,
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h
-index d310098..79701aa 100644
+index d310098..8663ef8 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.h
 @@ -97,7 +97,29 @@ public:
@@ -2525,8 +4388,27 @@ index d310098..79701aa 100644
      /// Selects the best available swapchain image format
      void FindPresentFormat();
  
-@@ -140,6 +162,12 @@ private:
+@@ -105,7 +127,14 @@ private:
+     void FindPresentMode();
+ 
+     /// Sets the surface properties according to device capabilities
+-    void SetSurfaceProperties();
++    /// (bbport: false when they cannot be queried, e.g. a lost surface)
++    bool SetSurfaceProperties();
++
++    /// bbport: vkDeviceWaitIdle under Scheduler::submit_mutex (the callers must not hold it).
++    void WaitIdle();
++
++    /// bbport: destroys the swapchain and the lost surface, and creates a new surface.
++    void RecreateSurface();
+ 
+     /// Destroys current swapchain resources
+     void Destroy();
+@@ -138,8 +167,15 @@ private:
+     u32 frame_index = 0;
+     bool needs_recreation = true;
      bool zero_extent = false; ///< bbport: the surface was 0x0 (minimised) at the last Create
++    bool surface_lost = false; ///< bbport: VK_ERROR_SURFACE_LOST_KHR seen: Create makes a new one
      bool needs_hdr = false;    // The game requested HDR swapchain
      bool supports_hdr = false; // SC supports HDR output
 +    // bbport: HDR output (GetHdrFormat, IsHdrOutput).
@@ -2574,7 +4456,7 @@ index 21f9e6e..6d89586 100644
      u64 depth_uid{};
      u64 image_uid{};
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 98ccdd1..cacde15 100644
+index 98ccdd1..f912bb1 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 @@ -150,8 +150,61 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
@@ -2795,7 +4677,46 @@ index 98ccdd1..cacde15 100644
  void TextureCache::DumpImagesAt(VAddr address, const char* dir) {
      boost::container::small_vector<ImageId, 4> ids;
      {
-@@ -1160,6 +1362,9 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
+@@ -780,6 +982,18 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+     return image_id;
+ }
+ 
++bool TextureCache::IsExactMatch(ImageId image_id, const ImageInfo& info) const {
++    if (!image_id || !slot_images.is_allocated(image_id)) {
++        return false;
++    }
++    const Image& image = slot_images[image_id];
++    return True(image.flags & ImageFlagBits::Registered) &&
++           image.info.guest_address == info.guest_address &&
++           image.info.guest_size == info.guest_size && image.info.size == info.size &&
++           image.info.pixel_format == info.pixel_format && image.info.type == info.type &&
++           image.info.resources == info.resources && image.info.LayoutKey() == info.LayoutKey();
++}
++
+ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
+     ImageIds image_ids;
+     ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
+@@ -990,7 +1204,8 @@ void TextureCache::RefreshImage(Image& image) {
+ 
+ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
+                                      AmdGpu::BorderColorBuffer border_color_base,
+-                                     const bool is_depth, float extra_lod_bias) {
++                                     const bool is_depth, float extra_lod_bias,
++                                     size_t* lru_id) {
+     // Compare and plain uses of one S# need separate samplers; so do extra LOD biases.
+     const u64 hash = HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
+                                  u64(std::bit_cast<u32>(extra_lod_bias)));
+@@ -1003,6 +1218,9 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
+     } else {
+         sampler_lru_cache.Touch(it->second.lru_id, gc_tick);
+     }
++    if (lru_id) {
++        *lru_id = it->second.lru_id;
++    }
+ 
+     return it->second.Handle();
+ }
+@@ -1160,6 +1378,9 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
  }
  
  void TextureCache::GarbageCollectImages() {
@@ -2805,7 +4726,7 @@ index 98ccdd1..cacde15 100644
      if (instance.CanReportMemoryUsage()) {
          total_used_memory = instance.GetDeviceMemoryUsage();
          // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
-@@ -1179,6 +1384,16 @@ void TextureCache::GarbageCollectImages() {
+@@ -1179,6 +1400,16 @@ void TextureCache::GarbageCollectImages() {
                  pressure_gc_memory = budget / 100 * 85;
                  critical_gc_memory = budget / 100 * 95;
              }
@@ -2822,7 +4743,7 @@ index 98ccdd1..cacde15 100644
          }
      }
      BbStats::gc_used_bytes.store(total_used_memory, std::memory_order_relaxed);
-@@ -1188,9 +1403,6 @@ void TextureCache::GarbageCollectImages() {
+@@ -1188,9 +1419,6 @@ void TextureCache::GarbageCollectImages() {
      // discrete GPU it stays over the trigger, where an age of 16 ticks (~3 frames) evicted every
      // texture briefly off screen and uploaded it again. Below the pressure mark an image goes
      // once unused for BB_GC_IDLE_SECONDS (20): the textures of an area left behind.
@@ -2832,7 +4753,7 @@ index 98ccdd1..cacde15 100644
      if (second != gc_second) {
          gc_second = second;
          BbStats::coarse_second.store(u32(second), std::memory_order_relaxed);
-@@ -1216,6 +1428,29 @@ void TextureCache::GarbageCollectImages() {
+@@ -1216,6 +1444,29 @@ void TextureCache::GarbageCollectImages() {
      u64 below_tick = 0;
      size_t num_deletions = 0;
      u32 visited = 0;
@@ -2862,7 +4783,7 @@ index 98ccdd1..cacde15 100644
  
      const auto configure = [&](bool allow_aggressive) {
          pressured = total_used_memory >= pressure_gc_memory;
-@@ -1224,6 +1459,9 @@ void TextureCache::GarbageCollectImages() {
+@@ -1224,6 +1475,9 @@ void TextureCache::GarbageCollectImages() {
          below_tick = gc_tick - ticks_to_destroy;
          if (!pressured && !aggresive) {
              below_tick = std::min(below_tick, idle_tick);
@@ -2872,7 +4793,7 @@ index 98ccdd1..cacde15 100644
          }
          num_deletions = aggresive ? 40 : pressured ? 20 : 10;
          visited = 0;
-@@ -1237,16 +1475,47 @@ void TextureCache::GarbageCollectImages() {
+@@ -1237,16 +1491,47 @@ void TextureCache::GarbageCollectImages() {
          const bool download = image.SafeToDownload();
          const bool tiled = image.info.IsTiled();
          // bbport: images that cannot go now (GPU-written: their contents exist only here, and
@@ -2925,7 +4846,7 @@ index 98ccdd1..cacde15 100644
              // bbport: synchronously, while the image still protects its pages. A deferred
              // write-back landed after FreeImage had unprotected them, over whatever the game
              // had meanwhile stored there (e.g. its heap after unloading an area).
-@@ -1279,17 +1548,20 @@ void TextureCache::GarbageCollectImages() {
+@@ -1279,17 +1564,20 @@ void TextureCache::GarbageCollectImages() {
          lru_cache.ForEachItemBelow(below_tick, clean_up);
      }
      // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
@@ -2950,7 +4871,15 @@ index 98ccdd1..cacde15 100644
          }
      }
  }
-@@ -1338,6 +1610,10 @@ void TextureCache::RunGarbageCollector() {
+@@ -1320,6 +1608,7 @@ void TextureCache::GarbageCollectSamplers() {
+         const size_t lru_id = samplers.at(hash).lru_id;
+         samplers.erase(hash);
+         sampler_lru_cache.Free(lru_id);
++        ++sampler_generation; // remembered handles may be gone (SamplerGeneration)
+         return false;
+     };
+ 
+@@ -1338,6 +1627,10 @@ void TextureCache::RunGarbageCollector() {
      SCOPE_EXIT {
          ++gc_tick;
      };
@@ -2961,7 +4890,7 @@ index 98ccdd1..cacde15 100644
  
      GarbageCollectImages();
      GarbageCollectSamplers();
-@@ -1375,6 +1651,16 @@ void TextureCache::DeleteImage(ImageId image_id) {
+@@ -1375,6 +1668,16 @@ void TextureCache::DeleteImage(ImageId image_id) {
          }
      }
  
@@ -2978,7 +4907,7 @@ index 98ccdd1..cacde15 100644
      // Reclaim image and any image views it references.
      scheduler.DeferOperation([this, image_id] {
          Image& image = slot_images[image_id];
-@@ -1387,4 +1673,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
+@@ -1387,4 +1690,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
      });
  }
  
@@ -2994,7 +4923,7 @@ index 98ccdd1..cacde15 100644
 +
  } // namespace VideoCore
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.h b/gpu/shadps4/video_core/texture_cache/texture_cache.h
-index 2e4c529..55859ec 100644
+index 2e4c529..9889210 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.h
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.h
 @@ -13,6 +13,7 @@
@@ -3005,7 +4934,62 @@ index 2e4c529..55859ec 100644
  #include <queue>
  #include <tsl/robin_map.h>
  
-@@ -365,6 +366,12 @@ private:
+@@ -104,6 +105,28 @@ public:
+         slot_images[image_id].tick_accessed_last = scheduler.CurrentTick();
+     }
+ 
++    /// bbport: whether FindImage's result `image_id` for `info` is an exact match: the
++    /// registered image with the same address, size, extent, format, type, resources and
++    /// layout (FindImage's own memo test, with equal resources). Images register once, their
++    /// descriptions never change and later images come after them in the page table, so a new
++    /// search finds that image first again for as long as it stays registered: a lookup
++    /// remembered with it outlives other images' (un)registration (IsRegisteredImage).
++    [[nodiscard]] bool IsExactMatch(ImageId image_id, const ImageInfo& info) const;
++
++    /// bbport: whether `image_id` is still the registered image `uid` (see IsExactMatch).
++    [[nodiscard]] bool IsRegisteredImage(ImageId image_id, u64 uid) const {
++        if (!image_id || !slot_images.is_allocated(image_id)) {
++            return false;
++        }
++        const Image& image = slot_images[image_id];
++        return image.image_uid == uid && True(image.flags & ImageFlagBits::Registered);
++    }
++
++    /// bbport: the unique id of an image (slot ids are reused, these are not).
++    [[nodiscard]] u64 ImageUid(ImageId image_id) const {
++        return slot_images[image_id].image_uid;
++    }
++
+     TileManager& GetTileManager() noexcept {
+         return tile_manager;
+     }
+@@ -217,7 +240,24 @@ public:
+     /// extra_lod_bias: bbport, added to the S#'s bias (reduced scene rendering).
+     [[nodiscard]] vk::Sampler GetSampler(const AmdGpu::Sampler& sampler,
+                                          AmdGpu::BorderColorBuffer border_color_base,
+-                                         bool is_depth, float extra_lod_bias = 0.0f);
++                                         bool is_depth, float extra_lod_bias = 0.0f,
++                                         size_t* lru_id = nullptr);
++
++    /// bbport (sampler memo of the draw recording thread): a sampler GetSampler returned stays
++    /// alive while this is unchanged (the collector frees samplers only in RunGarbageCollector,
++    /// never while textures are bound: the GPU command thread with the draw pipe drained, or the
++    /// recording thread between packets; it bumps it then), provided the caller touches it once
++    /// per GC period (TouchSampler) as GetSampler does.
++    [[nodiscard]] u64 SamplerGeneration() const noexcept {
++        return sampler_generation;
++    }
++    [[nodiscard]] u64 GcTick() const noexcept {
++        return gc_tick;
++    }
++    void TouchSampler(size_t lru_id) {
++        std::scoped_lock lock{samplers_mutex};
++        sampler_lru_cache.Touch(lru_id, gc_tick);
++    }
+ 
+     /// Retrieves the image with the specified id.
+     Image* TryGetImage(ImageId id, u64 uid) {
+@@ -365,6 +405,12 @@ private:
      /// Copies image memory back to CPU.
      void DownloadImageMemory(ImageId image_id, bool sync = false);
  
@@ -3018,7 +5002,7 @@ index 2e4c529..55859ec 100644
      /// Thread function for copying downloaded images out to CPU memory.
      void DownloadedImagesThread(const std::stop_token& token);
  
-@@ -393,6 +400,14 @@ private:
+@@ -393,6 +439,14 @@ private:
      /// Removes the image and any views/surface metas that reference it.
      void DeleteImage(ImageId image_id);
  
@@ -3033,7 +5017,7 @@ index 2e4c529..55859ec 100644
      /// Touch the image in the LRU cache.
      void TouchImage(const Image& image);
  
-@@ -420,6 +435,9 @@ private:
+@@ -420,6 +474,9 @@ private:
      std::unordered_set<ImageId> download_images;
      u64 total_used_memory = 0;
      u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
@@ -3043,7 +5027,7 @@ index 2e4c529..55859ec 100644
      std::chrono::steady_clock::time_point gc_report_time{};
      /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
      std::array<u64, 64> gc_tick_at_second{};
-@@ -427,11 +445,28 @@ private:
+@@ -427,11 +484,29 @@ private:
      u64 trigger_gc_memory = 0;
      u64 pressure_gc_memory = 0;
      u64 critical_gc_memory = 0;
@@ -3053,6 +5037,7 @@ index 2e4c529..55859ec 100644
 +    u64 static_critical_gc_memory = 0;
 +    u64 gc_budget_second = ~0ull;
      u64 total_used_samplers = 0;
++    u64 sampler_generation = 0; ///< bbport: samplers freed so far (SamplerGeneration)
      u64 trigger_gc_samplers = 0;
      u64 pressure_gc_samplers = 0;
      u64 critical_gc_samplers = 0;
@@ -3177,10 +5162,28 @@ index 36d0505..0de4773 100644
                                                const ImageInfo& info);
  
 diff --git a/gpu/shim/bbgpu.cpp b/gpu/shim/bbgpu.cpp
-index f38aea7..b4f2a29 100644
+index f38aea7..aab9797 100644
 --- a/gpu/shim/bbgpu.cpp
 +++ b/gpu/shim/bbgpu.cpp
-@@ -274,8 +274,29 @@ bool g_window_ready;
+@@ -29,6 +29,7 @@
+ #include "common/elf_info.h"
+ #include "common/logging/log.h"
+ #include "common/rdtsc.h"
++#include "common/signal_context.h"
+ #include "core/libraries/kernel/orbis_error.h"
+ #include "core/libraries/libs.h"
+ #include "core/emulator_settings.h"
+@@ -55,7 +56,9 @@ int32_t* runtime_errno(void);
+ void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
+ void runtime_memory_set_note_write_hook(RuntimeGpuRange note);
+ void runtime_memory_set_cpu_write_hook(RuntimeGpuRange hook);
++int runtime_memory_restore_access(void* context, uintptr_t address, int repeated);
+ }
++namespace Shader { void RegisterSrtFaultHandler(); }
+ 
+ Frontend::WindowSDL* g_window = nullptr;
+ 
+@@ -274,8 +277,29 @@ bool g_window_ready;
  } // namespace
  
  #ifdef BB_PGO_GENERATE
@@ -3210,7 +5213,7 @@ index f38aea7..b4f2a29 100644
  // Instrumented build (BB_PGO=generate): the game often ends through _exit (watchdog, guest
  // exit), which skips the profile write at exit. Write every 30 s and reset: the files sum the
  // intervals.
-@@ -284,8 +305,8 @@ static void StartProfileWriter() {
+@@ -284,8 +308,8 @@ static void StartProfileWriter() {
          Common::SetCurrentThreadName("bb:pgo");
          for (;;) {
              std::this_thread::sleep_for(std::chrono::seconds(30));
@@ -3221,7 +5224,17 @@ index f38aea7..b4f2a29 100644
              std::printf("PGO: profile written\n");
          }
      }).detach();
-@@ -322,6 +343,20 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
+@@ -294,6 +318,9 @@ static void StartProfileWriter() {
+ 
+ extern "C" int bbgpu_init(const BbGpuConfig* config) {
+     BbSettings::Load();
++    // The fault handlers are registered before any guest thread runs: the registry is a std::set
++    // the fault handler walks without a lock (the SRT walker's was added at the first shader).
++    Shader::RegisterSrtFaultHandler();
+ #ifdef BB_PGO_GENERATE
+     StartProfileWriter();
+ #endif
+@@ -322,6 +349,20 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
          // _Exit skips renderer destructors. Snapshot completed pipeline work and drain its
          // asynchronous cache writes before terminating; no gameplay queue waits are added.
          Vulkan::PipelineCache::SaveAllForShutdown();
@@ -3242,6 +5255,78 @@ index f38aea7..b4f2a29 100644
          std::fflush(stdout);
          std::_Exit(0);
      });
+@@ -364,6 +405,36 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
+     return 0;
+ }
+ 
++namespace {
++// bbport: the same access (instruction and address) faulting again within microseconds, many
++// times in a row: the tracking claimed the fault but left the page protected, and the thread
++// would retry forever. A write the game repeats each frame comes milliseconds apart.
++struct RepeatedFault {
++    u64 rip = 0, address = 0, last_tsc = 0;
++    u32 count = 0;
++};
++thread_local RepeatedFault repeated_fault;
++
++bool FaultRepeats(void* ucontext, void* address) {
++    constexpr u64 RepeatCycles = 4'000'000; // ~1 ms
++    constexpr u32 RepeatLimit = 64;
++    auto& r = repeated_fault;
++    const u64 rip = reinterpret_cast<u64>(Common::GetRip(ucontext));
++    const u64 now = Common::FencedRDTSC();
++    if (rip != r.rip || reinterpret_cast<u64>(address) != r.address ||
++        now - r.last_tsc > RepeatCycles) {
++        r = {rip, reinterpret_cast<u64>(address), now, 0};
++        return false;
++    }
++    r.last_tsc = now;
++    if (++r.count < RepeatLimit) {
++        return false;
++    }
++    r.count = 0;
++    return true;
++}
++} // namespace
++
+ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
+     // BB_LABEL_TRAP (diagnostic): its read-only label pages first. Not passed on to GPU page
+     // tracking (a write fault drains the draw pipe: thousands a second would change the timing
+@@ -372,9 +443,18 @@ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
+         return 1;
+     }
+     if (Core::Signals::Instance()->DispatchAccessViolation(ucontext, address)) {
++        if (FaultRepeats(ucontext, address)) {
++            runtime_memory_restore_access(ucontext, reinterpret_cast<uintptr_t>(address), 1);
++        }
++        return 1;
++    }
++    if (BbFreeCheck::OnStaleTrapFault(reinterpret_cast<std::uint64_t>(address))) {
+         return 1;
+     }
+-    return BbFreeCheck::OnStaleTrapFault(reinterpret_cast<std::uint64_t>(address)) ? 1 : 0;
++    // bbport: nobody claimed it. A guest page the guest may access but GPU tracking left
++    // protected (a stale protection, a page it no longer knows) gets its access back; ending the
++    // game for it is worse than a GPU copy that may miss a write. Real faults stay unhandled.
++    return runtime_memory_restore_access(ucontext, reinterpret_cast<uintptr_t>(address), 0);
+ }
+ 
+ extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
+@@ -406,11 +486,13 @@ static void KernelServiceThread(std::stop_token stoken) {
+         {
+             std::unique_lock lock{m_asio_req};
+             cv_asio_req.wait(lock, stoken, [] { return asio_requests != 0; });
++            // Taken before the run: a request made while it runs (a timer armed after run()
++            // found no work) wakes the next one instead of being cleared after it.
++            asio_requests.exchange(0);
+         }
+         if (stoken.stop_requested()) break;
+         io_context.run();
+         io_context.restart();
+-        asio_requests = 0;
+     }
+ }
+ 
 diff --git a/gpu/shim/bbport_copy.cpp b/gpu/shim/bbport_copy.cpp
 index f9d2884..caf3e6c 100644
 --- a/gpu/shim/bbport_copy.cpp
@@ -3679,6 +5764,51 @@ index 2a1ad78..cd531da 100644
  inline bool GetUsage(bool thread, Usage& out) {
      rusage usage{};
      if (getrusage(thread ? RUSAGE_THREAD : RUSAGE_SELF, &usage) != 0) {
+diff --git a/gpu/shim/bbport_sections.h b/gpu/shim/bbport_sections.h
+index f88cc52..e4fee68 100644
+--- a/gpu/shim/bbport_sections.h
++++ b/gpu/shim/bbport_sections.h
+@@ -45,25 +45,32 @@ inline constexpr const char* Names[Count] = {
+ };
+ inline std::array<std::atomic<std::uint64_t>, Count> cycles{};
+ 
++/// BB_SECTIONS, read once at startup (a plain global: no initialization guard per scope).
++inline const bool enabled = [] {
++    const char* env = std::getenv("BB_SECTIONS");
++    return env && env[0] == '1';
++}();
+ inline bool Enabled() {
+-    static const bool on = [] {
+-        const char* env = std::getenv("BB_SECTIONS");
+-        return env && env[0] == '1';
+-    }();
+-    return on;
++    return enabled;
+ }
+ /// Set on the draw recording thread (DrawPipe::Run): only its time is counted.
+ inline thread_local bool recording_thread = false;
+ 
++/// Off (the default) a scope costs one predictable branch on `enabled` and one on `start` at
++/// its end: no thread-local access, no rdtsc, no atomics.
+ struct Scope {
+-    explicit Scope(Id id_) : id{id_}, start{Enabled() && recording_thread ? __rdtsc() : 0} {}
++    explicit Scope(Id id_) : id{id_} {
++        if (enabled) [[unlikely]] {
++            start = recording_thread ? __rdtsc() : 0;
++        }
++    }
+     ~Scope() {
+-        if (start) {
++        if (start) [[unlikely]] {
+             cycles[id].fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+         }
+     }
+     Id id;
+-    std::uint64_t start;
++    std::uint64_t start = 0;
+ };
+ } // namespace BbSections
+ 
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
 index cf4fbd8..10a12e7 100644
 --- a/gpu/shim/bbport_settings.cpp
@@ -4344,10 +6474,10 @@ index ea6daf1..3991891 100644
          if overlay:
              remove_overlay(overlay)
 diff --git a/src/probe.c b/src/probe.c
-index b0e7c32..90e1ee8 100644
+index b0e7c32..29a040d 100644
 --- a/src/probe.c
 +++ b/src/probe.c
-@@ -8,6 +8,7 @@
+@@ -8,11 +8,13 @@
  #include <cpuid.h>
  #include "runtime.h"
  #include "gpu/bbgpu.h"
@@ -4355,19 +6485,26 @@ index b0e7c32..90e1ee8 100644
  #if !defined(__x86_64__) || !defined(__GNUC__)
  #error This prototype requires x86-64 GCC or Clang (including MinGW).
  #endif
-@@ -436,6 +437,76 @@ static int fatal(DWORD code) {
+ #ifdef _WIN32
+ #include <windows.h>
++#include <dbghelp.h>
+ #include <timeapi.h>
+ #include <process.h>
+ #include <psapi.h>
+@@ -436,6 +438,145 @@ static int fatal(DWORD code) {
          return 0;
      }
  }
 +/* A fault in host code, before any handler of its own runs. On a guest thread the handler
 + * search has to cross guest frames, which have no unwind data: Windows then ends the process
 + * with the fault's code and the unhandled filter never runs, so this note is the only trace.
-+ * The first few only (a driver may fault on purpose); no stdio locks (the faulting thread may
-+ * hold them). */
++ * Every one on guest threads; the first few elsewhere (a driver may fault on purpose). No stdio
++ * locks (the faulting thread may hold them). */
 +static void note_host_fault(EXCEPTION_POINTERS *e) {
 +    static volatile LONG notes;
 +    EXCEPTION_RECORD *r = e->ExceptionRecord;
-+    if (r->ExceptionCode == EXCEPTION_BREAKPOINT || InterlockedIncrement(&notes) > 4) return;
++    if (r->ExceptionCode == EXCEPTION_BREAKPOINT) return;
++    if (!runtime_thread_has_record() && InterlockedIncrement(&notes) > 4) return;
 +    char line[1024], where[512], thread_name[64] = "";
 +    describe(where, sizeof(where), (uintptr_t)e->ContextRecord->Rip);
 +    PWSTR description = NULL;
@@ -4429,10 +6566,78 @@ index b0e7c32..90e1ee8 100644
 +    runtime_fault_recover = NULL;
 +    return dead_end;
 +}
++/* Crash dump (logs\crash.dmp, beside the session log) and the unhandled filter's upkeep, on a
++ * helper thread. MiniDumpWriteDump cannot walk the thread that calls it reliably: the crashing
++ * thread wakes this one and waits for it, bounded (a lock the dump needs may be held by the
++ * crashed thread). dbghelp is loaded only then. Every second meanwhile the unhandled filter is
++ * set again: overlays (Steam, RTSS, Discord) replace it, and theirs end the process silently. */
++static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *e);
++static HANDLE crash_dump_request, crash_dump_done;
++static EXCEPTION_POINTERS *volatile crash_dump_exception;
++static volatile DWORD crash_dump_thread_id;
++static volatile LONG crash_dump_written;
++static char crash_dump_dir[MAX_PATH], crash_dump_path[MAX_PATH];
++typedef BOOL (WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
++                                          PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
++static unsigned __stdcall crash_helper_thread(void *unused) {
++    (void)unused;
++    for (DWORD waited; (waited = WaitForSingleObject(crash_dump_request, 1000)) != WAIT_OBJECT_0;) {
++        if (waited != WAIT_TIMEOUT) { SetEvent(crash_dump_done); return 0; }
++        LPTOP_LEVEL_EXCEPTION_FILTER previous = SetUnhandledExceptionFilter(unhandled_filter);
++        static int noted;
++        if (previous != unhandled_filter && !noted) {
++            noted = 1;
++            fprintf(stderr, "Crash reports: another module replaced the unhandled exception filter (an overlay?); set again\n");
++        }
++    }
++    if (crash_dump_dir[0]) CreateDirectoryA(crash_dump_dir, NULL);
++    HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
++    MiniDumpWriteDumpFn write_dump = dbghelp ? (MiniDumpWriteDumpFn)(void *)GetProcAddress(dbghelp, "MiniDumpWriteDump") : NULL;
++    HANDLE file = write_dump ? CreateFileA(crash_dump_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
++                             : INVALID_HANDLE_VALUE;
++    if (file != INVALID_HANDLE_VALUE) {
++        MINIDUMP_EXCEPTION_INFORMATION exception = {crash_dump_thread_id, crash_dump_exception, FALSE};
++        const MINIDUMP_TYPE type = (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory);
++        if (write_dump(GetCurrentProcess(), GetCurrentProcessId(), file, type, &exception, NULL, NULL)) crash_dump_written = 1;
++        CloseHandle(file);
++    }
++    SetEvent(crash_dump_done);
++    return 0;
++}
++static void start_crash_helper(void) {
++    /* The session log's folder (BB_LOG_FILE, set by the launcher), else logs\ here. */
++    const char *log = getenv("BB_LOG_FILE");
++    const char *slash = log ? strrchr(log, '\\') : NULL, *other = log ? strrchr(log, '/') : NULL;
++    if (other > slash) slash = other;
++    if (slash && (size_t)(slash - log) + sizeof("\\crash.dmp") < sizeof(crash_dump_path)) {
++        snprintf(crash_dump_path, sizeof(crash_dump_path), "%.*s\\crash.dmp", (int)(slash - log), log);
++    } else {
++        snprintf(crash_dump_dir, sizeof(crash_dump_dir), "logs");
++        snprintf(crash_dump_path, sizeof(crash_dump_path), "logs\\crash.dmp");
++    }
++    crash_dump_request = CreateEventW(NULL, FALSE, FALSE, NULL);
++    crash_dump_done = CreateEventW(NULL, TRUE, FALSE, NULL);
++    HANDLE thread = crash_dump_request && crash_dump_done ? (HANDLE)_beginthreadex(NULL, 0, crash_helper_thread, NULL, 0, NULL) : NULL;
++    if (thread) CloseHandle(thread);
++    else crash_dump_request = NULL;
++}
++/* Called once (report_exception lets one thread through), before terminate(). */
++static void write_crash_dump(EXCEPTION_POINTERS *e) {
++    if (!crash_dump_request) return;
++    crash_dump_exception = e;
++    crash_dump_thread_id = GetCurrentThreadId();
++    SetEvent(crash_dump_request);
++    const DWORD waited = WaitForSingleObject(crash_dump_done, 30000);
++    char line[MAX_PATH + 64];
++    snprintf(line, sizeof(line), waited == WAIT_OBJECT_0 && crash_dump_written ? "Crash dump: %s\n" : "Crash dump: not written (%s)\n",
++             crash_dump_path);
++    DWORD written;
++    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, (DWORD)strlen(line), &written, NULL);
++}
  static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *e) {
      EXCEPTION_RECORD *r = e->ExceptionRecord;
      if (r->ExceptionCode == EXCEPTION_SINGLE_STEP && hw_watch_file && (e->ContextRecord->Dr6 & 1)) {
-@@ -458,8 +529,12 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *e) {
+@@ -458,13 +599,19 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *e) {
              return EXCEPTION_CONTINUE_EXECUTION;
          }
      }
@@ -4445,17 +6650,27 @@ index b0e7c32..90e1ee8 100644
 +        return EXCEPTION_CONTINUE_SEARCH;
 +    }
      report_exception(e);
++    write_crash_dump(e);
      terminate(128 + 11);
  }
-@@ -674,6 +749,7 @@ int main(int argc, char **argv) {
+ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *e) {
+     report_exception(e);
++    write_crash_dump(e);
+     terminate(128 + 11);
+ }
+ /* link_modules.py rewrote the guest's `mov rax, fs:[0]` into `mov rax, gs:[0]`. GS is the TEB
+@@ -674,8 +821,10 @@ int main(int argc, char **argv) {
      PROCESS_POWER_THROTTLING_STATE throttling = {PROCESS_POWER_THROTTLING_CURRENT_VERSION,
                                                   PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0};
      SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
 +    find_own_dir();
      AddVectoredExceptionHandler(1, vectored_handler);
      SetUnhandledExceptionFilter(unhandled_filter);
++    start_crash_helper();
      start_dump_thread();
-@@ -903,6 +979,20 @@ int main(int argc, char **argv) {
+     start_hw_watch();
+     main_argc = argc; main_argv = argv;
+@@ -903,6 +1052,20 @@ int main(int argc, char **argv) {
          memcpy(image + relocs[i].target, &value, 8);
      }
      if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
@@ -4476,6 +6691,31 @@ index b0e7c32..90e1ee8 100644
  #ifdef _WIN32
      printf("Guest thread pointer reads: %" PRIu64 " use TEB TLS slot %u\n", patch_tls_reads(segments, ns), runtime_win_tls_slot());
  #endif
+diff --git a/src/runtime.h b/src/runtime.h
+index 4ae7643..035ae4d 100644
+--- a/src/runtime.h
++++ b/src/runtime.h
+@@ -36,6 +36,11 @@ void runtime_mutex_report(void);
+ uintptr_t runtime_memory_resolve(const char *name);
+ void runtime_memory_report(void);
+ int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
++/* Guest memory whose guest protection allows writing, all of the range. */
++int runtime_memory_guest_writable(uintptr_t address, uint64_t size);
++/* Fault handler, last resort: gives a page GPU tracking left protected the guest's protection back
++ * (1: retry the access; 0: a real fault). context: the handler's (EXCEPTION_POINTERS, ucontext). */
++int runtime_memory_restore_access(void *context, uintptr_t address, int repeated);
+ /* The CPU is about to write the range outside guest code (a file read): tells the GPU side. */
+ void runtime_memory_note_write(uintptr_t address, uint64_t size);
+ void runtime_memory_note_cpu_write(uintptr_t address, uint64_t size);
+@@ -57,6 +62,8 @@ uintptr_t runtime_thread_resolve(const char *name);
+ void runtime_thread_report(void);
+ void runtime_set_main_tls(const void *data, uint64_t filesz, uint64_t memsz, uint64_t align);
+ void runtime_thread_attach_main(void);
++/* The calling thread runs guest code (it has a guest thread record). */
++int runtime_thread_has_record(void);
+ int32_t *runtime_errno(void);
+ uintptr_t runtime_sema_resolve(const char *name);
+ void runtime_sema_report(void);
 diff --git a/src/runtime_ajm.c b/src/runtime_ajm.c
 index b36f136..d8be9be 100644
 --- a/src/runtime_ajm.c
@@ -4496,6 +6736,105 @@ index b36f136..d8be9be 100644
          input=joined;
      }
      Output out={job->outputs,job->output_count,0,0};
+diff --git a/src/runtime_content.c b/src/runtime_content.c
+index 59a683b..673a2de 100644
+--- a/src/runtime_content.c
++++ b/src/runtime_content.c
+@@ -6,6 +6,7 @@
+ #include <string.h>
+ #define INVALID_ID ((int32_t)0x805a1000)
+ #define NOT_LOADED ((int32_t)0x805a1001)
++#define NOT_INITIALIZED ((int32_t)0x80d90001)
+ #define PARAMETER ((int32_t)0x80d90002)
+ #define BUSY ((int32_t)0x80d90003)
+ static unsigned refs, initialized, configured;
+@@ -58,20 +59,27 @@ static ABI int32_t content_init(const unsigned char *init,unsigned char *boot) {
+     puts("Runtime: AppContent initialized; offline base-game profile, no mounted add-ons");
+     return 0;
+ }
+-static void require_initialized(void) {
+-    require_loaded();
+-    if (!initialized) { fputs("STOP: AppContent query before initialization\n",stderr); exit(21); }
++/* bbport: queries before initialization (or after the module's unload) fail as on the console
++ * instead of ending the game (exit 21). */
++static int32_t require_initialized(void) {
++    require_provider();
++    if (!refs || !initialized) { fputs("Runtime: AppContent query before initialization\n",stderr); return NOT_INITIALIZED; }
++    return 0;
+ }
+ static ABI int32_t param_int(uint32_t id,int32_t *out) {
+-    require_initialized();
++    int32_t result=require_initialized();
++    if (result) return result;
+     if (id>4 || !out) return PARAMETER;
+     memcpy(out,&parameters[id],4); ++queries;
+     printf("Runtime: AppContent parameter %u = %d\n",id,*out);
+     return 0;
+ }
+ static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint32_t *hits) {
+-    require_initialized();
+-    if (service) { fputs("STOP: nonzero AppContent service label unsupported\n",stderr); exit(21); }
++    int32_t result=require_initialized();
++    if (result) return result;
++    /* bbport: other service labels have no add-ons either (this ended the game, exit 21). */
++    static unsigned noted;
++    if (service && !noted++) fprintf(stderr,"Runtime: AppContent service label %u: no add-ons\n",service);
+     if ((!capacity || !list) && !hits) return PARAMETER;
+     /* No add-ons are mounted by this provider. Never touch unused list slots. */
+     if (hits) *hits=0;
+diff --git a/src/runtime_file.c b/src/runtime_file.c
+index 6e10375..efb8985 100644
+--- a/src/runtime_file.c
++++ b/src/runtime_file.c
+@@ -272,12 +272,40 @@ static void touch_for_write(void *buffer,uint64_t size) {
+         *b=*b;
+     }
+ }
++/* bbport: the kernel's copy into guest memory the guest may write failed: the GPU thread
++ * protected a page again between touch_for_write and the copy (EFAULT; Windows: ERROR_NOACCESS).
++ * The data goes through a host buffer and memcpy, whose faults the handler resolves as for guest
++ * code. offset<0: from the descriptor's position (a failed read leaves it where it was). */
++static ssize_t read_bounced(int h,void *buffer,uint64_t size,int64_t offset) {
++    enum { BOUNCE=1<<20 };
++    unsigned char *bounce=malloc(size<BOUNCE ? size : BOUNCE);
++    if (!bounce) { errno=ENOMEM; return -1; }
++    uint64_t done=0;
++    while (done<size) {
++        const uint64_t chunk=size-done<BOUNCE ? size-done : BOUNCE;
++        const ssize_t n=offset<0 ? read(h,bounce,chunk) : pread(h,bounce,chunk,offset+(int64_t)done);
++        if (n<0) {
++            if (done) break;
++            int e=errno; free(bounce); errno=e;
++            return -1;
++        }
++        memcpy((unsigned char *)buffer+done,bounce,(size_t)n);
++        done+=(uint64_t)n;
++        if ((uint64_t)n<chunk) break;
++    }
++    free(bounce);
++    static unsigned notes;
++    if (__atomic_fetch_add(&notes,1,__ATOMIC_RELAXED)<4)
++        printf("Runtime: a file read into guest memory failed (a page protected again); read through a host buffer\n");
++    return (ssize_t)done;
++}
+ static int64_t do_read(int fd,void *buffer,uint64_t size) {
+     int h=host_fd(fd);
+     if (h<0) return get(fd) ? -EISDIR : -EBADF;
+     runtime_memory_note_write((uintptr_t)buffer,size);
+     touch_for_write(buffer,size);
+     ssize_t n=read(h,buffer,size);
++    if (n<0 && size && runtime_memory_guest_writable((uintptr_t)buffer,size)) n=read_bounced(h,buffer,size,-1);
+     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
+     if (n>0) runtime_memory_note_write((uintptr_t)buffer,(uint64_t)n); /* and once the data is there */
+     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
+@@ -289,6 +317,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
+     runtime_memory_note_write((uintptr_t)buffer,size);
+     touch_for_write(buffer,size);
+     ssize_t n=pread(h,buffer,size,offset);
++    if (n<0 && size && offset>=0 && runtime_memory_guest_writable((uintptr_t)buffer,size)) n=read_bounced(h,buffer,size,offset);
+     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
+     if (n>0) runtime_memory_note_write((uintptr_t)buffer,(uint64_t)n); /* and once the data is there */
+     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
 diff --git a/src/runtime_host.c b/src/runtime_host.c
 index 73f3762..f783d21 100644
 --- a/src/runtime_host.c
@@ -4584,6 +6923,163 @@ index 73f3762..f783d21 100644
  }
  #else
  #include <pthread.h>
+diff --git a/src/runtime_kernel.c b/src/runtime_kernel.c
+index 21a81d0..0204150 100644
+--- a/src/runtime_kernel.c
++++ b/src/runtime_kernel.c
+@@ -250,10 +250,14 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
+         if (old) { if (*oldlen<4) return fail_posix(ENOMEM); memcpy(old,&value,4); }
+         *oldlen=4; return 0;
+     }
+-    fprintf(stderr,"STOP: unsupported sysctl mib");
+-    for (uint32_t i=0;i<namelen && i<8;++i) fprintf(stderr," %d",name[i]);
+-    fputc('\n',stderr);
+-    exit(21);
++    /* bbport: unknown names fail as on FreeBSD (ENOENT) instead of ending the game (exit 21). */
++    static unsigned notes;
++    if (__atomic_fetch_add(&notes,1,__ATOMIC_RELAXED)<8) {
++        fprintf(stderr,"Runtime: unsupported sysctl mib");
++        for (uint32_t i=0;i<namelen && i<8;++i) fprintf(stderr," %d",name[i]);
++        fputs(" (ENOENT)\n",stderr);
++    }
++    return fail_posix(ENOENT);
+ }
+ 
+ /* ---- pthread_once and thread-specific data ---- */
+diff --git a/src/runtime_memory.c b/src/runtime_memory.c
+index be5a034..46bdcc3 100644
+--- a/src/runtime_memory.c
++++ b/src/runtime_memory.c
+@@ -18,6 +18,7 @@
+ #else
+ #include <fcntl.h>
+ #include <sys/mman.h>
++#include <ucontext.h>
+ #include <unistd.h>
+ #endif
+ /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
+@@ -124,7 +125,8 @@ static GpuRange hook_map, hook_unmap, hook_invalidate;
+ static GpuRange hook_note_write; /* bbport: data written into GPU memory (runtime_memory_note_write) */
+ enum { HOOK_MAP, HOOK_UNMAP, HOOK_INVALIDATE };
+ typedef struct { int kind; uintptr_t address; uint64_t size; } PendingHook;
+-static PendingHook pending[64]; static size_t pending_count;
++/* Grows as needed (a batch map or an unmap across many mappings queues one each). */
++static PendingHook *pending; static size_t pending_count, pending_capacity;
+ static size_t allocations, maps, flexible_maps, protects, queries;
+ static uint64_t live_bytes, flexible_bytes;
+ 
+@@ -270,7 +272,12 @@ static void zero_phys(uint64_t phys, uint64_t size) { punch(phys,size); }
+ static void queue_hook(int kind, uintptr_t address, uint64_t size) {
+     GpuRange hook = kind==HOOK_MAP ? hook_map : kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
+     if (!hook) return;
+-    if (pending_count==sizeof(pending)/sizeof(*pending)) { fputs("STOP: GPU hook queue overflow\n",stderr); exit(21); }
++    if (pending_count==pending_capacity) {
++        size_t capacity=pending_capacity ? pending_capacity*2 : 64;
++        PendingHook *next=realloc(pending,capacity*sizeof(*pending));
++        if (!next) { fputs("STOP: GPU hook queue overflow\n",stderr); exit(21); }
++        pending=next; pending_capacity=capacity;
++    }
+     pending[pending_count++]=(PendingHook){kind,address,size};
+ }
+ /* Runs queued GPU notifications; callers invoke it after dropping the lock. */
+@@ -503,10 +510,14 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
+     /* The GPU forgets the range before it disappears (as shadPS4's early GPU unmap). */
+     if (hook_unmap && !((uintptr_t)address%PAGE) && size) hook_unmap((uintptr_t)address,align_up(size,PAGE));
+     write_lock();
+-    size_t before=pending_count;
++    size_t before=pending_count, kept=before;
+     int32_t result=unmap_locked((uintptr_t)address,size);
+-    pending_count=before; /* already notified above */
++    /* The unmaps were notified above; the invalidations of view pieces remapped around the
++     * range (restore_remnant: their GPU protection is gone) still go out. */
++    for (size_t i=before;i<pending_count;++i) if (pending[i].kind!=HOOK_UNMAP) pending[kept++]=pending[i];
++    pending_count=kept;
+     write_unlock();
++    flush_hooks();
+     return result;
+ }
+ static ABI int32_t direct_release(uint64_t start, uint64_t size) {
+@@ -1008,6 +1019,80 @@ void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int
+     }
+     read_unlock();
+ }
++/* bbport: the fault handler's last resort (bbgpu_handle_fault). An access the guest's own
++ * protection allows faulted on a page GPU tracking protected, and the tracking did not resolve
++ * it (repeated: it claimed the fault, yet the same access keeps faulting; else: no record of the
++ * page). An unhandled fault ends the game without a trace, so the page gets the guest's
++ * protection back: the GPU may miss writes there until it protects the page again. No locks
++ * beyond the table's (nested per thread) and no allocation: this runs in the fault handler. */
++int runtime_memory_restore_access(void *context, uintptr_t address, int repeated) {
++    int is_write;
++#ifdef _WIN32
++    const ULONG_PTR kind=((EXCEPTION_POINTERS *)context)->ExceptionRecord->ExceptionInformation[0];
++    if (kind==8) return 0; /* execution: never a tracking fault */
++    is_write=kind==1;
++#else
++    const greg_t error=((ucontext_t *)context)->uc_mcontext.gregs[REG_ERR];
++    if (error & 0x10) return 0; /* instruction fetch */
++    is_write=(error & 2)!=0;
++#endif
++    const uintptr_t page=address&~(uintptr_t)4095;
++    int restored=0, ok=0;
++    read_lock();
++    const size_t i=vma_index(address);
++    if (i<vma_count && vmas[i].start<=address && vmas[i].kind!=KIND_RESERVED) {
++        const int guest=host_prot(vmas[i].prot);
++        if (guest & (is_write ? PROT_WRITE : PROT_READ)) {
++#ifdef _WIN32
++            MEMORY_BASIC_INFORMATION info;
++            if (VirtualQuery((void *)page,&info,sizeof(info)) && info.State==MEM_COMMIT) {
++                const DWORD mode=info.Protect & 0xff;
++                const int allowed = is_write ? (mode==PAGE_READWRITE || mode==PAGE_EXECUTE_READWRITE)
++                                             : (mode!=PAGE_NOACCESS && mode!=PAGE_EXECUTE);
++                /* Already allowed: changed back meanwhile (the tracking, another thread). */
++                restored=!allowed && !win_mem_protect(page,page+4096,guest);
++                ok=allowed || restored;
++            }
++#else
++            restored=ok=!mprotect((void *)page,4096,guest);
++#endif
++        }
++    }
++    read_unlock();
++    if (restored) {
++        static _Atomic unsigned notes;
++        const unsigned n=atomic_fetch_add(&notes,1)+1;
++        if (n<=8 || !(n&(n-1))) { /* the first ones, then at powers of two */
++            char line[256];
++            int length=snprintf(line,sizeof(line),
++                "Runtime: %s fault at %#llx: guest page left protected by GPU tracking (%s); "
++                "access restored (%u so far)\n", is_write ? "write" : "read", (unsigned long long)address,
++                repeated ? "the fault repeats" : "not handled", n);
++            if (length<0) length=0;
++            if (length>=(int)sizeof(line)) length=(int)sizeof(line)-1;
++#ifdef _WIN32
++            DWORD written;
++            WriteFile(GetStdHandle(STD_ERROR_HANDLE),line,(DWORD)length,&written,NULL);
++#else
++            { ssize_t written_=write(2,line,(size_t)length); (void)written_; }
++#endif
++        }
++    }
++    return ok;
++}
++/* bbport: whether the guest may write all of [address, address+size) (its own protection). */
++int runtime_memory_guest_writable(uintptr_t address, uint64_t size) {
++    if (!size) return 0;
++    int ok=1;
++    read_lock();
++    uintptr_t at=address;
++    for (size_t i=vma_index(address); at<address+size; ++i) {
++        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED || !(host_prot(vmas[i].prot) & PROT_WRITE)) { ok=0; break; }
++        at=vmas[i].end;
++    }
++    read_unlock();
++    return ok;
++}
+ /* Host view of a guest range, for the GPU backend: the range must be mapped. */
+ int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
+     const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
 diff --git a/src/runtime_pad.c b/src/runtime_pad.c
 index fac0ac7..96c326f 100644
 --- a/src/runtime_pad.c
@@ -4734,10 +7230,21 @@ index 99b3049..4f9b7ef 100644
          char meta[680]; snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,e->d_name);
          read_param(meta,&entries[count].param);
 diff --git a/src/runtime_services.c b/src/runtime_services.c
-index 5f31782..97d2b4f 100644
+index 5f31782..42c1225 100644
 --- a/src/runtime_services.c
 +++ b/src/runtime_services.c
-@@ -262,10 +262,13 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
+@@ -87,7 +87,9 @@ static ABI int32_t system_param(int32_t id,int32_t *value) {
+     case 5: *value=0; break;                    /* summer time */
+     case 7: *value=0; break;                    /* parental level off */
+     case 1000: *value=1; break;                 /* enter button = cross */
+-    default: fprintf(stderr,"STOP: unsupported system parameter %d\n",id); exit(21);
++    default: /* bbport: the parameter error instead of ending the game (exit 21) */
++        fprintf(stderr,"Runtime: unsupported system parameter %d\n",id);
++        return SYSTEM_PARAMETER;
+     }
+     return 0;
+ }
+@@ -262,10 +264,13 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
      utf16_to_utf8(param->title,128,prompt,sizeof(prompt));
      const char *preset=getenv("BB_IME_TEXT");
      if (preset) { ime_complete(0,preset); return 0; }
@@ -4754,6 +7261,19 @@ index 5f31782..97d2b4f 100644
      return 0;
  }
  static ABI int32_t ime_status(void) {
+diff --git a/src/runtime_thread.c b/src/runtime_thread.c
+index 65883c0..019f1d7 100644
+--- a/src/runtime_thread.c
++++ b/src/runtime_thread.c
+@@ -130,6 +130,8 @@ void runtime_thread_attach_main(void) {
+     GuestThread *t=runtime_thread_current();
+     snprintf(t->name,sizeof(t->name),"main");
+ }
++/* No record is created here: the fault handler asks (probe.c). */
++int runtime_thread_has_record(void) { return current!=NULL; }
+ static GuestThread *find_thread(void *handle) {
+     GuestThread *found=NULL;
+     host_lock(&lock);
 diff --git a/tests/test_engine_hooks.cpp b/tests/test_engine_hooks.cpp
 index 50e085f..8ce55a5 100644
 --- a/tests/test_engine_hooks.cpp
@@ -4776,6 +7296,18 @@ index 50e085f..8ce55a5 100644
 -    std::puts("PASS: guest ABI arguments, XMM preservation, return slot, byte/range guards and staged hook installation");
 +    std::puts("PASS: guest ABI arguments (seven with a stack argument), XMM preservation, return slot, byte/range guards and staged hook installation");
  }
+diff --git a/tests/test_gpu_runtime_stubs.cpp b/tests/test_gpu_runtime_stubs.cpp
+index 75eca24..45ea45d 100644
+--- a/tests/test_gpu_runtime_stubs.cpp
++++ b/tests/test_gpu_runtime_stubs.cpp
+@@ -42,6 +42,7 @@ void runtime_memory_note_write(uintptr_t, uint64_t) { std::abort(); }
+ void runtime_memory_set_note_write_hook(void (*)(uintptr_t, uint64_t)) {}
+ void runtime_memory_set_cpu_write_hook(void (*)(uintptr_t, uint64_t)) {}
+ void runtime_memory_set_write_watch(uintptr_t, uint64_t, int) { std::abort(); }
++int runtime_memory_restore_access(void*, uintptr_t, int) { return 0; }
+ void runtime_memory_set_guest_chunk_allocator(int (*)(uint64_t, uint64_t)) {}
+ void runtime_memory_set_guest_chunk_whole(int) {}
+ int runtime_memory_vma_info(uintptr_t, int*, int*, uintptr_t*) { std::abort(); }
 diff --git a/tests/test_online.py b/tests/test_online.py
 index bf0d998..86cde4b 100644
 --- a/tests/test_online.py
@@ -5399,10 +7931,10 @@ index 0000000..740a58a
 +} // namespace Vulkan::HostPasses
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
 new file mode 100644
-index 0000000..6d3784d
+index 0000000..930b227
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,93 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: the PS4 depth-block counter model behind real occlusion results (vk_occlusion.h),
 +// without Vulkan, so the arithmetic is unit-tested (tests/test_occlusion.cpp).
@@ -5470,13 +8002,38 @@ index 0000000..6d3784d
 +    return unknown || visible == draw_if_visible;
 +}
 +
++/// Hysteresis per Gnm block against flicker (lamps and their glare at the edge of occluders:
++/// sample counts of small proxies going 0/N/0 with the jittered, reduced scene): a block
++/// reports the largest of its last `Depth` measured counts. It reads occluded only after Depth
++/// results in a row found no samples, visible as soon as one finds any. Results it has not seen
++/// count as `UnknownPast`: visible, with the smallest count (a count-scaled effect stays dark
++/// rather than flashing).
++struct BlockHistory {
++    static constexpr std::uint32_t Depth = 3;
++    static constexpr std::uint64_t UnknownPast = 1;
++    std::uint64_t previous[Depth - 1] = {UnknownPast, UnknownPast};
++
++    /// The count to report for the block's new result `measured`, which is remembered.
++    constexpr std::uint64_t Report(std::uint64_t measured) {
++        std::uint64_t reported = measured;
++        for (const std::uint64_t p : previous) {
++            reported = std::max(reported, p);
++        }
++        for (std::uint32_t i = Depth - 2; i > 0; --i) {
++            previous[i] = previous[i - 1];
++        }
++        previous[0] = measured;
++        return reported;
++    }
++};
++
 +} // namespace OcclusionModel
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
 new file mode 100644
-index 0000000..d85d112
+index 0000000..1cdcd2d
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,481 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: real occlusion query results (vk_occlusion.h). Design after droogie/bbhost b68ed17.
 +
@@ -5559,20 +8116,30 @@ index 0000000..d85d112
 +    /// What we last wrote at each dump address: our own value may be overwritten (a block the
 +    /// game reuses), anything else that is not zero is not ours to write over.
 +    std::unordered_map<VAddr, u64> written;
++    /// Begin dumps (+0) written in this use of their block: the total they wrote, taken by the
++    /// block's end dump (+8) for the block's result.
++    std::unordered_map<VAddr, u64> begins;
++    /// Per block (its +0 address): the hysteresis of its results (OcclusionModel::BlockHistory).
++    std::unordered_map<VAddr, OcclusionModel::BlockHistory> histories;
 +    std::vector<u64> results;
 +
 +    // Statistics (BB_FRAME_STATS), under the mutex except the recording side's atomics.
 +    u64 dumps = 0, queries = 0, unavailable = 0, poisoned = 0, visible = 0, occluded = 0;
 +    u64 late = 0, foreign = 0, unbacked = 0, written_dumps = 0;
++    u64 held_visible = 0; ///< blocks that measured nothing but read visible (hysteresis)
++    u64 late_written = 0; ///< late dumps of known blocks written all the same
 +    std::atomic<u64> pool_full{0}, pred_sets{0}, pred_resolved{0}, pred_skipped{0},
 +        pred_drawn{0};
 +    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 +    u64 window_frames = 0, window_draws = 0;
-+    std::array<u64, 12> last{};
++    std::array<u64, 14> last{};
 +
 +    void Resolve(u64 tick);
 +    void Process(const Pending& dump);
-+    void WriteBlock(const Pending& dump);
++    /// The end dump of `block` (its +0 address) is about to be written: hysteresis.
++    void HoldVisible(VAddr block);
++    /// False when it did not land (not a query block now, or unmapped).
++    bool WriteBlock(const Pending& dump);
 +    void Report();
 +};
 +
@@ -5806,16 +8373,58 @@ index 0000000..d85d112
 +        samples += Unmeasured;
 +    }
 +    total += samples;
-+    if (BbStats::submit_done_calls.load(std::memory_order_relaxed) - dump.frame > max_lag) {
-+        // The game may have freed and reused the block by now: left as it is (not ready).
++    const u64 lag = BbStats::submit_done_calls.load(std::memory_order_relaxed) - dump.frame;
++    const bool is_begin = (dump.va & 15) == 0;
++    // A late dump is written into a block we wrote before (it then holds the game's zeroes or
++    // our last value, checked by WriteBlock) up to twice the lag: the block keeps its last
++    // result instead of reading not ready. Later, or into memory we never wrote, the game may
++    // have freed and reused it by now: left as it is (not ready).
++    if (lag > max_lag && (lag > 2 * max_lag || !written.contains(dump.va))) {
 +        ++late;
++        if (is_begin) {
++            begins.erase(dump.va);
++        }
 +    } else {
-+        WriteBlock(dump);
++        late_written += lag > max_lag ? 1 : 0;
++        if ((dump.va & 15) == 8) {
++            HoldVisible(dump.va - 8);
++        }
++        const bool landed = WriteBlock(dump);
++        if (is_begin) {
++            if (landed) {
++                if (begins.size() > 65536) {
++                    begins.clear();
++                }
++                begins[dump.va] = total;
++            } else {
++                begins.erase(dump.va);
++            }
++        }
 +    }
 +    resolved_serial.store(dump.serial, std::memory_order_release);
 +}
 +
-+void Occlusion::Shared::WriteBlock(const Pending& dump) {
++void Occlusion::Shared::HoldVisible(VAddr block) {
++    // The block's result as the game reads it (end - begin): its begin dump must have landed
++    // in this use of the block, else the block reads not ready anyway.
++    const auto begin = begins.find(block);
++    if (begin == begins.end()) {
++        return;
++    }
++    const u64 measured = total - begin->second;
++    begins.erase(begin);
++    if (histories.size() > 65536) {
++        histories.clear();
++    }
++    const u64 reported = histories[block].Report(measured);
++    if (reported > measured) {
++        // Added to the running total: every block keeps reading end - begin.
++        total += reported - measured;
++        held_visible += measured == 0 ? 1 : 0;
++    }
++}
++
++bool Occlusion::Shared::WriteBlock(const Pending& dump) {
 +    std::array<u64, 2 * MaxPipes> words{};
 +    const u64 extent = 16ull * (dump.pipes - 1) + 8;
 +    ReadGuest(dump.va, words.data(), extent);
@@ -5826,7 +8435,7 @@ index 0000000..d85d112
 +                          word == (Share(own->second, dump.pipes, k) | ValidBit);
 +        if (word != 0 && !ours) {
 +            ++foreign;
-+            return; // neither the game's zeroes nor our last value: not a query block now
++            return false; // neither the game's zeroes nor our last value: not a query block now
 +        }
 +    }
 +    auto* memory = Core::Memory::Instance();
@@ -5837,7 +8446,7 @@ index 0000000..d85d112
 +        // writing where nothing is mapped any more).
 +        if (!memory->TryWriteBacking(address, &value, sizeof(value))) {
 +            ++unbacked;
-+            return;
++            return false;
 +        }
 +        rasterizer->NoteLateCommandWrite(dump.va + 16ull * k, &value, sizeof(value));
 +    }
@@ -5852,6 +8461,7 @@ index 0000000..d85d112
 +            ++(total != begin->second ? visible : occluded);
 +        }
 +    }
++    return true;
 +}
 +
 +void Occlusion::Shared::Report() {
@@ -5867,7 +8477,7 @@ index 0000000..d85d112
 +    window = now;
 +    const u64 frames_now = BbStats::submit_done_calls.load(std::memory_order_relaxed);
 +    const u64 draws_now = BbStats::draws.load(std::memory_order_relaxed);
-+    const std::array<u64, 12> now_counts{
++    const std::array<u64, 14> now_counts{
 +        dumps,
 +        queries,
 +        visible,
@@ -5880,8 +8490,10 @@ index 0000000..d85d112
 +        pred_resolved.load(std::memory_order_relaxed),
 +        pred_skipped.load(std::memory_order_relaxed),
 +        pred_drawn.load(std::memory_order_relaxed),
++        held_visible,
++        late_written,
 +    };
-+    std::array<double, 12> d{};
++    std::array<double, 14> d{};
 +    const double frames = std::max<double>(1.0, double(frames_now - window_frames));
 +    for (size_t i = 0; i < d.size(); ++i) {
 +        d[i] = double(now_counts[i] - last[i]) / frames;
@@ -5891,11 +8503,11 @@ index 0000000..d85d112
 +                "culled (%.0f%%), %.1f intervals read visible (%.1f queries unavailable), %.1f "
 +                "dumps not written (totals: late %llu, reused memory %llu, unmapped %llu), pool "
 +                "full %.1f; SET_PREDICATION %.1f (%.1f known), predicated draws %.1f skipped / "
-+                "%.1f drawn; %.0f draws/frame\n",
++                "%.1f drawn; %.0f draws/frame; held visible %.1f, late written %.1f\n",
 +                d[0], d[1], d[2], d[3], pairs > 0 ? 100.0 * d[3] / pairs : 0.0, d[4], d[5], d[6],
 +                (unsigned long long)late, (unsigned long long)foreign,
 +                (unsigned long long)unbacked, d[7], d[8], d[9], d[10], d[11],
-+                double(draws_now - window_draws) / frames);
++                double(draws_now - window_draws) / frames, d[12], d[13]);
 +    std::fflush(stdout);
 +    last = now_counts;
 +    window_frames = frames_now;
@@ -5905,10 +8517,10 @@ index 0000000..d85d112
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
 new file mode 100644
-index 0000000..39e9668
+index 0000000..55cdec0
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,172 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: real occlusion query results (BB_OCCLUSION, default on; 0: the old fake counts).
 +//
@@ -5940,9 +8552,13 @@ index 0000000..39e9668
 +//   no thread waits for a query, the game polls its blocks and takes "not ready" as it would on
 +//   the PS4 (it keeps the object drawn and asks again).
 +// - Fail-safe towards "visible": an unavailable query, a missing query, an imprecise device's
-+//   nonzero result, all add a large count. A dump more than BB_OCCLUSION_MAX_LAG frames late,
-+//   or over memory that holds neither the game's zeroes nor our own last value (freed and
-+//   reused), is not written: the block stays not ready.
++//   nonzero result, all add a large count. A dump over memory that holds neither the game's
++//   zeroes nor our own last value (freed and reused) is not written, nor one more than
++//   BB_OCCLUSION_MAX_LAG frames late unless we wrote that block before and it is at most twice
++//   that late: the block stays not ready.
++// - Hysteresis against flicker (lamps, glare): a block reports the largest of its last three
++//   results (OcclusionModel::BlockHistory): occluded only after three in a row found nothing,
++//   visible at once.
 +// - SET_PREDICATION: the draws between a ZPASS set and its clear are skipped only when every
 +//   dump into the block has been resolved and the block reads occluded; otherwise they are
 +//   drawn. The results arrive a frame late, so this rarely skips: GPU conditional rendering
@@ -8326,10 +10942,10 @@ index 0000000..c73a186
 +#endif
 diff --git a/tests/test_occlusion.cpp b/tests/test_occlusion.cpp
 new file mode 100644
-index 0000000..bb3b29a
+index 0000000..89dd2e5
 --- /dev/null
 +++ b/tests/test_occlusion.cpp
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,136 @@
 +// The depth-block counter model behind real occlusion results (occlusion_model.h).
 +#include <cassert>
 +#include <cstdint>
@@ -8404,6 +11020,64 @@ index 0000000..bb3b29a
 +    assert(!PredicatedDraws(false, false, true));
 +    assert(PredicatedDraws(false, false, false));
 +    assert(!PredicatedDraws(true, false, false));
++
++    // Hysteresis: the largest of the last three results; occluded only after three results in
++    // a row found nothing, visible at once; an unseen past reads visible with the least count.
++    {
++        BlockHistory fresh;
++        assert(fresh.Report(0) == BlockHistory::UnknownPast);
++        assert(fresh.Report(0) == BlockHistory::UnknownPast);
++        assert(fresh.Report(0) == 0);
++        assert(fresh.Report(0) == 0);
++        assert(fresh.Report(9) == 9); // visible at once
++        assert(fresh.Report(0) == 9);
++        assert(fresh.Report(0) == 9);
++        assert(fresh.Report(0) == 0);
++    }
++    {
++        // A lamp flickering 0/N/0 under jitter reads steadily visible.
++        BlockHistory lamp;
++        const std::uint64_t measured[] = {40, 0, 35, 0, 0, 41, 0, 38};
++        for (const std::uint64_t m : measured) {
++            assert(lamp.Report(m) >= 35);
++        }
++        // The largest of the last three: a drop shows after two more results.
++        BlockHistory fading;
++        fading.Report(100);
++        fading.Report(100);
++        fading.Report(100);
++        assert(fading.Report(10) == 100);
++        assert(fading.Report(10) == 100);
++        assert(fading.Report(10) == 10);
++        // Unmeasured (fail-safe visible) counts too.
++        BlockHistory unknown;
++        unknown.Report(0);
++        unknown.Report(0);
++        assert(unknown.Report(Unmeasured) == Unmeasured);
++        assert(unknown.Report(0) == Unmeasured);
++    }
++    {
++        // As the resolver writes it: the held count is added to the running total between the
++        // begin and the end dump, so the game reads the held result from the block.
++        for (std::uint32_t pipes : {8u, 16u}) {
++            BlockHistory history;
++            std::uint64_t total = 1000;
++            const std::uint64_t measured[] = {12, 0, 0, 0, 5};
++            const Block expected[] = {Block::Visible, Block::Visible, Block::Visible,
++                                      Block::Occluded, Block::Visible};
++            for (std::size_t i = 0; i < sizeof(measured) / sizeof(measured[0]); ++i) {
++                std::uint64_t block[2 * MaxPipes] = {};
++                Dump(block, pipes, total, false);
++                const std::uint64_t begin = total;
++                total += measured[i];
++                const std::uint64_t reported = history.Report(total - begin);
++                total += reported - (total - begin);
++                Dump(block, pipes, total, true);
++                assert(SumOfDifferences(block, pipes) == reported);
++                assert(ReadBlock(block, pipes) == expected[i]);
++            }
++        }
++    }
 +
 +    std::printf("occlusion model: ok\n");
 +    return 0;

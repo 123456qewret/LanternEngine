@@ -16,7 +16,9 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | Render threads at above-normal priority | `BB_GPU_THREAD_PRIORITY=0` off |
 | Shorter spin at the end of the game's sleeps | `BB_SLEEP_SPIN_US=600` off |
 | Pipelines created on compile threads (shorter hitches in new areas) | `BB_ASYNC_PIPELINES=0` off |
-| Occlusion culling: real occlusion query results, so the game skips hidden objects | `BB_OCCLUSION=0` off |
+| Occlusion culling: real occlusion query results, so the game skips hidden objects; a block reads hidden only after three empty results (no flicker) | `BB_OCCLUSION=0` off |
+| Cached texture, sampler and render target lookups kept across image (un)registration | `BB_MEMO_REVALIDATE=0`, `BB_SAMPLER_MEMO=0` off |
+| End of each submission handed to the draw recording thread instead of draining it | `BB_SUBMIT_END_TASKS=0` off |
 | Working profile-guided builds with clang (`BB_PGO=generate`, then `use`) | |
 | In-game menu in Spanish, Portuguese (Brazil), French, German, Italian, Polish, Turkish | `menu_language` |
 | Controller: the pad in use takes over; swap sticks, invert camera, dead zone | `pad_swap_sticks`, `pad_invert_look_x/y`, `pad_deadzone` |
@@ -24,6 +26,7 @@ Our Windows build of the engine: [DarkIzuku/bloodborne_pc](https://github.com/Da
 | No 12-second minimum loading time after death | `BB_RESPAWN_DELAY_FIX=0` off |
 | Crash fixes: oversized command data, empty recording chunk, out-of-order flip IRQ, SnormNz packed formats, failed allocations in audio decoding and the save list; swapchain recreation | |
 | Crash reports for host faults on game threads (Windows ended those without a trace); RAM in the log once a minute | |
+| Write faults at the end of a GPU mapping handled (they ended the game, 0xC0000005); unclaimed faults on guest pages get access back; crash dump next to the log; display loss and unknown formats no longer exit | |
 | HDR output: HDR10 or scRGB swapchain with paper white, peak and highlight boost | `hdr`, `hdr_paper_white`, `hdr_peak`, `hdr_boost` |
 | DLSS texture LOD bias | `BB_DLSS_MIP_BIAS=0` off |
 | Optional FSR 4 balanced model | `BB_FSR4_BALANCED=1` |
