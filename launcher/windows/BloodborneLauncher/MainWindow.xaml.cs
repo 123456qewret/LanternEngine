@@ -50,7 +50,7 @@ namespace BloodborneLauncher
                 ApplyGlass();
 
             var version = typeof(MainWindow).Assembly.GetName().Version;
-            VersionText.Text = version == null ? "" : $"v{version.Major}.{version.Minor}.{version.Build}";
+            VersionText.Text = version == null ? "" : Updater.CurrentLabel;
 
             ws.UpdateStateChanged += () =>
             {

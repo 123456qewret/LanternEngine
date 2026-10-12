@@ -44,6 +44,8 @@ namespace BloodborneLauncher.Core
             ["custom_args"] = "",
             ["switch_to_output"] = true,
             ["check_updates"] = true,
+            ["cheat_vials_amount"] = 20,
+            ["cheat_bullets_amount"] = 20,
             ["update_channel"] = "", // empty: beta builds follow beta, others stable
             ["ui_layout"] = "modern",
             ["fsr4_balanced"] = false,

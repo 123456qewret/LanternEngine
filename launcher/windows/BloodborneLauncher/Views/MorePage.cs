@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using BloodborneLauncher.Core;
 
@@ -7,13 +7,15 @@ namespace BloodborneLauncher.Views
     /// <summary>The less used pages behind one tab: mods, online, advanced settings and the game's log.</summary>
     public sealed class MorePage : LauncherPage
     {
-        private static readonly (string Key, string Label, Type Page)[] Sections =
+        // Cheats only once the engine applies them.
+        private static readonly (string Key, string Label, Type Page)[] Sections = new (string, string, Type)[]
         {
             ("mods", "Mods", typeof(ModsPage)),
+            ("cheats", "Cheats", typeof(CheatsPage)),
             ("online", "Online", typeof(OnlinePage)),
             ("advanced", "Advanced", typeof(SettingsPage)),
             ("output", "Log", typeof(OutputPage)),
-        };
+        }.Where(s => s.Item1 != "cheats" || CheatsPage.Supported).ToArray();
 
         private readonly Dictionary<Type, LauncherPage> _pages = new();
         private readonly Frame _frame = new() { NavigationUIVisibility = System.Windows.Navigation.NavigationUIVisibility.Hidden, Focusable = false };
@@ -25,7 +27,7 @@ namespace BloodborneLauncher.Views
             _tabs = new Segmented(Sections.Select(s => new Choice(s.Label, s.Key)).ToArray())
             {
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Width = 420,
+                Width = Sections.Length * 104,
                 Margin = new Thickness(0, 6, 0, 2),
             };
             _tabs.Changed += Open;

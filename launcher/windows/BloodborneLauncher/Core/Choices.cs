@@ -1,4 +1,4 @@
-namespace BloodborneLauncher.Core
+﻿namespace BloodborneLauncher.Core
 {
     /// <summary>A drop-down entry. Note is shown under the row while this entry is selected.</summary>
     public sealed record Choice(string Label, string Value, string? Note = null);
@@ -20,7 +20,7 @@ namespace BloodborneLauncher.Core
 
         public static readonly Choice[] Presets =
         {
-            new("Native AA", "0"),
+            new("Native AA (no upscaling; DLAA with DLSS)", "0"),
             new("Quality (x1.5)", "1"),
             new("Balanced (x1.7)", "2"),
             new("Performance (x2)", "3"),

@@ -23,9 +23,9 @@ namespace BloodborneLauncher.Views
                 Choices.Presets, "preset", changed: UpdateUpscaler);
             _presetCard = (SettingRow)Body.Children[^1];
 
-            IniToggle(SymbolRegular.Eyedropper24, "Sharpening (RCAS)", null, "sharpen");
+            IniToggle(SymbolRegular.Eyedropper24, "Sharpening (RCAS)", "Works with every option above, TAA included: turn it up if the picture looks soft", "sharpen");
             _sharpenCard = (SettingRow)Body.Children[^1];
-            SliderRow(SymbolRegular.SlideSize24, "Sharpening strength", null, 0, 2, 0.05,
+            SliderRow(SymbolRegular.SlideSize24, "Sharpening strength", "Up to 1: the upscaler's own sharpening. Above 1: an extra pass", 0, 2, 0.05,
                 () => ParseDouble(Ini.Get("sharpness"), 0.5), v => Ini.Set("sharpness", Fmt(v)));
             _sharpnessCard = (SettingRow)Body.Children[^1];
 
@@ -112,9 +112,10 @@ namespace BloodborneLauncher.Views
                     ? $"{problem}: the game falls back to FSR 3.1"
                     : "Assets for the chosen resolution and preset found",
                 "dlss" => DlssFound()
-                    ? "Needs an NVIDIA GeForce RTX GPU; others fall back to FSR 3.1"
+                    ? "Needs an NVIDIA GeForce RTX GPU; others fall back to FSR 3.1" +
+                      (Ini.Get("preset", "0") == "0" ? ". With Native AA this is DLAA: DLSS as anti-aliasing at full resolution" : "")
                     : "DLSS files are missing: the game falls back to FSR 3.1",
-                "taa" => "Anti-aliasing at the output resolution, without an FSR model",
+                "taa" => "Anti-aliasing at the output resolution, without an FSR model. Softer than DLAA or FSR Native AA: add sharpening below",
                 _ => null,
             };
             SetHint(_upscalerHint, hint);
