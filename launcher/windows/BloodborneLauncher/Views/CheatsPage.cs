@@ -41,6 +41,24 @@ namespace BloodborneLauncher.Views
             Group("Items");
             Cheat(SymbolRegular.Drop24, "Blood Vials", "cheat_vials", "cheat_vials_amount");
             Cheat(SymbolRegular.Flash24, "Quicksilver Bullets", "cheat_bullets", "cheat_bullets_amount");
+            IniToggle(SymbolRegular.Beaker24, "Infinite consumables",
+                "Molotovs, throwing knives, pebbles, antidotes, papers and the like are not used up (not Blood Vials or Bullets, which are above, and not insight items)",
+                "cheat_consumables");
+
+            Group("Character");
+            IniToggle(SymbolRegular.Run24, "Infinite stamina", "Your stamina stays full", "cheat_stamina");
+            IniToggle(SymbolRegular.EyeOff24, "Stealth", "Enemies don't notice you and your steps make no noise", "cheat_stealth");
+            IniToggle(SymbolRegular.Shield24, "No weapon wear", "Equipped weapons are kept at full durability, so no repairs", "cheat_no_durability");
+            ComboRow(SymbolRegular.Target24, "Firearm range", "How far firearm bullets travel (pistols, rifles, blunderbuss, cannons)",
+                new[] { new Choice("Normal", "off"), new Choice("150%", "150"), new Choice("200%", "200"), new Choice("300%", "300") },
+                () => Ini.Get("cheat_gun_range", "off"), v => Ini.Set("cheat_gun_range", v));
+
+            Group("Blood Echoes");
+            IniToggle(SymbolRegular.Heart24, "Keep echoes on death", "Dying never drops your Blood Echoes, so there is nothing to pick back up", "cheat_keep_echoes");
+            ComboRow(SymbolRegular.ArrowTrendingLines24, "Echoes from kills", "Enemies already loaded give the new amount after you rest at a lamp or reload",
+                new[] { new Choice("Normal", "1"), new Choice("x2", "2"), new Choice("x5", "5"), new Choice("x10", "10") },
+                () => Ini.Get("cheat_echo_multiplier", "1"), v => Ini.Set("cheat_echo_multiplier", v));
+            Add(Card(SymbolRegular.Add24, "Add echoes or insight", "In the in-game menu (Insert or L3 + R3): +1,000, +10,000, +100,000 echoes and +1 insight", null, out _));
         }
 
         /// <summary>A mode row and its amount slider for one cheat key.</summary>

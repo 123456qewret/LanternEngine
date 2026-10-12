@@ -75,7 +75,7 @@ namespace BloodborneLauncher.Views
                 "New shaders compile on helper threads instead of freezing the frame: much shorter hitches when you reach a new area. On by default",
                 "exp_async_pipelines");
             SettingToggle(SymbolRegular.EyeOff24, "Occlusion culling",
-                "The game skips objects hidden behind walls instead of drawing them all: much higher FPS in dense areas. An object coming round a corner can appear a frame late",
+                "The game skips objects hidden behind walls instead of drawing them all: much higher FPS in dense areas. Off by default while it is tested: lamps and glare can flicker",
                 "exp_occlusion");
             SettingToggle(SymbolRegular.Run24, "Sharper motion (FSR 4)",
                 "Uses FSR 4's balanced model at Performance and Ultra Performance: fewer trails behind moving characters, a little more GPU time",

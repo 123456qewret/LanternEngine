@@ -2348,7 +2348,7 @@ index f9d2884..caf3e6c 100644
          std::unique_lock lk{mutex};
          while (true) {
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..a3c20fd 100644
+index 83e5538..0d54c45 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -12,12 +12,14 @@
@@ -2406,7 +2406,75 @@ index 83e5538..a3c20fd 100644
  void Hint(const char* text) {
      ImGui::SameLine();
      ImGui::TextDisabled("(?)");
-@@ -206,12 +240,15 @@ void Menu() {
+@@ -173,6 +207,67 @@ void Hint(const char* text) {
+     }
+ }
+ 
++void CheatUnavailable(BbEngine::Cheats::Which which) {
++    if (const char* why = BbEngine::Cheats::Unavailable(which)) {
++        ImGui::TextDisabled("%s: %s", BbSettings::MenuText("Unavailable", "Недоступно"), why);
++    }
++}
++
++// An on/off cheat (engine/cheats.cpp); live.
++void CheatToggle(const char* label, std::atomic<bool>& value, BbEngine::Cheats::Which which, const char* hint) {
++    ImGui::PushID(label);
++    Checkbox(label, value);
++    Hint(hint);
++    CheatUnavailable(which);
++    ImGui::PopID();
++}
++
++// A cheat with a few levels, the first the game's own; live.
++template <std::size_t N>
++void CheatLevels(const char* label, std::atomic<int>& value, const int (&levels)[N], const char* const (&names)[N],
++                 BbEngine::Cheats::Which which, const char* hint) {
++    ImGui::PushID(label);
++    const int current = value;
++    int index = 0;
++    for (std::size_t i = 0; i < N; ++i) {
++        if (levels[i] == current) {
++            index = int(i);
++        }
++    }
++    if (ImGui::Combo(label, &index, names, int(N))) {
++        Store(value, levels[index], true);
++    }
++    Hint(hint);
++    CheatUnavailable(which);
++    ImGui::PopID();
++}
++
++// Adds Blood Echoes / Insight to the character in the world (applied by the engine's frame hook).
++void CheatStats() {
++    const bool off = BbEngine::Cheats::Unavailable(BbEngine::Cheats::Echoes) != nullptr;
++    ImGui::BeginDisabled(off);
++    ImGui::TextUnformatted(BbSettings::MenuText("Blood Echoes", "Отголоски крови"));
++    for (int amount : {1000, 10000, 100000}) {
++        char label[32];
++        std::snprintf(label, sizeof(label), "+%d,%03d", amount / 1000, 0);
++        ImGui::SameLine();
++        if (ImGui::Button(label)) {
++            BbEngine::Cheats::AddEchoes(amount);
++        }
++    }
++    ImGui::SameLine();
++    if (ImGui::Button(BbSettings::MenuText("+1 Insight", "+1 озарение"))) {
++        BbEngine::Cheats::AddInsight(1);
++    }
++    ImGui::EndDisabled();
++    Hint(BbSettings::MenuText(
++        "Added to the character in the world, up to the game's limits (999,999,999 Blood Echoes, 99 Insight). "
++        "They are saved with your character: turning cheats off does not take them back.",
++        "Добавляются персонажу в игре, до пределов игры (999 999 999 отголосков, 99 озарения). Они "
++        "сохраняются вместе с персонажем: выключение читов их не отнимает."));
++    CheatUnavailable(BbEngine::Cheats::Echoes);
++}
++
+ void Menu() {
+     auto& s = BbSettings::Get();
+     const ImGuiViewport* viewport = ImGui::GetMainViewport();
+@@ -206,12 +301,15 @@ void Menu() {
              dirty = true;
          }
      }
@@ -2427,7 +2495,7 @@ index 83e5538..a3c20fd 100644
          BbSettings::Save();
      }
      ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-@@ -499,6 +536,21 @@ void Menu() {
+@@ -499,6 +597,81 @@ void Menu() {
      Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
      Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
  
@@ -2445,11 +2513,71 @@ index 83e5538..a3c20fd 100644
 +        "количество: запас пополняется до него и никогда не уменьшается. Выкл. возвращает данные "
 +        "предметов игры, а имеющееся количество остаётся. Пока чит включён, полученные предметы "
 +        "сохраняются вместе с персонажем. Не играйте по сети с включёнными читами."));
++    CheatToggle(BbSettings::MenuText("Infinite stamina", "Бесконечная выносливость"), s.cheat_stamina,
++                BbEngine::Cheats::Stamina,
++                BbSettings::MenuText("Your stamina stays full (enemies are not affected). Off: nothing to restore.",
++                                     "Ваша выносливость всегда полная (на врагов не действует). Выкл.: "
++                                     "восстанавливать нечего."));
++    CheatToggle(BbSettings::MenuText("Stealth", "Скрытность"), s.cheat_stealth, BbEngine::Cheats::Stealth,
++                BbSettings::MenuText("Enemies neither see nor hear you: the game's debug flags Player Hide and "
++                                     "Player Silence. Off puts the flags back as they were.",
++                                     "Враги вас не видят и не слышат: отладочные флаги игры Player Hide и Player "
++                                     "Silence. Выкл. возвращает флаги как были."));
++    {
++        static const char* const ranges[] = {"Off", "150%", "200%", "300%"};
++        const char* const names[] = {BbSettings::MenuText(ranges[0], "Выкл."), ranges[1], ranges[2], ranges[3]};
++        CheatLevels(BbSettings::MenuText("Firearm range", "Дальность огнестрела"), s.cheat_gun_range,
++                    BbSettings::CheatGunRanges, names, BbEngine::Cheats::GunRange,
++                    BbSettings::MenuText(
++                        "Bullets of the pistols, rifles, blunderbusses, cannons, Gatling Gun and the trick "
++                        "weapons' guns fly farther. Not Rosmarinus, the Flamesprayer, arcane or hunter tools. "
++                        "Off restores the game's bullet data.",
++                        "Пули пистолетов, ружей, мушкетонов, пушек, пулемёта и огнестрела трансформируемого "
++                        "оружия летят дальше. Не Розмарин, огнемёт, тайные и охотничьи инструменты. Выкл. "
++                        "возвращает данные пуль игры."));
++    }
++    CheatToggle(BbSettings::MenuText("Keep Blood Echoes on death", "Не терять отголоски при смерти"),
++                s.cheat_keep_echoes, BbEngine::Cheats::KeepEchoes,
++                BbSettings::MenuText("Dying keeps your Blood Echoes; the bloodstain holds none. Off restores the "
++                                     "game's code. Echoes you kept stay in your save.",
++                                     "При смерти отголоски остаются у вас, в пятне крови их нет. Выкл. "
++                                     "возвращает код игры. Сохранённые отголоски остаются в сохранении."));
++    {
++        static const char* const multipliers[] = {"x1", "x2", "x5", "x10"};
++        const char* const names[] = {BbSettings::MenuText("x1 (off)", "x1 (выкл.)"), multipliers[1], multipliers[2],
++                                     multipliers[3]};
++        CheatLevels(BbSettings::MenuText("Blood Echo multiplier", "Множитель отголосков"), s.cheat_echo_multiplier,
++                    BbSettings::CheatEchoMultipliers, names, BbEngine::Cheats::EchoMultiplier,
++                    BbSettings::MenuText(
++                        "Blood Echoes from enemies and bosses times this. An enemy already loaded may give the "
++                        "normal amount until the area loads again. x1 restores the game's data; echoes gained "
++                        "stay in your save.",
++                        "Отголоски за врагов и боссов умножаются. Уже загруженный враг может дать обычное "
++                        "количество, пока область не загрузится заново. x1 возвращает данные игры; полученные "
++                        "отголоски остаются в сохранении."));
++    }
++    CheatToggle(BbSettings::MenuText("No weapon wear", "Оружие не изнашивается"), s.cheat_no_durability,
++                BbEngine::Cheats::NoDurability,
++                BbSettings::MenuText("Equipped weapons are kept at full durability. Off stops it; durability is "
++                                     "saved as it is.",
++                                     "Экипированное оружие всегда с полной прочностью. Выкл. прекращает это; "
++                                     "прочность сохраняется как есть."));
++    CheatToggle(BbSettings::MenuText("Infinite consumables", "Бесконечные расходники"), s.cheat_consumables,
++                BbEngine::Cheats::Consumables,
++                BbSettings::MenuText(
++                    "Molotovs, knives, pebbles, oil urns, antidotes, sedatives, elixirs, papers, Numbing Mist, "
++                    "Shining Coins and similar tools are not used up. Not Blood Vials or Quicksilver Bullets "
++                    "(above), key items, materials, or Insight and Blood Echo items. Off restores the item data.",
++                    "Коктейли Молотова, ножи, камешки, масло, антидоты, успокоительное, эликсиры, бумага, "
++                    "онемляющий туман, блестящие монеты и подобные инструменты не расходуются. Не флаконы крови и "
++                    "ртутные пули (выше), не ключевые предметы, материалы, предметы озарения и отголосков. Выкл. "
++                    "возвращает данные предметов."));
++    CheatStats();
 +
      ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
      Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
  
-@@ -587,6 +639,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -587,6 +760,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -2503,7 +2631,7 @@ index 8f2e888..e66ea2a 100644
  } // namespace BbThreads
  #endif
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..8bba4d1 100644
+index cf4fbd8..1d2903c 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -2518,7 +2646,7 @@ index cf4fbd8..8bba4d1 100644
  #include <cstdio>
  #include <cmath>
  #include <cstdlib>
-@@ -31,13 +33,46 @@ float Clamp(float v, float lo, float hi) {
+@@ -31,13 +33,62 @@ float Clamp(float v, float lo, float hi) {
      return std::clamp(v, lo, hi);
  }
  
@@ -2546,6 +2674,22 @@ index cf4fbd8..8bba4d1 100644
 +                                                   : "off";
 +}
 +
++// cheat_gun_range: off or one of CheatGunRanges (percent); cheat_echo_multiplier: one of
++// CheatEchoMultipliers. Anything else is the game's own (off / 1).
++template <std::size_t N>
++int CheatChoice(const std::string& key, const std::string& value, const int (&choices)[N], const char* expected) {
++    if (value == "off") {
++        return choices[0];
++    }
++    char* end = nullptr;
++    const long v = std::strtol(value.c_str(), &end, 10);
++    if (!value.empty() && end && *end == '\0' && std::find(choices, choices + N, int(v)) != choices + N) {
++        return int(v);
++    }
++    std::printf("Settings: unknown %s '%s' (expected %s); %d\n", key.c_str(), value.c_str(), expected, choices[0]);
++    return choices[0];
++}
++
  void Set(Values& v, const std::string& key, const std::string& value) {
      const float f = float(std::atof(value.c_str()));
      const int i = std::atoi(value.c_str());
@@ -2568,7 +2712,7 @@ index cf4fbd8..8bba4d1 100644
      } else if (key == "upscaler") {
          for (int u = 0; u < UpscalerCount; ++u) {
              if (value == UpscalerName(u)) {
-@@ -123,6 +158,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -123,6 +174,24 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.fullscreen = i != 0;
      } else if (key == "live_resolution") {
          v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
@@ -2576,10 +2720,24 @@ index cf4fbd8..8bba4d1 100644
 +        v.cheat_vials = CheatValue(key, value);
 +    } else if (key == "cheat_bullets") {
 +        v.cheat_bullets = CheatValue(key, value);
++    } else if (key == "cheat_stamina") {
++        v.cheat_stamina = i != 0;
++    } else if (key == "cheat_stealth") {
++        v.cheat_stealth = i != 0;
++    } else if (key == "cheat_keep_echoes") {
++        v.cheat_keep_echoes = i != 0;
++    } else if (key == "cheat_no_durability") {
++        v.cheat_no_durability = i != 0;
++    } else if (key == "cheat_consumables") {
++        v.cheat_consumables = i != 0;
++    } else if (key == "cheat_gun_range") {
++        v.cheat_gun_range = CheatChoice(key, value, CheatGunRanges, "off, 150, 200 or 300");
++    } else if (key == "cheat_echo_multiplier") {
++        v.cheat_echo_multiplier = CheatChoice(key, value, CheatEchoMultipliers, "1, 2, 5 or 10");
      } else if (key == "output_res") {
          for (int r = 0; r < OutputCount; ++r) {
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
-@@ -138,6 +177,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -138,6 +207,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -2607,7 +2765,7 @@ index cf4fbd8..8bba4d1 100644
  } // namespace
  
  Values& Get() {
-@@ -146,7 +206,11 @@ Values& Get() {
+@@ -146,7 +236,11 @@ Values& Get() {
  }
  
  const char* MenuText(const char* english, const char* russian) {
@@ -2620,7 +2778,7 @@ index cf4fbd8..8bba4d1 100644
  }
  
  void Load() {
-@@ -166,9 +230,7 @@ void Load() {
+@@ -166,9 +260,7 @@ void Load() {
                  }
              }
          }
@@ -2631,7 +2789,7 @@ index cf4fbd8..8bba4d1 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -264,7 +326,7 @@ void Save() {
+@@ -264,7 +356,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -2640,17 +2798,24 @@ index cf4fbd8..8bba4d1 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -305,6 +367,8 @@ void Save() {
+@@ -305,6 +397,15 @@ void Save() {
      put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
      put("camera_height_scale", fixed(v.camera_height_scale, 2));
      put("model_lod", std::to_string(v.model_lod.load()));
 +    put("cheat_vials", CheatText(v.cheat_vials));
 +    put("cheat_bullets", CheatText(v.cheat_bullets));
++    put("cheat_stamina", flag(v.cheat_stamina));
++    put("cheat_stealth", flag(v.cheat_stealth));
++    put("cheat_gun_range", v.cheat_gun_range == 0 ? "off" : std::to_string(v.cheat_gun_range.load()));
++    put("cheat_keep_echoes", flag(v.cheat_keep_echoes));
++    put("cheat_echo_multiplier", std::to_string(v.cheat_echo_multiplier.load()));
++    put("cheat_no_durability", flag(v.cheat_no_durability));
++    put("cheat_consumables", flag(v.cheat_consumables));
      put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..6dbe7a7 100644
+index c0e8a94..fd0c917 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -2669,26 +2834,35 @@ index c0e8a94..6dbe7a7 100644
  
  /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
  /// menu label, default (the game's own behaviour).
-@@ -50,6 +57,9 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
+@@ -50,6 +57,13 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
  inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
  inline constexpr int OutputCount = 10;
  inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 +/// Live cheats (engine/cheats.cpp): cheat_vials / cheat_bullets in bbport.ini are "off",
 +/// "infinite" or an amount kept in the inventory, 1..CheatMaxAmount.
 +inline constexpr int CheatOff = 0, CheatInfinite = -1, CheatMaxAmount = 99;
++/// cheat_gun_range: "off" (0) or the firearm bullets' range in percent.
++inline constexpr int CheatGunRanges[] = {0, 150, 200, 300};
++/// cheat_echo_multiplier: Blood Echoes from kills times this (1: the game's own).
++inline constexpr int CheatEchoMultipliers[] = {1, 2, 5, 10};
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -83,6 +93,8 @@ struct Values {
+@@ -83,6 +97,13 @@ struct Values {
      std::atomic<float> camera_fov_scale{1.0f}, camera_distance_scale{1.0f}, camera_height_scale{1.0f};
      std::atomic<int> model_lod{0}; ///< -2 highest .. 2 lowest, 0 the game's
      std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
 +    /// CheatOff, CheatInfinite or the amount to keep (1..CheatMaxAmount); live.
 +    std::atomic<int> cheat_vials{CheatOff}, cheat_bullets{CheatOff};
++    /// The other cheats (0/1 in bbport.ini); live.
++    std::atomic<bool> cheat_stamina{false}, cheat_stealth{false}, cheat_keep_echoes{false},
++        cheat_no_durability{false}, cheat_consumables{false};
++    /// One of CheatGunRanges / CheatEchoMultipliers; live.
++    std::atomic<int> cheat_gun_range{0}, cheat_echo_multiplier{1};
      /// Borderless fullscreen window at the desktop size (F11 toggles; BB_FULLSCREEN overrides).
      std::atomic<bool> fullscreen{false};
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
-@@ -103,7 +115,8 @@ struct Values {
+@@ -103,7 +124,8 @@ struct Values {
  };
  
  Values& Get();
@@ -2849,9 +3023,18 @@ index a88772c..9e394a7 100644
  void Install(std::uint8_t* image, std::size_t size);
  } // namespace BbEngine
 diff --git a/gpu/shim/engine/engine_state.cpp b/gpu/shim/engine/engine_state.cpp
-index 090e05d..132de88 100644
+index 090e05d..766fb5e 100644
 --- a/gpu/shim/engine/engine_state.cpp
 +++ b/gpu/shim/engine/engine_state.cpp
+@@ -14,7 +14,7 @@ template<typename T> bool Read(std::uint64_t at,T* out) { return at && host_read
+ std::uint64_t Pointer(std::uint64_t at) { std::uint64_t p=0;Read(at,&p);return p; }
+ std::uint64_t Slot(std::uint64_t bn) { return slide+(bn-kPreferredGuestSlide); }
+ struct Stat { const char* name; std::uint32_t offset; };
+-constexpr Stat stats[]={{"hp",0x14},{"vitality",0x40},{"endurance",0x48},{"strength",0x58},{"skill",0x60},{"bloodtinge",0x68},{"arcane",0x70},{"level",0x90},{"echoes",0x94}};
++constexpr Stat stats[]={{"hp",0x14},{"vitality",0x40},{"endurance",0x48},{"strength",0x58},{"skill",0x60},{"bloodtinge",0x68},{"arcane",0x70},{"insight",0x84},{"level",0x90},{"echoes",0x94}};
+ std::uint64_t Record() { auto m=Pointer(Slot(0x593b130)); return m?Pointer(m+8):0; }
+ struct Watch { std::uint64_t type=0;const char16_t* name=nullptr;std::atomic<std::uint64_t> made{0}; };
+ Watch watches[8]; int count;
 @@ -23,6 +23,7 @@ struct Safe { template<typename T> bool operator()(std::uint64_t at,T* out) cons
  bool host_read_safe(const void* p,void* out,std::size_t n) { return p && BbPlatform::ReadProcessMemory(p,out,n); }
  void host_log(const char* format,...) { std::fputs("Engine: ",stdout);va_list a;va_start(a,format);std::vprintf(format,a);va_end(a);std::putchar('\n'); }
@@ -3268,10 +3451,10 @@ index 50e085f..8ce55a5 100644
 +    std::puts("PASS: guest ABI arguments (seven with a stack argument), XMM preservation, return slot, byte/range guards and staged hook installation");
  }
 diff --git a/tests/test_settings.cpp b/tests/test_settings.cpp
-index 593fed4..5286449 100644
+index 593fed4..0d3fee4 100644
 --- a/tests/test_settings.cpp
 +++ b/tests/test_settings.cpp
-@@ -84,6 +84,31 @@ int main() {
+@@ -84,6 +84,66 @@ int main() {
      { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
      BbSettings::Load();
      assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
@@ -3300,9 +3483,724 @@ index 593fed4..5286449 100644
 +    assert(s.cheat_vials == BbSettings::CheatOff && s.cheat_bullets == BbSettings::CheatOff);
 +    BbSettings::Save();
 +    assert(Read(path).find("cheat_vials=off\n") != std::string::npos);
++    // The other cheats: 0/1 switches, firearm range off/150/200/300, echo multiplier 1/2/5/10;
++    // written back as read, anything else the game's own.
++    assert(Read(path).find("cheat_gun_range=off\n") != std::string::npos);
++    assert(Read(path).find("cheat_echo_multiplier=1\n") != std::string::npos);
++    assert(Read(path).find("cheat_stamina=0\n") != std::string::npos);
++    {
++        std::ofstream file(path);
++        file << "cheat_stamina=1\ncheat_stealth=1\ncheat_gun_range=200\ncheat_keep_echoes=1\n"
++                "cheat_echo_multiplier=5\ncheat_no_durability=1\ncheat_consumables=1\n";
++    }
++    BbSettings::Load();
++    assert(s.cheat_stamina && s.cheat_stealth && s.cheat_keep_echoes && s.cheat_no_durability && s.cheat_consumables);
++    assert(s.cheat_gun_range == 200 && s.cheat_echo_multiplier == 5);
++    BbSettings::Save();
++    for (const char* line : {"cheat_stamina=1\n", "cheat_stealth=1\n", "cheat_gun_range=200\n", "cheat_keep_echoes=1\n",
++                             "cheat_echo_multiplier=5\n", "cheat_no_durability=1\n", "cheat_consumables=1\n"}) {
++        assert(Read(path).find(line) != std::string::npos);
++    }
++    {
++        std::ofstream file(path);
++        file << "cheat_stamina=0\ncheat_stealth=0\ncheat_gun_range=250\ncheat_keep_echoes=0\n"
++                "cheat_echo_multiplier=3\ncheat_no_durability=0\ncheat_consumables=0\n";
++    }
++    BbSettings::Load();
++    assert(!s.cheat_stamina && !s.cheat_stealth && !s.cheat_keep_echoes && !s.cheat_no_durability && !s.cheat_consumables);
++    assert(s.cheat_gun_range == 0 && s.cheat_echo_multiplier == 1);
++    { std::ofstream file(path); file << "cheat_gun_range=300\ncheat_echo_multiplier=10\n"; }
++    BbSettings::Load();
++    assert(s.cheat_gun_range == 300 && s.cheat_echo_multiplier == 10);
++    { std::ofstream file(path); file << "cheat_gun_range=off\ncheat_echo_multiplier=x2\n"; }
++    BbSettings::Load();
++    assert(s.cheat_gun_range == 0 && s.cheat_echo_multiplier == 1);
++    BbSettings::Save();
++    assert(Read(path).find("cheat_gun_range=off\n") != std::string::npos);
++    assert(Read(path).find("cheat_echo_multiplier=1\n") != std::string::npos);
      std::filesystem::remove(temporary);
      std::puts("PASS: settings save keeps other keys, menu position");
  }
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
+new file mode 100644
+index 0000000..6d3784d
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
+@@ -0,0 +1,68 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: the PS4 depth-block counter model behind real occlusion results (vk_occlusion.h),
++// without Vulkan, so the arithmetic is unit-tested (tests/test_occlusion.cpp).
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++namespace OcclusionModel {
++
++constexpr std::uint64_t ValidBit = 1ull << 63;
++/// What a draw without a usable result adds: plainly visible (the old fake's step), so any
++/// begin/end pair around it reads visible, never occluded.
++constexpr std::uint64_t Unmeasured = 0x2FFFFFFull;
++constexpr std::uint32_t MaxPipes = 16;
++
++/// DB `k`'s share of the running total: the shares sum to `total` and each grows with it, so the
++/// game's sum of end - begin over the DBs is exactly the samples in between.
++constexpr std::uint64_t Share(std::uint64_t total, std::uint32_t pipes, std::uint32_t k) {
++    return total / pipes + (k < total % pipes ? 1 : 0);
++}
++
++enum class Block : std::uint32_t { Occluded = 0, Visible = 1, NotReady = 2 };
++
++/// A Gnm block ({begin, end} per DB, 16 bytes apart) as the game reads it.
++inline Block ReadBlock(const std::uint64_t* words, std::uint32_t pipes) {
++    std::uint64_t sum = 0;
++    for (std::uint32_t k = 0; k < pipes; ++k) {
++        const std::uint64_t b = words[2 * k], e = words[2 * k + 1];
++        if (!(b & ValidBit) || !(e & ValidBit)) {
++            return Block::NotReady;
++        }
++        sum += (e & ~ValidBit) - (b & ~ValidBit);
++    }
++    return sum != 0 ? Block::Visible : Block::Occluded;
++}
++
++/// 16.16 factor taking samples counted at `width` x `height` (reduced scene targets) back to the
++/// PS4's 1920x1080; never below 1.
++constexpr std::uint32_t SampleScale(std::uint32_t width, std::uint32_t height) {
++    const std::uint64_t pixels = std::uint64_t(width) * height;
++    constexpr std::uint64_t native = 1920ull * 1080ull;
++    if (pixels == 0 || pixels >= native) {
++        return 1u << 16;
++    }
++    return static_cast<std::uint32_t>((native << 16) / pixels);
++}
++
++/// One query's contribution: unavailable reads visible; an imprecise device's nonzero result
++/// (0/1 on NVIDIA) reads plainly visible; a precise count is scaled, rounding up.
++constexpr std::uint64_t Samples(std::uint64_t value, bool available, bool precise,
++                                std::uint32_t scale) {
++    if (!available) {
++        return Unmeasured;
++    }
++    if (!precise) {
++        return value ? Unmeasured : 0;
++    }
++    return std::max<std::uint64_t>((value * scale + 0xFFFF) >> 16, value);
++}
++
++/// SET_PREDICATION's outcome for the draws up to its clear: unknown draws (a wrong "occluded"
++/// makes geometry vanish), else draw when the visibility is the one asked for.
++constexpr bool PredicatedDraws(bool visible, bool unknown, bool draw_if_visible) {
++    return unknown || visible == draw_if_visible;
++}
++
++} // namespace OcclusionModel
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
+new file mode 100644
+index 0000000..d85d112
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
+@@ -0,0 +1,426 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: real occlusion query results (vk_occlusion.h). Design after droogie/bbhost b68ed17.
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include "bbport_toggles.h"
++#include "core/memory.h"
++#include "video_core/renderer_vulkan/occlusion_model.h"
++#include "video_core/renderer_vulkan/scene_resolution.h"
++#include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_occlusion.h"
++#include "video_core/renderer_vulkan/vk_rasterizer.h"
++#include "video_core/renderer_vulkan/vk_scheduler.h"
++
++extern "C" void runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
++
++namespace Vulkan {
++
++namespace {
++using OcclusionModel::MaxPipes;
++using OcclusionModel::Share;
++using OcclusionModel::Unmeasured;
++using OcclusionModel::ValidBit;
++
++u64 EnvU64(const char* name, u64 fallback) {
++    const char* env = std::getenv(name);
++    return env && *env ? std::strtoull(env, nullptr, 10) : fallback;
++}
++
++/// Reads guest memory through the runtime's backing view: no page protection (a read fault on
++/// this thread would wait for the GPU thread), zeroes where nothing is mapped.
++void ReadGuest(VAddr address, void* data, u64 size) {
++    runtime_memory_read_backing(address, data, size);
++}
++
++/// A Gnm block as the game reads it now.
++OcclusionModel::Block ReadBlock(VAddr block, u32 pipes) {
++    std::array<u64, 2 * MaxPipes> words{};
++    ReadGuest(block, words.data(), 16ull * pipes);
++    return OcclusionModel::ReadBlock(words.data(), pipes);
++}
++} // namespace
++
++struct Occlusion::Shared {
++    /// The resolver's state and the pool's life (the destructor takes it too).
++    std::mutex mutex;
++    /// Only the queue: the recording side never waits for a resolve in progress.
++    std::mutex queue_mutex;
++    bool alive = true;
++    vk::Device device;
++    vk::QueryPool pool;
++    Rasterizer* rasterizer = nullptr;
++    bool precise = false;
++    u64 max_lag = 3;
++
++    struct Pending {
++        u64 tick;   ///< the submission holding the dump (and every query before it)
++        VAddr va;
++        u64 frame;
++        u64 serial;
++        u64 first;  ///< the interval's first query, as a running count
++        u32 count;  ///< its queries
++        u32 pipes;
++        bool poison; ///< a draw in the interval got no query
++    };
++    std::deque<Pending> pending; ///< under queue_mutex
++    std::vector<Pending> ready;  ///< taken from it by the resolver
++    /// Per query: the sample scale of its draw (16.16; reduced scene targets), written by the
++    /// recording side before the dump is queued under the mutex.
++    std::array<u32, PoolSize> scale{};
++    std::atomic<u64> released{0};        ///< queries read and reset (reusable)
++    std::atomic<u64> resolved_serial{0}; ///< dumps processed, in order
++
++    u64 total = 0; ///< the DBs' running count
++    /// What we last wrote at each dump address: our own value may be overwritten (a block the
++    /// game reuses), anything else that is not zero is not ours to write over.
++    std::unordered_map<VAddr, u64> written;
++    std::vector<u64> results;
++
++    // Statistics (BB_FRAME_STATS), under the mutex except the recording side's atomics.
++    u64 dumps = 0, queries = 0, unavailable = 0, poisoned = 0, visible = 0, occluded = 0;
++    u64 late = 0, foreign = 0, unbacked = 0, written_dumps = 0;
++    std::atomic<u64> pool_full{0}, pred_sets{0}, pred_resolved{0}, pred_skipped{0},
++        pred_drawn{0};
++    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
++    u64 window_frames = 0, window_draws = 0;
++    std::array<u64, 12> last{};
++
++    void Resolve(u64 tick);
++    void Process(const Pending& dump);
++    void WriteBlock(const Pending& dump);
++    void Report();
++};
++
++bool Occlusion::Wanted() {
++    static const bool on = [] {
++        const char* env = std::getenv("BB_OCCLUSION");
++        return !(env && env[0] == '0');
++    }();
++    return on;
++}
++
++Occlusion::Occlusion(const Instance& instance_, Scheduler& scheduler_, Rasterizer& rasterizer_)
++    : instance{instance_}, scheduler{scheduler_}, rasterizer{rasterizer_} {}
++
++std::unique_ptr<Occlusion> Occlusion::Create(const Instance& instance, Scheduler& scheduler,
++                                             Rasterizer& rasterizer) {
++    if (!Wanted()) {
++        std::printf("Occlusion: off (BB_OCCLUSION=0): every query the game makes reads visible\n");
++        return nullptr;
++    }
++    std::unique_ptr<Occlusion> occlusion{new Occlusion(instance, scheduler, rasterizer)};
++    if (!occlusion->Init()) {
++        return nullptr;
++    }
++    return occlusion;
++}
++
++bool Occlusion::Init() {
++    // Results are read and the queries reset on the CPU once the GPU is past them: no reset
++    // commands outside render passes, no waits.
++    if (!instance.IsHostQueryResetSupported()) {
++        std::printf("Occlusion: off - the device has no host query reset; every query the game "
++                    "makes reads visible, as before\n");
++        return false;
++    }
++    const vk::Device device = instance.GetDevice();
++    const vk::QueryPoolCreateInfo info = {
++        .queryType = vk::QueryType::eOcclusion,
++        .queryCount = PoolSize,
++    };
++    const auto [result, pool] = device.createQueryPool(info);
++    if (result != vk::Result::eSuccess) {
++        std::printf("Occlusion: off - no query pool (%s); every query the game makes reads "
++                    "visible, as before\n",
++                    vk::to_string(result).c_str());
++        return false;
++    }
++    device.resetQueryPool(pool, 0, PoolSize);
++    precise = instance.IsOcclusionQueryPreciseSupported();
++    cap = static_cast<u32>(std::clamp<u64>(EnvU64("BB_OCCLUSION_CAP", 64), 1, 1024));
++    shared = std::make_shared<Shared>();
++    shared->device = device;
++    shared->pool = pool;
++    shared->rasterizer = &rasterizer;
++    shared->precise = precise;
++    shared->max_lag = EnvU64("BB_OCCLUSION_MAX_LAG", 3);
++    shared->results.resize(2ull * PoolSize);
++    std::printf("Occlusion: real sample counts (BB_OCCLUSION=0: the old always-visible fake) - a "
++                "query on each of the %u draws after a block's begin, results written when the "
++                "GPU has run them (at most %llu frames late), %s; SET_PREDICATION skips only on "
++                "known results\n",
++                cap, static_cast<unsigned long long>(shared->max_lag),
++                precise ? "precise" : "not precise (a nonzero count reads plainly visible)");
++    return true;
++}
++
++Occlusion::~Occlusion() {
++    if (!shared) {
++        return;
++    }
++    // A resolve still queued on the scheduler's thread finds it gone and does nothing.
++    std::scoped_lock lk{shared->mutex};
++    shared->alive = false;
++    shared->device.destroyQueryPool(shared->pool);
++    shared->pool = nullptr;
++}
++
++Occlusion::DumpTask Occlusion::MakeDump(VAddr va, u32 num_pipes) const noexcept {
++    return {va, issued, BbStats::submit_done_calls.load(std::memory_order_relaxed),
++            std::clamp(num_pipes, 1u, MaxPipes), 0};
++}
++
++void Occlusion::Dump(const DumpTask& task) {
++    // Every draw stage A decoded since the last dump got a query, or the interval reads visible:
++    // a draw dropped before recording (pipeline still compiling, filtered, failed) must not
++    // count as occluded.
++    const bool poison =
++        !interval.open || task.issued - interval.issued_at != interval.queries;
++    const u64 tick = scheduler.CurrentTick();
++    const u64 serial = ++dump_serial;
++    if (block_serial.size() > 65536) {
++        block_serial.clear();
++    }
++    block_serial[task.va & ~15ull] = serial;
++    {
++        std::scoped_lock lk{shared->queue_mutex};
++        shared->pending.push_back({tick, task.va, task.frame, serial, interval.first,
++                                   interval.queries, task.pipes, poison});
++    }
++    if (tick != registered_tick) {
++        // One resolve per submission, on the scheduler's thread once the GPU has finished it.
++        registered_tick = tick;
++        scheduler.DeferPriorityOperation(
++            [shared = shared, tick] { shared->Resolve(tick); });
++    }
++    // Gnm's begin dump (+0 of a 16-byte cell) measures the draws up to its end dump; after any
++    // other dump only the next draw is measured (droogie's caps), the rest read visible.
++    interval = {true, (task.va & 15) == 0 ? cap : 1u, 0, query_head, task.issued};
++    pipes = task.pipes;
++}
++
++Occlusion::DrawQuery Occlusion::AllocateQuery(u32 scene_size) noexcept {
++    if (query_head - shared->released.load(std::memory_order_acquire) >= PoolSize) {
++        shared->pool_full.fetch_add(1, std::memory_order_relaxed);
++        return {}; // unmeasured: reads visible
++    }
++    const u32 index = static_cast<u32>(query_head % PoolSize);
++    // A pass into the reduced scene targets counts fewer samples than the PS4's 1920x1080; the
++    // count is scaled back so a threshold the game applies means the same.
++    u32 scale = 1u << 16;
++    if (scene_size) {
++        const auto size = SceneResolution::Unpack(scene_size);
++        scale = OcclusionModel::SampleScale(size.width, size.height);
++    }
++    shared->scale[index] = scale;
++    ++query_head;
++    ++interval.queries;
++    return {shared->pool, index,
++            precise ? vk::QueryControlFlags{vk::QueryControlFlagBits::ePrecise}
++                    : vk::QueryControlFlags{}};
++}
++
++void Occlusion::SetPredication(const PredicationTask& task) {
++    shared->pred_sets.fetch_add(1, std::memory_order_relaxed);
++    if (task.op == 0) {
++        pred_mode = PredMode::None;
++        pred_visible = pred_unknown = false;
++        return;
++    }
++    if (task.op != 1) {
++        pred_mode = PredMode::Draw; // primitive-count predication (streamout): not emulated
++        return;
++    }
++    if (!(task.cont && pred_mode != PredMode::None)) {
++        pred_visible = pred_unknown = false;
++    }
++    // Known only when every dump into the block has been resolved: then the block holds this
++    // use's result (or is not ready). Results come a frame late, so mostly unknown: drawn.
++    const auto it = block_serial.find(task.block);
++    if (it != block_serial.end() &&
++        shared->resolved_serial.load(std::memory_order_acquire) >= it->second) {
++        const auto state = ReadBlock(task.block, pipes);
++        pred_unknown |= state == OcclusionModel::Block::NotReady;
++        pred_visible |= state == OcclusionModel::Block::Visible;
++        if (state != OcclusionModel::Block::NotReady) {
++            shared->pred_resolved.fetch_add(1, std::memory_order_relaxed);
++        }
++    } else {
++        pred_unknown = true;
++    }
++    // A wrong "occluded" makes geometry vanish: unknown draws.
++    const bool draw =
++        OcclusionModel::PredicatedDraws(pred_visible, pred_unknown, task.draw_if_visible != 0);
++    pred_mode = draw ? PredMode::Draw : PredMode::Skip;
++}
++
++bool Occlusion::SkipPredicated() noexcept {
++    if (pred_mode == PredMode::Skip) {
++        shared->pred_skipped.fetch_add(1, std::memory_order_relaxed);
++        return true;
++    }
++    shared->pred_drawn.fetch_add(1, std::memory_order_relaxed);
++    return false;
++}
++
++void Occlusion::Shared::Resolve(u64 tick) {
++    std::scoped_lock lk{mutex};
++    if (!alive) {
++        return;
++    }
++    ready.clear();
++    {
++        std::scoped_lock queue{queue_mutex};
++        while (!pending.empty() && pending.front().tick <= tick) {
++            ready.push_back(pending.front());
++            pending.pop_front();
++        }
++    }
++    for (const Pending& dump : ready) {
++        Process(dump);
++    }
++    Report();
++}
++
++void Occlusion::Shared::Process(const Pending& dump) {
++    ++dumps;
++    bool bad = dump.poison;
++    u64 samples = 0;
++    if (dump.count) {
++        queries += dump.count;
++        // The ring may wrap inside the interval: at most two ranges.
++        const u32 first = static_cast<u32>(dump.first % PoolSize);
++        const u32 head_part = std::min<u32>(dump.count, PoolSize - first);
++        const std::array<std::pair<u32, u32>, 2> ranges{{{first, head_part},
++                                                         {0, dump.count - head_part}}};
++        for (const auto& [start, count] : ranges) {
++            if (!count) {
++                continue;
++            }
++            // Without waiting: the GPU has finished the submission. A query a driver did not
++            // resolve (AMD while the window is unfocused, KyoPS4x #220) reads visible.
++            const vk::Result result = device.getQueryPoolResults(
++                pool, start, count, 16ull * count, results.data(), 16,
++                vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
++            for (u32 i = 0; i < count; ++i) {
++                const bool failed = result != vk::Result::eSuccess &&
++                                    result != vk::Result::eNotReady;
++                const bool available = !failed && results[2 * i + 1] != 0;
++                unavailable += available ? 0 : 1;
++                // Imprecise results may be 0/1 (NVIDIA): one sample read as "nearly hidden" was
++                // the likeliest cause of KyoPS4x #219's black world.
++                samples += OcclusionModel::Samples(results[2 * i], available, precise,
++                                                   scale[start + i]);
++            }
++            device.resetQueryPool(pool, start, count);
++        }
++        released.fetch_add(dump.count, std::memory_order_release);
++    }
++    if (bad) {
++        ++poisoned;
++        samples += Unmeasured;
++    }
++    total += samples;
++    if (BbStats::submit_done_calls.load(std::memory_order_relaxed) - dump.frame > max_lag) {
++        // The game may have freed and reused the block by now: left as it is (not ready).
++        ++late;
++    } else {
++        WriteBlock(dump);
++    }
++    resolved_serial.store(dump.serial, std::memory_order_release);
++}
++
++void Occlusion::Shared::WriteBlock(const Pending& dump) {
++    std::array<u64, 2 * MaxPipes> words{};
++    const u64 extent = 16ull * (dump.pipes - 1) + 8;
++    ReadGuest(dump.va, words.data(), extent);
++    const auto own = written.find(dump.va);
++    for (u32 k = 0; k < dump.pipes; ++k) {
++        const u64 word = words[2 * k];
++        const bool ours = own != written.end() &&
++                          word == (Share(own->second, dump.pipes, k) | ValidBit);
++        if (word != 0 && !ours) {
++            ++foreign;
++            return; // neither the game's zeroes nor our last value: not a query block now
++        }
++    }
++    auto* memory = Core::Memory::Instance();
++    for (u32 k = 0; k < dump.pipes; ++k) {
++        const u64 value = Share(total, dump.pipes, k) | ValidBit;
++        auto* address = reinterpret_cast<u8*>(dump.va + 16ull * k);
++        // Through the backing view (no protection fault on this thread; fails rather than
++        // writing where nothing is mapped any more).
++        if (!memory->TryWriteBacking(address, &value, sizeof(value))) {
++            ++unbacked;
++            return;
++        }
++        rasterizer->NoteLateCommandWrite(dump.va + 16ull * k, &value, sizeof(value));
++    }
++    ++written_dumps;
++    if (written.size() > 262144) {
++        written.clear();
++    }
++    written[dump.va] = total;
++    // The end dump of a Gnm block (+8): how the pair reads, for the statistics.
++    if ((dump.va & 15) == 8) {
++        if (const auto begin = written.find(dump.va - 8); begin != written.end()) {
++            ++(total != begin->second ? visible : occluded);
++        }
++    }
++}
++
++void Occlusion::Shared::Report() {
++    static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
++    if (!stats) {
++        return;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    const double seconds = std::chrono::duration<double>(now - window).count();
++    if (seconds < 5.0) {
++        return;
++    }
++    window = now;
++    const u64 frames_now = BbStats::submit_done_calls.load(std::memory_order_relaxed);
++    const u64 draws_now = BbStats::draws.load(std::memory_order_relaxed);
++    const std::array<u64, 12> now_counts{
++        dumps,
++        queries,
++        visible,
++        occluded,
++        poisoned,
++        unavailable,
++        late + foreign + unbacked,
++        pool_full.load(std::memory_order_relaxed),
++        pred_sets.load(std::memory_order_relaxed),
++        pred_resolved.load(std::memory_order_relaxed),
++        pred_skipped.load(std::memory_order_relaxed),
++        pred_drawn.load(std::memory_order_relaxed),
++    };
++    std::array<double, 12> d{};
++    const double frames = std::max<double>(1.0, double(frames_now - window_frames));
++    for (size_t i = 0; i < d.size(); ++i) {
++        d[i] = double(now_counts[i] - last[i]) / frames;
++    }
++    const double pairs = d[2] + d[3];
++    std::printf("Occlusion per frame: %.1f dumps, %.1f queries, objects %.1f visible / %.1f "
++                "culled (%.0f%%), %.1f intervals read visible (%.1f queries unavailable), %.1f "
++                "dumps not written (totals: late %llu, reused memory %llu, unmapped %llu), pool "
++                "full %.1f; SET_PREDICATION %.1f (%.1f known), predicated draws %.1f skipped / "
++                "%.1f drawn; %.0f draws/frame\n",
++                d[0], d[1], d[2], d[3], pairs > 0 ? 100.0 * d[3] / pairs : 0.0, d[4], d[5], d[6],
++                (unsigned long long)late, (unsigned long long)foreign,
++                (unsigned long long)unbacked, d[7], d[8], d[9], d[10], d[11],
++                double(draws_now - window_draws) / frames);
++    std::fflush(stdout);
++    last = now_counts;
++    window_frames = frames_now;
++    window_draws = draws_now;
++}
++
++} // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
+new file mode 100644
+index 0000000..39e9668
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
+@@ -0,0 +1,168 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// bbport: real occlusion query results (BB_OCCLUSION, default on; 0: the old fake counts).
++//
++// The design follows droogie/bbhost commit b68ed17 ("occlusion: the game's own GPU occlusion
++// culling works", Kyoskii, after KyoPS4x #217-#220), adapted to this renderer: there the GPU
++// writes the counts with a compute shader before the labels; here labels are written when the
++// work is recorded (not when the GPU has run it), so the counts are written by the CPU once the
++// GPU has finished the submission holding the queries, a frame or so after the game asked.
++//
++// The PS4 model: each depth block (DB, 8 on a base PS4) keeps a running count of the samples
++// that passed; an EVENT_WRITE of PIXEL_PIPE_STAT_DUMP / ZPASS_DONE stores every DB's count, bit
++// 63 (valid) set, at the dump's address + 16 * db. Gnm's query block is {begin, end} per DB:
++// the game zeroes it, dumps at +0 before the draws it measures and at +8 after, and reads the
++// sum of end - begin. Bloodborne tests its culling proxies that way (GX GetData, CPU readback,
++// ~180 blocks a frame in a dense view: when the answer is "no samples" it does not submit the
++// object's draws at all) and also predicates draws on blocks with SET_PREDICATION (Gnm's
++// setZPassPredicationEnable, called from the game at 0x216a79e and 0x2250745).
++//
++// Here:
++// - Stage A counts the draws it decodes and hands each dump to the recording side in order
++//   (RunInOrder). Draws recorded after a dump get a Vulkan occlusion query each, begun and ended
++//   around the vkCmdDraw itself (never across a render pass): up to BB_OCCLUSION_CAP (64) after
++//   a block's begin dump, one after any other dump. An interval holding a draw without a query
++//   (past the cap, filtered, its pipeline not ready yet, failed) reads plainly visible.
++// - At the dump the interval's queries and the block address are queued; once the GPU has
++//   finished that submission (Scheduler::DeferPriorityOperation, its own thread) the results
++//   are read without waiting, a running total is kept like the DBs keep theirs, and the dump
++//   writes it, split over the DBs with the valid bit, into the game's memory. Never a stall:
++//   no thread waits for a query, the game polls its blocks and takes "not ready" as it would on
++//   the PS4 (it keeps the object drawn and asks again).
++// - Fail-safe towards "visible": an unavailable query, a missing query, an imprecise device's
++//   nonzero result, all add a large count. A dump more than BB_OCCLUSION_MAX_LAG frames late,
++//   or over memory that holds neither the game's zeroes nor our own last value (freed and
++//   reused), is not written: the block stays not ready.
++// - SET_PREDICATION: the draws between a ZPASS set and its clear are skipped only when every
++//   dump into the block has been resolved and the block reads occluded; otherwise they are
++//   drawn. The results arrive a frame late, so this rarely skips: GPU conditional rendering
++//   would need a render pass split per predicated object to copy the result on the GPU and
++//   would still record every draw (the CPU cost this port is bound by), so it is not done.
++//   BB_FRAME_STATS counts how many predicated draws there are.
++//
++// Latency: an object coming into view is drawn again once the game has read the result of a
++// query it issued while the object was hidden: one or two frames later than on the PS4 (the
++// game itself already lags a frame there). Popping at the edge of occluders is the visible risk.
++
++#pragma once
++
++#include <atomic>
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++
++#include "common/types.h"
++#include "video_core/renderer_vulkan/vk_common.h"
++
++namespace Vulkan {
++
++class Instance;
++class Scheduler;
++class Rasterizer;
++
++class Occlusion {
++public:
++    /// BB_OCCLUSION (default on). Off: the fake counts and SET_PREDICATION ignored, as before.
++    static bool Wanted();
++
++    /// Null when the device cannot do it (no host query reset, no query pool): the fake then.
++    static std::unique_ptr<Occlusion> Create(const Instance& instance, Scheduler& scheduler,
++                                             Rasterizer& rasterizer);
++    ~Occlusion();
++
++    /// Stage A (GPU command thread): a draw packet decoded (direct or indirect).
++    void NoteIssued() noexcept {
++        ++issued;
++    }
++
++    /// Stage A: what a dump hands to the recording side.
++    struct DumpTask {
++        VAddr va;
++        u64 issued;    ///< draws decoded before the dump
++        u64 frame;     ///< sceGnmSubmitDone calls when it was decoded
++        u32 pipes;     ///< DBs the dump writes
++        u32 pad;
++    };
++    DumpTask MakeDump(VAddr va, u32 num_pipes) const noexcept;
++
++    struct PredicationTask {
++        VAddr block;
++        u32 op; ///< 0 clear, 1 ZPASS, 2 primitive count (not emulated: drawn)
++        u8 draw_if_visible;
++        u8 cont;
++        u16 pad;
++    };
++    /// Stage A: whether a SET_PREDICATION region is open (the submission end clears it).
++    bool predication_open = false;
++
++    /// Dumps were queued into the submission `current_tick` (not sent to the GPU yet). Read on
++    /// stage A with the draw pipe drained.
++    bool HasUnsubmittedDumps(u64 current_tick) const noexcept {
++        return registered_tick == current_tick;
++    }
++
++    // ---- the recording side (stage B, or stage A after a drain), in stream order ----
++    void Dump(const DumpTask& task);
++    void SetPredication(const PredicationTask& task);
++    /// At the start of a draw's recording: true when SET_PREDICATION skips it.
++    bool SkipDraw() noexcept {
++        if (pred_mode == PredMode::None) [[likely]] {
++            return false;
++        }
++        return SkipPredicated();
++    }
++    /// The query to wrap the draw about to be recorded in (pool null: none). `scene_size`: the
++    /// draw's push_data.scene_size (reduced scene targets count fewer samples).
++    struct DrawQuery {
++        vk::QueryPool pool{};
++        u32 index = 0;
++        vk::QueryControlFlags flags{};
++    };
++    DrawQuery BeginDraw(u32 scene_size) noexcept {
++        if (!interval.open || interval.queries >= interval.cap) [[likely]] {
++            return {};
++        }
++        return AllocateQuery(scene_size);
++    }
++
++private:
++    Occlusion(const Instance& instance, Scheduler& scheduler, Rasterizer& rasterizer);
++    bool Init();
++    DrawQuery AllocateQuery(u32 scene_size) noexcept;
++    bool SkipPredicated() noexcept;
++
++    static constexpr u32 PoolSize = 16384;
++
++    const Instance& instance;
++    Scheduler& scheduler;
++    Rasterizer& rasterizer;
++    bool precise = false;
++    u32 cap = 64;
++    u32 pipes = 8; ///< DBs of the last dump (a Neo has 16)
++
++    // Stage A.
++    u64 issued = 0;
++
++    // The recording side.
++    struct Interval {
++        bool open = false;
++        u32 cap = 0;
++        u32 queries = 0;    ///< queries handed out in it (one per measured draw)
++        u64 first = 0;      ///< its first query, as a running count
++        u64 issued_at = 0;  ///< stage A's draw count at the dump that opened it
++    } interval;
++    u64 query_head = 0;     ///< queries handed out so far
++    u64 dump_serial = 0;
++    u64 registered_tick = ~0ull;
++    std::unordered_map<VAddr, u64> block_serial; ///< a block's last dump (either half)
++    enum class PredMode : u8 { None, Skip, Draw };
++    PredMode pred_mode = PredMode::None;
++    bool pred_visible = false, pred_unknown = false; ///< CONTINUE chains OR blocks together
++
++    /// What the resolver thread and the recording side share.
++    struct Shared;
++    std::shared_ptr<Shared> shared;
++};
++
++} // namespace Vulkan
 diff --git a/gpu/shim/bbport_menu_i18n.cpp b/gpu/shim/bbport_menu_i18n.cpp
 new file mode 100644
 index 0000000..16a69e0
@@ -4416,71 +5314,12 @@ index 0000000..693ca50
 +const char* MenuTranslation(MenuLanguage language, const char* english);
 +
 +} // namespace BbSettings
-diff --git a/src/respawn_patch.h b/src/respawn_patch.h
-new file mode 100644
-index 0000000..c73a186
---- /dev/null
-+++ b/src/respawn_patch.h
-@@ -0,0 +1,53 @@
-+/* SPDX-License-Identifier: GPL-2.0-or-later
-+ * Removes the 12-second minimum loading time after the player dies (CUSA03173 1.09).
-+ * Ported from AwesomeObserver/bloodborne_pc 149972b, "Remove death-triggered minimum
-+ * loading delay on Windows" (Evgeniy Doronin).
-+ *
-+ * The player-death flag initializes a minimum loading countdown to 12.0 seconds; the
-+ * world-loading step waits on it independently of character readiness. Only that
-+ * initialization changes (vmovss xmm0,[12.0] -> vxorps xmm0,xmm0,xmm0 + nop, 8 bytes).
-+ * The character readiness branch, the resource-loading steps and the 15-second multiplayer
-+ * timeout stay intact. Nothing is written unless the whole init block, the readiness branch
-+ * and the 12.0 constant match byte for byte. Offsets refer to the loaded image, not to
-+ * SELF/ELF file offsets. BB_RESPAWN_DELAY_FIX=0 keeps the original delay (probe.c).
-+ */
-+#ifndef BB_RESPAWN_PATCH_H
-+#define BB_RESPAWN_PATCH_H
-+
-+#include <stddef.h>
-+#include <string.h>
-+
-+enum { BB_RESPAWN_UNSUPPORTED, BB_RESPAWN_APPLIED, BB_RESPAWN_ALREADY_APPLIED };
-+
-+static inline int bb_patch_respawn_delay(unsigned char *image, size_t size) {
-+    static const unsigned char init[] = {
-+        0x41,0x80,0xbc,0x24,0xe4,0x00,0x00,0x00,0x00, /* cmp byte [r12+0xe4],0 */
-+        0x74,0x0a,                                    /* je +10 */
-+        0xc5,0xfa,0x10,0x05,0x5c,0xf5,0xfe,0x02,      /* vmovss xmm0,[rip+..] (12.0) */
-+        0xeb,0x04,0xc5,0xf8,0x57,0xc0,                /* jmp +4; vxorps xmm0,xmm0,xmm0 */
-+        0xc4,0xc1,0x7a,0x11,0x84,0x24,0x78,0x02,0x00,0x00, /* countdown = xmm0 */
-+        0x41,0xc7,0x84,0x24,0x7c,0x02,0x00,0x00,0x00,0x00,0x70,0x41 /* 15 s timeout */
-+    };
-+    static const unsigned char ready[] = {
-+        0xc5,0xf8,0x2e,0xca,0x0f,0x87,0x53,0x06,0x00,0x00,
-+        0x45,0x84,0xff,0x0f,0x84,0x4a,0x06,0x00,0x00
-+    };
-+    static const unsigned char twelve[] = {0x00,0x00,0x40,0x41};
-+    static const unsigned char zero[] = {0xc5,0xf8,0x57,0xc0,0x0f,0x1f,0x40,0x00};
-+    const size_t init_at = 0x1938b59, instruction_at = 0x1938b64;
-+    const size_t twelve_at = 0x49280c8, ready_at = 0x193a581;
-+    unsigned char expected[sizeof(init)];
-+    if (!image || size < twelve_at + sizeof(twelve)) return BB_RESPAWN_UNSUPPORTED;
-+    if (memcmp(image + twelve_at, twelve, sizeof(twelve)) ||
-+        memcmp(image + ready_at, ready, sizeof(ready))) return BB_RESPAWN_UNSUPPORTED;
-+    if (!memcmp(image + init_at, init, sizeof(init))) {
-+        memcpy(image + instruction_at, zero, sizeof(zero));
-+        return BB_RESPAWN_APPLIED;
-+    }
-+    memcpy(expected, init, sizeof(init));
-+    memcpy(expected + (instruction_at - init_at), zero, sizeof(zero));
-+    return !memcmp(image + init_at, expected, sizeof(expected)) ?
-+        BB_RESPAWN_ALREADY_APPLIED : BB_RESPAWN_UNSUPPORTED;
-+}
-+
-+#endif
 diff --git a/gpu/shim/engine/cheats.cpp b/gpu/shim/engine/cheats.cpp
 new file mode 100644
-index 0000000..f72e238
+index 0000000..8ecdcf5
 --- /dev/null
 +++ b/gpu/shim/engine/cheats.cpp
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,1037 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Live cheats: Blood Vials (goods 1000) and Quicksilver Bullets (goods 900), each off, infinite
 +// or kept at an amount (bbport.ini cheat_vials / cheat_bullets, the overlay's Cheats section).
@@ -4497,6 +5336,12 @@ index 0000000..f72e238
 +// the game saves: cheats affect the save (the counts) only while they are on, and turning one off
 +// leaves the counts as they are (above the normal carry cap, the game lowers them to the cap the
 +// next time the count changes).
++//
++// The other cheats (second half of this file) follow the same rules: each changes only bytes it
++// took a snapshot of first (param rows, two static debug flags, one code range) and writes the
++// originals back when turned off; or it uses the game's own data and helpers from the frame hook
++// (stamina, durability, echoes and insight), which leaves nothing to restore. Echoes, insight and
++// durability are save data and stay as they are when a cheat is turned off.
 +#include "cheats.h"
 +#include "engine_hooks.h"
 +#include "engine_state.h"
@@ -4504,6 +5349,7 @@ index 0000000..f72e238
 +#include <algorithm>
 +#include <atomic>
 +#include <chrono>
++#include <cmath>
 +#include <cstdio>
 +#include <cstring>
 +#include <span>
@@ -4529,12 +5375,15 @@ index 0000000..f72e238
 +// the live one (runes), else the row's maxNum (sub_231e7e0).
 +constexpr std::size_t kGoodsRowSize = 0x6c, kMaxNum = 0x36, kConsumeByte = 0x44, kCapByte = 0x46;
 +constexpr std::uint8_t kIsConsume = 0x80, kUseBulletMaxNum = 0x40, kUseHpCureMaxNum = 0x80;
-+// EQUIP_PARAM_WEAPON_ST: int8 bulletConsumeNum at 0x13a, read from the row at each shot.
++// EQUIP_PARAM_WEAPON_ST: int8 bulletConsumeNum at 0x13a, read from the row at each shot. Weapons
++// without a firearm hold -1 there (694 of the 1090 rows in 1.09, every melee weapon); 1, 2, 10
++// and 12 are the costs of the guns, trick-weapon guns and arcane tools.
 +constexpr std::size_t kWeaponRowSize = 0x13c, kBulletConsumeNum = 0x13a;
 +constexpr std::uint32_t kBloodVial = 1000, kQuicksilverBullets = 900;
 +constexpr auto kDebounce = std::chrono::milliseconds(400); // a slider being dragged applies once
 +constexpr auto kInterval = std::chrono::milliseconds(250); // refills: at most four times a second
 +constexpr auto kSettle = std::chrono::milliseconds(1500);  // in the world this long before acting
++constexpr const char* kNotVerified = "the engine's executable was not verified";
 +
 +// The code that shows the functions, their arguments and the layouts above (our image's bytes).
 +constexpr std::uint8_t kSigRow[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x41,0x89,0xf4,
@@ -4576,16 +5425,24 @@ index 0000000..f72e238
 +};
 +
 +std::uint64_t g_slide = 0;
++std::uint8_t* g_image = nullptr;
++std::size_t g_image_size = 0;
 +bool g_installed = false;
 +// The hunter in the world for kSettle: same record and map block since then (checked every kInterval).
 +std::uint64_t g_record = 0;
 +std::uint32_t g_block = 0;
 +Clock::time_point g_since{}, g_check{};
-+bool g_present = false;
++bool g_present = false, g_settled = false;
 +std::uint64_t Slot(std::uint64_t bn) { return g_slide + (bn - kPreferredGuestSlide); }
 +template <typename T> bool Read(std::uint64_t at, T* out) { return at && host_read_safe(reinterpret_cast<const void*>(at), out, sizeof(T)); }
 +// Guest heap and data: above the null page, below 1 TiB (the guest-visible range), readable.
 +bool Plausible(std::uint64_t p) { std::uint64_t v = 0; return p >= 0x10000 && p < (std::uint64_t(1) << 40) && Read(p, &v); }
++// Our image's bytes at a BN address match `bytes` (checked at Install, before guest code runs).
++bool Matches(std::uint64_t bn, std::span<const std::uint8_t> bytes) {
++    const std::size_t at = bn - kPreferredGuestSlide;
++    return g_image && at <= g_image_size && bytes.size() <= g_image_size - at &&
++           !std::memcmp(g_image + at, bytes.data(), bytes.size());
++}
 +
 +// A param byte a cheat may change: its original value (the snapshot) and what is there now.
 +struct Byte { std::uint64_t at; std::uint8_t original, now; };
@@ -4593,7 +5450,7 @@ index 0000000..f72e238
 +    const char* name;                  // the log's: "vials", "bullets"
 +    std::uint32_t goods;
 +    std::uint8_t cap_bit;              // useHpCureMaxNum / useBulletMaxNum
-+    std::atomic<const char*> unavailable{"the engine's executable was not verified"};
++    std::atomic<const char*> unavailable{kNotVerified};
 +    bool disabled = false;
 +    int active = BbSettings::CheatOff, pending = BbSettings::CheatOff;
 +    Clock::time_point pending_since{};
@@ -4709,20 +5566,19 @@ index 0000000..f72e238
 +        if (!LoadTable("EquipParamWeapon", kWeaponRowSize, &weapons, &records, &data, &lo)) {
 +            problem = "EquipParamWeapon not found or its rows are not 0x13c bytes";
 +        } else {
-+            // Negative values mark rows without a cost (left alone); many of them, or any value
-+            // above 64, would mean the offset is wrong for this table.
-+            std::size_t negative = 0;
++            // -1 marks rows without a cost (left alone); any other negative value, or one above
++            // 64, would mean the offset is wrong for this table.
++            std::size_t none = 0;
 +            for (const ParamRecord& r : records) {
 +                const auto v = static_cast<std::int8_t>(data[r.data - lo + kBulletConsumeNum]);
-+                if (v > 64) { problem = "a weapon's bulletConsumeNum is out of range"; break; }
-+                if (v < 0) { ++negative; continue; }
++                if (v > 64 || v < -1) { problem = "a weapon's bulletConsumeNum is out of range"; break; }
++                if (v < 0) { ++none; continue; }
 +                if (v) found.push_back({r.data + kBulletConsumeNum, std::uint8_t(v), std::uint8_t(v)});
 +            }
-+            if (!problem && negative > found.size()) problem = "too many weapons with a negative bulletConsumeNum";
 +            if (!problem && found.empty()) problem = "no weapon uses bullets";
 +            if (!problem)
-+                std::printf("Cheats: bullets: %zu weapons cost bullets, %zu rows without a cost left alone\n",
-+                            found.size(), negative);
++                std::printf("Cheats: bullets: %zu weapons cost bullets, %zu without a cost (-1) left alone\n",
++                            found.size(), none);
 +        }
 +        if (problem) {
 +            // The weapon rows stay untouched; infinite bullets keep the count by refilling instead.
@@ -4833,39 +5689,627 @@ index 0000000..f72e238
 +    if (Count(equip, c.goods, &after) && after > have) c.failures = 0;
 +    else if (++c.failures >= 3) Disable(c, "refill had no effect");
 +}
++
++// ---------------------------------------------------------------------------------------------
++// The other cheats.
++//
++// Stamina: the hunter's ChrIns is WorldChrMan (0x593e878) +0x60; its module container (+0x3b0)
++// holds the data module at +0x20 (droogie/bbhost world_chr.cpp, rebirth.cpp heal()), where the
++// stamina spending code keeps stamina at +0x134 between -50 and the maximum at +0x138
++// (kSigStaminaClamp, one of ten such sites; each first tests the debug menu's "All No Stamina
++// Consume" flag 0x593e88a, which would spare every character, so the cheat does not use it).
++constexpr std::uint64_t kWorldChrMan = 0x593e878;
++constexpr std::uint64_t kPlayerIns = 0x60, kModules = 0x3b0, kDataModule = 0x20, kStamina = 0x134, kMaxStamina = 0x138;
++constexpr std::uint8_t kSigStaminaLoad[] = {0x49,0x8b,0x8c,0x24,0xb0,0x03,0x00,0x00,0x4c,0x8b,0x79,0x20,0x41,0x8b,
++    0x9f,0x34,0x01,0x00,0x00};
++constexpr std::uint8_t kSigStaminaClamp[] = {0x48,0x8d,0x05,0xe1,0x83,0xc8,0x03,0x80,0x38,0x00,0x75,0x1f,0xb8,0xce,
++    0xff,0xff,0xff,0x83,0xfb,0xce,0x7c,0x0e,0x41,0x8b,0x87,0x38,0x01,0x00,0x00,0x39,0xd8,0x0f,0x4e,0xd8,0x89,
++    0xd8,0x41,0x89,0x87,0x34,0x01,0x00,0x00};
++// Stealth: the static ChrDbg flag bytes the debug menu's "Player Hide" and "Player Silence" toggle
++// (the menu builder passes their addresses with those labels, kSigStealthMenu / kSigSilentMenu),
++// read live by the game (kSigStealthUse / kSigSilentUse); Kyo's XML patches write the same bytes.
++// 0x593e888 next to them is "Player No Dead" and is never touched.
++constexpr std::uint64_t kPlayerHide = 0x593e88e, kPlayerSilence = 0x593e88f;
++constexpr std::uint8_t kSigStealthMenu[] = {0x48,0x8d,0x35,0xfc,0x48,0x06,0x03,0x48,0x8d,0x15,0xc9,0xd3,0xc1};
++constexpr std::uint8_t kSigSilentMenu[] = {0x48,0x8d,0x35,0xda,0x48,0x06,0x03,0x48,0x8d,0x15,0x88,0xd3,0xc1};
++constexpr std::uint8_t kSigStealthUse[] = {0x48,0x8d,0x05,0xac,0x93,0xae,0x03,0x8a,0x00,0x88,0x43,0x64};
++constexpr std::uint8_t kSigSilentUse[] = {0x48,0x8d,0x05,0xc5,0x95,0xae,0x03,0x80,0x38,0x00};
++// Echoes and insight: PlayerGameData +0x94 (capped at 999,999,999 by the game's own add, kSigEchoes)
++// and +0x84 (capped at 99, kSigInsight); engine_state's player_stat "echoes" / "insight".
++constexpr std::int64_t kEchoCap = 999999999, kInsightCap = 99;
++constexpr std::uint8_t kSigInsight[] = {0x44,0x03,0xb8,0x84,0x00,0x00,0x00,0x78,0x0d,0x41,0x83,0xff,0x63,0xb9,0x63,
++    0x00,0x00,0x00,0x41,0x0f,0x4e,0xcf,0x89,0x88,0x84,0x00,0x00,0x00};
++constexpr std::uint8_t kSigEchoes[] = {0x48,0x8b,0x93,0xc0,0x03,0x00,0x00,0x8b,0xb2,0x94,0x00,0x00,0x00,0x31,0xc9,
++    0x89,0xf7,0x01,0xc7,0x78,0x0e,0x81,0xff,0xff,0xc9,0x9a,0x3b,0xb9,0xff,0xc9,0x9a,0x3b,0x0f,0x4e,0xcf,0x89,
++    0x8a,0x94,0x00,0x00,0x00};
++// Keeping echoes on death: the blood mark commit (droogie/bbhost death_events.hpp
++// BLOOD_MARK_COMMIT_FN 0x17d2910, which the death events call with capture=1) adds the carried
++// echoes (+0x94) and a pending amount into r12d, stores r12d as the mark's echoes (+0x38) and
++// zeroes the carried echoes. The patch keeps the carried echoes and leaves only the pending part
++// in the mark (r12d -= carried), so picking the bloodstain up cannot give them a second time.
++constexpr std::uint64_t kBloodMarkSite = 0x17d2bd2;
++constexpr std::uint8_t kSigBloodMark[] = {0x45,0x8b,0xa5,0x94,0x00,0x00,0x00,0x48,0x8d,0x05,0x78,0x85,0x16,0x04,
++    0x48,0x8b,0x00,0x48,0x85,0xc0,0x75,0x2b,0x48,0x8d,0x3d,0xca,0x87,0x56,0x03,0x48,0x8d,0x15,0x17,0x88,0x56,
++    0x03,0x48,0x8d,0x0d,0xfe,0x85,0x56,0x03,0xbe,0xb1,0x00,0x00,0x00,0x31,0xc0,0xe8,0xf7,0x29,0xce,0x00,0x48,
++    0x8d,0x05,0x48,0x85,0x16,0x04,0x48,0x8b,0x00,0x48,0x8b,0x40,0x08,0x44,0x03,0x60,0x28,0xc7,0x40,0x28,0x00,
++    0x00,0x00,0x00,0x44,0x89,0x63,0x38,0x41,0xc7,0x85,0x94,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
++// mov [rbx+0x38], r12d; mov dword [r13+0x94], 0  ->  sub r12d, [r13+0x94]; mov [rbx+0x38], r12d; nop4
++constexpr std::uint8_t kBloodMarkOriginal[] = {0x44,0x89,0x63,0x38,0x41,0xc7,0x85,0x94,0x00,0x00,0x00,0x00,0x00,
++    0x00,0x00};
++constexpr std::uint8_t kBloodMarkKeep[] = {0x45,0x2b,0xa5,0x94,0x00,0x00,0x00,0x44,0x89,0x63,0x38,0x0f,0x1f,0x40,
++    0x00};
++static_assert(sizeof(kBloodMarkOriginal) == sizeof(kBloodMarkKeep));
++// Durability: sub_18d24e0 (EquipGameData*, slot 0-7, change) adds the change to the durability of
++// the weapon in an equipment slot, clamped to 0..EquipParamWeapon durabilityMax (+0xbe); the
++// game's PlayerIns calls it with rdi = PlayerGameData + 0x1d0 (kSigDurabilityCall). A slot's item
++// handle is EquipGameData +0x94 + 4 * slot, its id from sub_1e89070 (&{handle, 0, 0, -1}) at +0x10.
++constexpr std::uint64_t kChangeDurability = 0x18d24e0, kGaitemLookup = 0x1e89070, kEquipHandles = 0x94;
++constexpr int kDurabilitySlots = 8;
++constexpr std::size_t kDurabilityMax = 0xbe;
++constexpr std::uint8_t kSigDurability[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,
++    0x83,0xec,0x68,0x41,0x89,0xf5,0x48,0x89,0xfb,0x4c,0x8b,0x25,0xe2,0x16,0xf1,0x03,0x49,0x8b,0x04,0x24,0x48,
++    0x89,0x45,0xd0,0x41,0x83,0xfd,0x07,0x0f,0x87,0xaf,0x00,0x00,0x00,0x89,0x55,0x8c,0x4d,0x63,0xf5,0x42,0x8b,
++    0x84,0xb3,0x94,0x00,0x00,0x00,0x89,0x45,0x90,0x48,0xc7,0x45,0x98,0x00,0x00,0x00,0x00,0xc7,0x45,0xa0,0xff,
++    0xff,0xff,0xff,0x48,0x8d,0x7d,0x90,0xe8,0x37,0x6b,0x5b,0x00,0x8b,0x45,0xa0,0x25,0xff,0xff,0xff,0x0f,0x3d,
++    0xff,0xff,0xff,0x0f,0x41,0xbf,0xff,0xff,0xff,0xff,0x44,0x0f,0x45,0xf8,0x41,0x83,0xff,0xff};
++constexpr std::uint8_t kSigDurabilityClamp[] = {0x44,0x01,0xf3,0x48,0x8b,0x4d,0x98,0x31,0xd2,0xb8,0x00,0x00,0x00,
++    0x00,0x48,0x85,0xc9,0x74,0x07,0x0f,0xb7,0x81,0xbe,0x00,0x00,0x00,0x85,0xdb,0x78,0x07,0x39,0xc3,0x0f,0x4f,
++    0xd8,0x89,0xda,0x48,0x8b,0x7d,0x80,0x48,0x81,0xc7,0x58,0x01,0x00,0x00,0x8b,0xb5,0x7c,0xff,0xff,0xff,0xe8,
++    0x58,0x71,0x00,0x00};
++constexpr std::uint8_t kSigDurabilityCall[] = {0x49,0x8b,0xbf,0xc0,0x03,0x00,0x00,0x48,0x81,0xc7,0xd0,0x01,0x00,0x00,
++    0x89,0xde,0x44,0x89,0xe2,0xe8,0xfd,0x69,0xbd,0xff};
++// Firearm range: the guns' BehaviorParam_PC rows (variationId = the weapons' behaviorVariationId:
++// 600 Blunderbuss, 610 Ludwig's Rifle, 1000 Rifle Spear, 1010 Reiterpallasch, 1400 Hunter Pistol
++// and Evelyn, 1410 Repeating Pistol, 1500 Cannon, 3300 Gatling Gun, 3500 Church Cannon, 3600
++// Piercing Rifle) with refType 1 name a Bullet row; each shot is a chain of Bullet rows (HitBulletID,
++// the next segment). The moving segments' life (+0x10) and dist (+0x14, where gravity and
++// acceleration change) are scaled. Rows any other player behaviour reaches (spells, hunter tools,
++// the shared non-moving 77) are left alone. 1.09: 45 rows, none shared with enemies.
++constexpr std::uint32_t kFirearmVariations[] = {600, 610, 1000, 1010, 1400, 1410, 1500, 3300, 3500, 3600};
++constexpr std::size_t kBehaviorRowSize = 0x20, kBehaviorVariation = 0x0, kBehaviorRefType = 0x9, kBehaviorRefId = 0xc;
++constexpr std::size_t kBulletRowSize = 0xa0, kBulletLife = 0x10, kBulletDist = 0x14, kBulletVelocity = 0x28,
++    kBulletNext = 0x68;
++// Echo multiplier: NpcParam getSoul (+0x28, an enemy's echoes; 11025 at most in 1.09) and
++// GameAreaParam bonusSoul_single / _multi (+0x0 / +0x4, a boss's; 230000 at most).
++constexpr std::size_t kNpcRowSize = 0x184, kGetSoul = 0x28, kAreaRowSize = 0x20;
++// Consumables: the stackable usable goods whose isConsume bit is cleared (the game then does not
++// lower the count, as for the Hunter's Mark). Not the Blood Vials (1000) and Quicksilver Bullets
++// (900), which have their own cheats; not keys, materials, Blood Echo and Insight items (Coldblood,
++// Madman's Knowledge, Great One's Wisdom, Blood Dreg), the Bold Hunter's Mark, Vermin, one-of
++// items (runes, gems, Umbilical Cords) or the unnamed rows.
++constexpr std::uint32_t kConsumables[] = {
++    1100, 1101, // Antidote, Sedative
++    1110, 1120, // Beast Blood Pellet, Blue Elixir
++    1200, 1201, 1250, 1251, // Molotov Cocktail, Delayed Molotov, Rope / Delayed Rope Molotov
++    1210, 1240, 1230, // Poison Knife, Throwing Knife, Pebble
++    1220, 1260, 1270, // Oil Urn, Pungent Blood Cocktail, Numbing Mist
++    1300, 1320, 1330, // Fire Paper, Bolt Paper, Bone Marrow Ash
++    1410, // Shining Coins
++    2030, 2090, // Lead Elixir, Shaman Bone Blade
++};
++constexpr std::size_t kGoodsType = 0x3a, kRefCategory = 0x3b;
++
++// The bytes one of these cheats changes: each original (the snapshot) and what is there now, and
++// the param tables they are in (a reloaded table voids the snapshot).
++struct Patch {
++    std::vector<Byte> bytes;
++    std::vector<ParamTable> tables;
++    bool snapped = false, code = false;
++};
++bool Current(const Patch& p) {
++    for (const ParamTable& t : p.tables)
++        if (params_table_file(t.cap) != t.file) return false;
++    return true;
++}
++void Forget(Patch& p) { p.snapped = false; p.bytes.clear(); p.tables.clear(); }
++std::vector<std::uint8_t> Originals(const Patch& p) {
++    std::vector<std::uint8_t> v(p.bytes.size());
++    for (std::size_t i = 0; i < v.size(); ++i) v[i] = p.bytes[i].original;
++    return v;
++}
++// Brings the bytes to `want` after checking every byte to change still holds what this cheat
++// left there; false (nothing written) if one does not. Code (one contiguous range) goes through
++// WriteCode, data and params are written directly.
++bool Write(Patch& p, const std::vector<std::uint8_t>& want) {
++    // Consecutive bytes are read in one go (the echo multiplier changes about 20000).
++    bool change = false;
++    std::vector<std::uint8_t> run;
++    for (std::size_t i = 0, j = 0; i < p.bytes.size(); i = j) {
++        bool differs = want[i] != p.bytes[i].now;
++        for (j = i + 1; j < p.bytes.size() && p.bytes[j].at == p.bytes[j - 1].at + 1; ++j)
++            differs = differs || want[j] != p.bytes[j].now;
++        if (!differs) continue;
++        run.resize(j - i);
++        if (!host_read_safe(reinterpret_cast<const void*>(p.bytes[i].at), run.data(), run.size())) return false;
++        for (std::size_t k = i; k < j; ++k)
++            if (want[k] != p.bytes[k].now && run[k - i] != p.bytes[k].now) return false;
++        change = true;
++    }
++    if (!change) return true;
++    if (p.code) {
++        if (!WriteCode(reinterpret_cast<void*>(p.bytes[0].at), want.data(), want.size())) return false;
++        for (std::size_t i = 0; i < p.bytes.size(); ++i) p.bytes[i].now = want[i];
++        return true;
++    }
++    for (std::size_t i = 0; i < p.bytes.size(); ++i) {
++        if (want[i] == p.bytes[i].now) continue;
++        std::memcpy(reinterpret_cast<void*>(p.bytes[i].at), &want[i], 1);
++        p.bytes[i].now = want[i];
++    }
++    return true;
++}
++// Writes back the originals where they are still what this cheat wrote.
++void RestoreSafe(Patch& p) {
++    if (!p.snapped) return;
++    if (!Current(p)) { Forget(p); return; }
++    if (!Write(p, Originals(p)) && !p.code) {
++        // Something else changed a byte: put back only the ones still ours, byte by byte. Code is
++        // left as it is (half an instruction sequence would be worse than either).
++        for (Byte& b : p.bytes) {
++            std::uint8_t current = 0;
++            if (b.now == b.original || !Read(b.at, &current) || current != b.now) continue;
++            std::memcpy(reinterpret_cast<void*>(b.at), &b.original, 1);
++            b.now = b.original;
++        }
++    }
++}
++
++enum Kind { Refill, Flags, Params, Code };
++struct Extra {
++    Which which;
++    Kind kind;
++    const char* name;                  // the log's and the reasons': "stamina", "firearm range"
++    std::atomic<const char*> unavailable{kNotVerified};
++    bool disabled = false;
++    int active = 0, pending = 0;
++    Clock::time_point pending_since{};
++    Patch patch;
++    int failures = 0;
++};
++Extra g_extras[] = {
++    {Stamina, Refill, "stamina"}, {Stealth, Flags, "stealth"}, {GunRange, Params, "firearm range"},
++    {KeepEchoes, Code, "keep echoes"}, {EchoMultiplier, Params, "echo multiplier"},
++    {NoDurability, Refill, "durability"}, {Consumables, Params, "consumables"},
++};
++Extra& ExtraOf(Which which) {
++    for (Extra& e : g_extras)
++        if (e.which == which) return e;
++    return g_extras[0];
++}
++std::atomic<const char*> g_echoes_unavailable{kNotVerified};
++std::atomic<long long> g_add_echoes{0}, g_add_insight{0};
++
++void Disable(Extra& e, const char* why) {
++    if (e.disabled) return;
++    e.disabled = true;
++    RestoreSafe(e.patch);
++    e.unavailable.store(why);
++    std::printf("Cheats: %s unavailable: %s\n", e.name, why);
++}
++
++int SettingOf(const Extra& e, const BbSettings::Values& s) {
++    switch (e.which) {
++    case Stamina: return s.cheat_stamina.load(std::memory_order_relaxed);
++    case Stealth: return s.cheat_stealth.load(std::memory_order_relaxed);
++    case KeepEchoes: return s.cheat_keep_echoes.load(std::memory_order_relaxed);
++    case NoDurability: return s.cheat_no_durability.load(std::memory_order_relaxed);
++    case Consumables: return s.cheat_consumables.load(std::memory_order_relaxed);
++    case GunRange: {
++        const int v = s.cheat_gun_range.load(std::memory_order_relaxed);
++        return std::find(std::begin(BbSettings::CheatGunRanges), std::end(BbSettings::CheatGunRanges), v) !=
++                   std::end(BbSettings::CheatGunRanges) ? v : 0;
++    }
++    case EchoMultiplier: {
++        // Off is 0 here (x1 changes nothing).
++        const int v = s.cheat_echo_multiplier.load(std::memory_order_relaxed);
++        return v > 1 && std::find(std::begin(BbSettings::CheatEchoMultipliers),
++                                  std::end(BbSettings::CheatEchoMultipliers), v) !=
++                            std::end(BbSettings::CheatEchoMultipliers) ? v : 0;
++    }
++    default: return 0;
++    }
++}
++
++// Param snapshots (taken in the world, the first time the cheat runs and after a table reload).
++const char* SnapshotGunRange(Patch& p) {
++    ParamTable behavior, bullets;
++    std::vector<ParamRecord> brecords, records;
++    std::vector<std::uint8_t> bdata, data;
++    std::uint64_t blo = 0, lo = 0;
++    if (!LoadTable("BehaviorParam_PC", kBehaviorRowSize, &behavior, &brecords, &bdata, &blo))
++        return "BehaviorParam_PC not found or its rows are not 0x20 bytes";
++    if (!LoadTable("Bullet", kBulletRowSize, &bullets, &records, &data, &lo))
++        return "Bullet not found or its rows are not 0xa0 bytes";
++    const auto row = [&](std::int32_t id) -> const ParamRecord* {
++        const auto it = std::find_if(records.begin(), records.end(), [&](const ParamRecord& r) { return std::int32_t(r.id) == id; });
++        return it == records.end() ? nullptr : &*it;
++    };
++    // Every Bullet row a behaviour reaches through its chain (at most 8 segments).
++    const auto reach = [&](bool firearm, std::vector<std::uint64_t>* out, std::size_t* variations) {
++        std::vector<std::uint32_t> seen;
++        for (const ParamRecord& b : brecords) {
++            const std::uint8_t* r = bdata.data() + (b.data - blo);
++            std::uint32_t variation = 0;
++            std::int32_t id = 0;
++            std::memcpy(&variation, r + kBehaviorVariation, 4);
++            std::memcpy(&id, r + kBehaviorRefId, 4);
++            const bool gun = std::find(std::begin(kFirearmVariations), std::end(kFirearmVariations), variation) !=
++                             std::end(kFirearmVariations);
++            if (r[kBehaviorRefType] != 1 || gun != firearm) continue;
++            if (gun && variations && std::find(seen.begin(), seen.end(), variation) == seen.end()) {
++                seen.push_back(variation);
++                ++*variations;
++            }
++            for (int depth = 0; depth < 8 && id > 0; ++depth) {
++                const ParamRecord* bullet = row(id);
++                if (!bullet || std::find(out->begin(), out->end(), bullet->data) != out->end()) break;
++                out->push_back(bullet->data);
++                std::memcpy(&id, data.data() + (bullet->data - lo) + kBulletNext, 4);
++            }
++        }
++    };
++    std::vector<std::uint64_t> guns, others;
++    std::size_t variations = 0;
++    reach(true, &guns, &variations);
++    reach(false, &others, nullptr);
++    if (variations != std::size(kFirearmVariations)) return "a firearm's behaviour rows are missing";
++    p.bytes.clear();
++    std::size_t rows = 0;
++    for (std::uint64_t at : guns) {
++        if (std::find(others.begin(), others.end(), at) != others.end()) continue;
++        const std::uint8_t* r = data.data() + (at - lo);
++        float life = 0, dist = 0, velocity = 0;
++        std::memcpy(&life, r + kBulletLife, 4);
++        std::memcpy(&dist, r + kBulletDist, 4);
++        std::memcpy(&velocity, r + kBulletVelocity, 4);
++        if (!std::isfinite(velocity) || velocity <= 0) continue; // spawners and blasts stay as they are
++        if (velocity > 200 || !std::isfinite(life) || life <= 0 || life > 5 || !std::isfinite(dist) || dist < 0 ||
++            dist > 50)
++            return "a firearm bullet's life, range or speed is implausible";
++        for (std::size_t off : {kBulletLife, kBulletDist})
++            for (std::size_t k = 0; k < 4; ++k) p.bytes.push_back({at + off + k, r[off + k], r[off + k]});
++        ++rows;
++    }
++    if (rows < 20 || rows > 120) return "unexpected number of firearm bullet rows";
++    p.tables = {behavior, bullets};
++    std::printf("Cheats: firearm range: %zu bullet rows of %zu firearm behaviours\n", rows, variations);
++    return nullptr;
++}
++
++const char* SnapshotEchoes(Patch& p) {
++    p.bytes.clear();
++    p.tables.clear();
++    std::size_t rows = 0;
++    struct Field { const char* table; std::size_t size; std::size_t offsets[2]; std::size_t count; std::uint32_t most; };
++    const Field fields[] = {{"NpcParam", kNpcRowSize, {kGetSoul, 0}, 1, 1000000},
++                            {"GameAreaParam", kAreaRowSize, {0x0, 0x4}, 2, 10000000}};
++    for (const Field& f : fields) {
++        ParamTable t;
++        std::vector<ParamRecord> records;
++        std::vector<std::uint8_t> data;
++        std::uint64_t lo = 0;
++        if (!LoadTable(f.table, f.size, &t, &records, &data, &lo))
++            return f.size == kNpcRowSize ? "NpcParam not found or its rows are not 0x184 bytes"
++                                         : "GameAreaParam not found or its rows are not 0x20 bytes";
++        for (const ParamRecord& r : records) {
++            for (std::size_t k = 0; k < f.count; ++k) {
++                const std::uint8_t* v = data.data() + (r.data - lo) + f.offsets[k];
++                std::uint32_t echoes = 0;
++                std::memcpy(&echoes, v, 4);
++                if (!echoes) continue;
++                // x10 must stay far from the int32 the game adds it as.
++                if (echoes > f.most) return "an enemy's Blood Echoes are implausible";
++                for (std::size_t b = 0; b < 4; ++b) p.bytes.push_back({r.data + f.offsets[k] + b, v[b], v[b]});
++                ++rows;
++            }
++        }
++        p.tables.push_back(t);
++    }
++    if (rows < 100) return "too few enemies give Blood Echoes";
++    std::printf("Cheats: echo multiplier: %zu enemy and boss echo values\n", rows);
++    return nullptr;
++}
++
++const char* SnapshotConsumables(Patch& p) {
++    ParamTable goods;
++    std::vector<ParamRecord> records;
++    std::vector<std::uint8_t> data;
++    std::uint64_t lo = 0;
++    if (!LoadTable("EquipParamGoods", kGoodsRowSize, &goods, &records, &data, &lo))
++        return "EquipParamGoods not found or its rows are not 0x6c bytes";
++    p.bytes.clear();
++    for (std::uint32_t id : kConsumables) {
++        const auto it = std::find_if(records.begin(), records.end(), [&](const ParamRecord& r) { return r.id == id; });
++        if (it == records.end()) return "a consumable's goods row is missing";
++        const std::uint8_t* row = data.data() + (it->data - lo);
++        std::int16_t max_num = 0;
++        std::memcpy(&max_num, row + kMaxNum, 2);
++        // An ordinary (type 0) stackable item that is used up and uses an effect or an attack.
++        if (row[kGoodsType] != 0 || max_num < 2 || max_num > 99 || !(row[kConsumeByte] & kIsConsume) ||
++            (row[kRefCategory] != 1 && row[kRefCategory] != 2))
++            return "a consumable's goods row is not a stackable consumable";
++        p.bytes.push_back({it->data + kConsumeByte, row[kConsumeByte], row[kConsumeByte]});
++    }
++    p.tables = {goods};
++    return nullptr;
++}
++
++// The bytes a mode wants; mode 0: the originals.
++std::vector<std::uint8_t> WantedOf(const Extra& e, int mode) {
++    std::vector<std::uint8_t> want = Originals(e.patch);
++    if (!mode) return want;
++    switch (e.which) {
++    case Stealth: std::fill(want.begin(), want.end(), std::uint8_t(1)); break;
++    case KeepEchoes: std::memcpy(want.data(), kBloodMarkKeep, sizeof(kBloodMarkKeep)); break;
++    case Consumables: for (std::uint8_t& b : want) b = std::uint8_t(b & ~kIsConsume); break;
++    case GunRange:
++        for (std::size_t i = 0; i + 4 <= want.size(); i += 4) {
++            float v = 0;
++            std::memcpy(&v, want.data() + i, 4);
++            v = v * float(mode) / 100.0f;
++            std::memcpy(want.data() + i, &v, 4);
++        }
++        break;
++    case EchoMultiplier:
++        for (std::size_t i = 0; i + 4 <= want.size(); i += 4) {
++            std::uint32_t v = 0;
++            std::memcpy(&v, want.data() + i, 4);
++            v *= std::uint32_t(mode);
++            std::memcpy(want.data() + i, &v, 4);
++        }
++        break;
++    default: break;
++    }
++    return want;
++}
++
++void LogSwitch(const Extra& e, int mode) {
++    switch (e.which) {
++    case Stamina: std::printf("Cheats: infinite stamina %s\n", mode ? "on" : "off"); break;
++    case Stealth: std::printf(mode ? "Cheats: stealth on (Player Hide, Player Silence)\n" : "Cheats: stealth off, flags restored\n"); break;
++    case GunRange:
++        if (mode) std::printf("Cheats: firearm range %d%%\n", mode);
++        else std::printf("Cheats: firearm range off, params restored\n");
++        break;
++    case KeepEchoes: std::printf(mode ? "Cheats: keep Blood Echoes on death on\n" : "Cheats: keep Blood Echoes on death off, code restored\n"); break;
++    case EchoMultiplier:
++        if (mode) std::printf("Cheats: echo multiplier x%d\n", mode);
++        else std::printf("Cheats: echo multiplier off, params restored\n");
++        break;
++    case NoDurability: std::printf("Cheats: weapon durability kept full %s\n", mode ? "on" : "off"); break;
++    case Consumables: std::printf(mode ? "Cheats: infinite consumables on\n" : "Cheats: infinite consumables off, params restored\n"); break;
++    default: break;
++    }
++}
++
++// A changed setting, after the debounce. Flags and code change at once (they need no character);
++// params change in the world (Run), and are restored here.
++void Switch(Extra& e, int mode) {
++    e.active = mode;
++    e.failures = 0;
++    g_check = Clock::time_point{};
++    LogSwitch(e, mode);
++    if (e.kind == Flags && mode && !e.patch.snapped) {
++        e.patch.bytes.clear();
++        for (std::uint64_t bn : {kPlayerHide, kPlayerSilence}) {
++            std::uint8_t v = 0;
++            if (!Read(Slot(bn), &v) || v > 1) { Disable(e, "a debug flag holds an unexpected value"); return; }
++            e.patch.bytes.push_back({Slot(bn), v, v});
++        }
++        e.patch.snapped = true;
++    }
++    if (e.kind == Flags || e.kind == Code || !mode) {
++        if (!e.patch.snapped) return;
++        if (!Current(e.patch)) { Forget(e.patch); return; }
++        if (!Write(e.patch, WantedOf(e, mode)))
++            Disable(e, e.kind == Code ? "the game code changed outside the cheat" : "a byte changed outside the cheat");
++        // Flags are taken again next time: the debug menu or a patch may have set them meanwhile.
++        if (e.kind == Flags && !mode) Forget(e.patch);
++    }
++}
++
++// The hunter's data module, or 0: checked each time (the chain changes on every load).
++std::uint64_t DataModule() {
++    std::uint64_t man = 0, chr = 0, modules = 0, data = 0;
++    if (!Read(Slot(kWorldChrMan), &man) || !Plausible(man) || !Read(man + kPlayerIns, &chr) || !Plausible(chr) ||
++        !Read(chr + kModules, &modules) || !Plausible(modules) || !Read(modules + kDataModule, &data) || !Plausible(data))
++        return 0;
++    return data;
++}
++
++// Every frame while settled: stamina back to its maximum (the game spends it within a frame).
++void RefillStamina() {
++    const std::uint64_t data = DataModule();
++    std::int32_t value[2] = {};
++    if (!data || !Read(data + kStamina, &value) || value[1] < 1 || value[1] > 2000 || value[0] < -50 ||
++        value[0] > value[1] || value[0] == value[1])
++        return;
++    std::memcpy(reinterpret_cast<void*>(data + kStamina), &value[1], 4);
++}
++
++// Each weapon's durabilityMax by id, read once per table file (the slots are checked four times
++// a second).
++ParamTable g_weapons;
++std::vector<std::pair<std::uint32_t, std::uint16_t>> g_durability;
++bool LoadDurability() {
++    if (!g_durability.empty() && params_table_file(g_weapons.cap) == g_weapons.file) return true;
++    g_durability.clear();
++    std::vector<ParamRecord> records;
++    std::vector<std::uint8_t> data;
++    std::uint64_t lo = 0;
++    if (!LoadTable("EquipParamWeapon", kWeaponRowSize, &g_weapons, &records, &data, &lo)) return false;
++    for (const ParamRecord& r : records) {
++        std::uint16_t most = 0;
++        std::memcpy(&most, data.data() + (r.data - lo) + kDurabilityMax, 2);
++        g_durability.push_back({r.id, most});
++    }
++    std::sort(g_durability.begin(), g_durability.end());
++    return !g_durability.empty();
++}
++
++// The equipped weapons' durability raised to their maximum with the game's own change (a large
++// increase, clamped by it); slots whose weapon has no durability (fists) are left alone.
++void RefillDurability(Extra& e, std::uint64_t equip) {
++    if (!LoadDurability()) { Disable(e, "EquipParamWeapon not found or its rows are not 0x13c bytes"); return; }
++    int touched = 0;
++    for (int slot = 0; slot < kDurabilitySlots; ++slot) {
++        std::uint32_t handle = 0;
++        if (!Read(equip + kEquipHandles + 4 * std::uint64_t(slot), &handle)) { Disable(e, "equipment not readable"); return; }
++        if (!handle || handle == 0xffffffffu) continue;
++        struct { std::uint32_t handle, pad; std::uint64_t item; std::uint32_t id, pad2; } gaitem{handle, 0, 0, 0xffffffffu, 0};
++        Call(Slot(kGaitemLookup), &gaitem);
++        // Weapons are item type 0 (the top four bits); armour (1) and the rest are left alone.
++        const std::uint32_t id = gaitem.id;
++        if (id == 0xffffffffu || (id & 0xfffffff) == 0xfffffff || id >> 28) continue;
++        const auto it = std::lower_bound(g_durability.begin(), g_durability.end(), std::make_pair(id, std::uint16_t(0)));
++        if (it == g_durability.end() || it->first != id || !it->second || it->second > 2000) continue;
++        Call(Slot(kChangeDurability), equip, slot, int(it->second));
++        ++touched;
++    }
++    if (!e.failures) {
++        e.failures = 1; // logged once per switch
++        std::printf("Cheats: durability: %d equipped weapons kept at their maximum\n", touched);
++    }
++}
++
++// In the world, settled.
++void Run(Extra& e, std::uint64_t record) {
++    if (e.kind == Refill) {
++        if (e.which == NoDurability) RefillDurability(e, record + kEquipGameData);
++        return;
++    }
++    if (e.kind != Params) return;
++    if (e.patch.snapped && !Current(e.patch)) {
++        std::printf("Cheats: %s: the game reloaded its params; applying again\n", e.name);
++        Forget(e.patch);
++    }
++    if (!e.patch.snapped) {
++        const char* why = e.which == GunRange ? SnapshotGunRange(e.patch)
++                        : e.which == EchoMultiplier ? SnapshotEchoes(e.patch)
++                                                    : SnapshotConsumables(e.patch);
++        if (why) { Forget(e.patch); Disable(e, why); return; }
++        e.patch.snapped = true;
++    }
++    if (!Write(e.patch, WantedOf(e, e.active))) Disable(e, "a param byte changed outside the cheat");
++}
++
++// The overlay's queued echoes / insight, in the world.
++void AddStats() {
++    const long long echoes = g_add_echoes.exchange(0), insight = g_add_insight.exchange(0);
++    std::int64_t v = 0;
++    if (echoes > 0) {
++        if (!player_stat_get("echoes", &v) || v < 0 || v > kEchoCap) {
++            std::printf("Cheats: Blood Echoes not readable; nothing added\n");
++        } else {
++            const std::int64_t now = std::min<std::int64_t>(kEchoCap, v + echoes);
++            player_stat_set("echoes", now);
++            std::printf("Cheats: +%lld Blood Echoes (%lld held)\n", static_cast<long long>(now - v), static_cast<long long>(now));
++        }
++    }
++    if (insight > 0) {
++        if (!player_stat_get("insight", &v) || v < 0 || v > kInsightCap) {
++            std::printf("Cheats: Insight not readable; nothing added\n");
++        } else {
++            const std::int64_t now = std::min<std::int64_t>(kInsightCap, v + insight);
++            player_stat_set("insight", now);
++            std::printf("Cheats: +%lld Insight (%lld held)\n", static_cast<long long>(now - v), static_cast<long long>(now));
++        }
++    }
++}
++
++// Install: each cheat's own code checks; one that differs disables only that cheat.
++void InstallExtras() {
++    const auto check = [](Which which, std::initializer_list<Signature> signatures) {
++        for (const Signature& s : signatures) {
++            if (!Matches(s.bn, s.bytes)) {
++                Extra& e = ExtraOf(which);
++                e.unavailable.store("engine code differs from the verified 1.09 image");
++                std::printf("Cheats: %s unavailable: engine code differs at 0x%llx\n", e.name,
++                            static_cast<unsigned long long>(s.bn));
++                return false;
++            }
++        }
++        ExtraOf(which).unavailable.store(nullptr);
++        return true;
++    };
++    check(Stamina, {{0x1cb6451, kSigStaminaLoad}, {0x1cb64a2, kSigStaminaClamp}});
++    check(Stealth, {{0x1d214b7, kSigStealthMenu}, {0x1d214f9, kSigSilentMenu}, {0x1e554db, kSigStealthUse},
++                    {0x1e552c3, kSigSilentUse}});
++    if (check(KeepEchoes, {{0x17d2b82, kSigBloodMark}})) {
++        Patch& p = ExtraOf(KeepEchoes).patch;
++        p.code = true;
++        for (std::size_t i = 0; i < sizeof(kBloodMarkOriginal); ++i)
++            p.bytes.push_back({Slot(kBloodMarkSite) + i, kBloodMarkOriginal[i], kBloodMarkOriginal[i]});
++        p.snapped = true;
++    }
++    check(NoDurability, {{kChangeDurability, kSigDurability}, {0x18d265d, kSigDurabilityClamp},
++                         {0x1cfbacb, kSigDurabilityCall}});
++    // Params only, read and checked in the world; the consumables need the isConsume test.
++    check(GunRange, {});
++    check(EchoMultiplier, {});
++    check(Consumables, {{0x18d0dc0, kSigConsume}});
++    const bool stats = Matches(0x1cfc567, kSigInsight) && Matches(0x1cfc6a4, kSigEchoes);
++    g_echoes_unavailable.store(stats ? nullptr : "engine code differs from the verified 1.09 image");
++    if (!stats) std::printf("Cheats: add echoes / insight unavailable: engine code differs\n");
++}
 +} // namespace
 +
 +bool Install(std::uint8_t* image, std::size_t size) {
++    g_image = image;
++    g_image_size = size;
++    g_slide = reinterpret_cast<std::uint64_t>(image);
++    bool vials = true;
 +    for (const Signature& s : kSignatures) {
-+        const std::size_t at = s.bn - kPreferredGuestSlide;
-+        if (at > size || s.bytes.size() > size - at || std::memcmp(image + at, s.bytes.data(), s.bytes.size())) {
++        if (!Matches(s.bn, s.bytes)) {
 +            for (Cheat& c : g_cheats) {
 +                c.unavailable.store("engine code differs from the verified 1.09 image");
 +                std::printf("Cheats: %s unavailable: engine code differs at 0x%llx\n", c.name,
 +                            static_cast<unsigned long long>(s.bn));
++                c.disabled = true;
 +            }
-+            return false;
++            vials = false;
++            break;
 +        }
 +    }
-+    g_slide = reinterpret_cast<std::uint64_t>(image);
++    if (vials)
++        for (Cheat& c : g_cheats) c.unavailable.store(nullptr);
++    InstallExtras();
 +    g_installed = true;
-+    for (Cheat& c : g_cheats) c.unavailable.store(nullptr);
-+    return true;
++    bool any = vials || !g_echoes_unavailable.load();
++    for (Extra& e : g_extras) {
++        if (e.unavailable.load()) e.disabled = true;
++        any = any || !e.disabled;
++    }
++    g_image = nullptr; // the checks are done; nothing reads the image through it again
++    return any;
 +}
 +
-+const char* Unavailable(Which which) { return g_cheats[which == Bullets ? 1 : 0].unavailable.load(); }
++const char* Unavailable(Which which) {
++    if (which == Vials || which == Bullets) return g_cheats[which == Bullets ? 1 : 0].unavailable.load();
++    if (which == Echoes) return g_echoes_unavailable.load();
++    if (which >= WhichCount) return kNotVerified;
++    return ExtraOf(which).unavailable.load();
++}
++
++void AddEchoes(int amount) {
++    if (amount > 0 && g_installed && !g_echoes_unavailable.load()) g_add_echoes.fetch_add(std::min(amount, int(kEchoCap)));
++}
++void AddInsight(int amount) {
++    if (amount > 0 && g_installed && !g_echoes_unavailable.load()) g_add_insight.fetch_add(std::min(amount, int(kInsightCap)));
++}
 +
 +void Tick() {
 +    if (!g_installed) return;
 +    const auto& s = BbSettings::Get();
 +    const int settings[2] = {s.cheat_vials.load(std::memory_order_relaxed), s.cheat_bullets.load(std::memory_order_relaxed)};
-+    bool idle = true;
++    bool idle = g_add_echoes.load(std::memory_order_relaxed) <= 0 && g_add_insight.load(std::memory_order_relaxed) <= 0;
 +    for (int i = 0; i < 2; ++i) {
 +        const Cheat& c = g_cheats[i];
 +        idle = idle && (c.disabled || (settings[i] == BbSettings::CheatOff && c.pending == BbSettings::CheatOff &&
 +                                       c.active == BbSettings::CheatOff));
 +    }
-+    if (idle) return; // both off: nothing read, nothing called
++    for (const Extra& e : g_extras) idle = idle && (e.disabled || (!SettingOf(e, s) && !e.pending && !e.active));
++    if (idle) return; // all off: nothing read, nothing called
 +    const auto now = Clock::now();
 +    for (int i = 0; i < 2; ++i) {
 +        Cheat& c = g_cheats[i];
@@ -4875,6 +6319,14 @@ index 0000000..f72e238
 +        if (value != c.pending) { c.pending = value; c.pending_since = now; }
 +        if (c.pending != c.active && now - c.pending_since >= kDebounce) Switch(c, c.pending);
 +    }
++    for (Extra& e : g_extras) {
++        if (e.disabled) continue;
++        const int value = SettingOf(e, s);
++        if (value != e.pending) { e.pending = value; e.pending_since = now; }
++        if (e.pending != e.active && now - e.pending_since >= kDebounce) Switch(e, e.pending);
++    }
++    Extra& stamina = ExtraOf(Stamina);
++    if (g_settled && !stamina.disabled && stamina.active) RefillStamina();
 +    if (now < g_check) return;
 +    g_check = now + kInterval;
 +    // Acts only with a character loaded and in the world (not at the title, not while loading).
@@ -4886,717 +6338,116 @@ index 0000000..f72e238
 +        g_record = record;
 +        g_block = block;
 +        g_since = now;
++        g_settled = false;
 +        for (Cheat& c : g_cheats) c.floor = -1;
++        if (!present) {
++            const bool echoes = g_add_echoes.exchange(0) > 0, insight = g_add_insight.exchange(0) > 0;
++            if (echoes || insight) std::printf("Cheats: no character in the world; Blood Echoes / Insight not added\n");
++        }
 +        return;
 +    }
 +    if (now - g_since < kSettle) return;
++    g_settled = true;
 +    for (Cheat& c : g_cheats) {
 +        if (!c.disabled && c.active != BbSettings::CheatOff) Run(c, record + kEquipGameData);
 +    }
++    for (Extra& e : g_extras) {
++        if (!e.disabled && e.active) Run(e, record);
++    }
++    if (!g_echoes_unavailable.load()) AddStats();
 +}
 +} // namespace BbEngine::Cheats
 diff --git a/gpu/shim/engine/cheats.h b/gpu/shim/engine/cheats.h
 new file mode 100644
-index 0000000..88d3e93
+index 0000000..1c7cb8b
 --- /dev/null
 +++ b/gpu/shim/engine/cheats.h
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,26 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
-+// Live cheats: Blood Vials and Quicksilver Bullets, infinite or kept at an amount (bbport.ini
-+// cheat_vials / cheat_bullets, the in-game overlay). See cheats.cpp.
++// Live cheats switched from bbport.ini (cheat_*) and the in-game overlay: Blood Vials and
++// Quicksilver Bullets (infinite or kept at an amount), stamina, stealth, firearm range, keeping
++// Blood Echoes on death, an echo multiplier, weapon durability, consumables; and the overlay's
++// add Blood Echoes / Insight actions. See cheats.cpp.
 +#pragma once
 +#include <cstddef>
 +#include <cstdint>
 +
 +namespace BbEngine::Cheats {
-+enum Which : int { Vials = 0, Bullets = 1 };
++enum Which : int {
++    Vials = 0, Bullets, Stamina, Stealth, GunRange, KeepEchoes, EchoMultiplier, NoDurability, Consumables,
++    Echoes, ///< the overlay's add Blood Echoes / Insight actions
++    WhichCount
++};
 +/// Checks the game code the cheats rely on. Loader start, after the executable is verified.
 +bool Install(std::uint8_t* image, std::size_t size);
 +/// The main thread's frame hook (change_appearance.cpp FrameHook): the only place cheats act.
 +void Tick();
 +/// Why a cheat cannot run, for the overlay (static text), or nullptr while it can.
 +const char* Unavailable(Which which);
++/// Queues Blood Echoes / Insight to add; applied by Tick with a character in the world, clamped to
++/// the game's limits (999,999,999 echoes, 99 insight). Any thread.
++void AddEchoes(int amount);
++void AddInsight(int amount);
 +} // namespace BbEngine::Cheats
-diff --git a/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
+diff --git a/src/respawn_patch.h b/src/respawn_patch.h
 new file mode 100644
-index 0000000..6d3784d
+index 0000000..c73a186
 --- /dev/null
-+++ b/gpu/shadps4/video_core/renderer_vulkan/occlusion_model.h
-@@ -0,0 +1,68 @@
-+// SPDX-License-Identifier: GPL-2.0-or-later
-+// bbport: the PS4 depth-block counter model behind real occlusion results (vk_occlusion.h),
-+// without Vulkan, so the arithmetic is unit-tested (tests/test_occlusion.cpp).
-+#pragma once
++++ b/src/respawn_patch.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later
++ * Removes the 12-second minimum loading time after the player dies (CUSA03173 1.09).
++ * Ported from AwesomeObserver/bloodborne_pc 149972b, "Remove death-triggered minimum
++ * loading delay on Windows" (Evgeniy Doronin).
++ *
++ * The player-death flag initializes a minimum loading countdown to 12.0 seconds; the
++ * world-loading step waits on it independently of character readiness. Only that
++ * initialization changes (vmovss xmm0,[12.0] -> vxorps xmm0,xmm0,xmm0 + nop, 8 bytes).
++ * The character readiness branch, the resource-loading steps and the 15-second multiplayer
++ * timeout stay intact. Nothing is written unless the whole init block, the readiness branch
++ * and the 12.0 constant match byte for byte. Offsets refer to the loaded image, not to
++ * SELF/ELF file offsets. BB_RESPAWN_DELAY_FIX=0 keeps the original delay (probe.c).
++ */
++#ifndef BB_RESPAWN_PATCH_H
++#define BB_RESPAWN_PATCH_H
 +
-+#include <algorithm>
-+#include <cstdint>
++#include <stddef.h>
++#include <string.h>
 +
-+namespace OcclusionModel {
++enum { BB_RESPAWN_UNSUPPORTED, BB_RESPAWN_APPLIED, BB_RESPAWN_ALREADY_APPLIED };
 +
-+constexpr std::uint64_t ValidBit = 1ull << 63;
-+/// What a draw without a usable result adds: plainly visible (the old fake's step), so any
-+/// begin/end pair around it reads visible, never occluded.
-+constexpr std::uint64_t Unmeasured = 0x2FFFFFFull;
-+constexpr std::uint32_t MaxPipes = 16;
-+
-+/// DB `k`'s share of the running total: the shares sum to `total` and each grows with it, so the
-+/// game's sum of end - begin over the DBs is exactly the samples in between.
-+constexpr std::uint64_t Share(std::uint64_t total, std::uint32_t pipes, std::uint32_t k) {
-+    return total / pipes + (k < total % pipes ? 1 : 0);
-+}
-+
-+enum class Block : std::uint32_t { Occluded = 0, Visible = 1, NotReady = 2 };
-+
-+/// A Gnm block ({begin, end} per DB, 16 bytes apart) as the game reads it.
-+inline Block ReadBlock(const std::uint64_t* words, std::uint32_t pipes) {
-+    std::uint64_t sum = 0;
-+    for (std::uint32_t k = 0; k < pipes; ++k) {
-+        const std::uint64_t b = words[2 * k], e = words[2 * k + 1];
-+        if (!(b & ValidBit) || !(e & ValidBit)) {
-+            return Block::NotReady;
-+        }
-+        sum += (e & ~ValidBit) - (b & ~ValidBit);
-+    }
-+    return sum != 0 ? Block::Visible : Block::Occluded;
-+}
-+
-+/// 16.16 factor taking samples counted at `width` x `height` (reduced scene targets) back to the
-+/// PS4's 1920x1080; never below 1.
-+constexpr std::uint32_t SampleScale(std::uint32_t width, std::uint32_t height) {
-+    const std::uint64_t pixels = std::uint64_t(width) * height;
-+    constexpr std::uint64_t native = 1920ull * 1080ull;
-+    if (pixels == 0 || pixels >= native) {
-+        return 1u << 16;
-+    }
-+    return static_cast<std::uint32_t>((native << 16) / pixels);
-+}
-+
-+/// One query's contribution: unavailable reads visible; an imprecise device's nonzero result
-+/// (0/1 on NVIDIA) reads plainly visible; a precise count is scaled, rounding up.
-+constexpr std::uint64_t Samples(std::uint64_t value, bool available, bool precise,
-+                                std::uint32_t scale) {
-+    if (!available) {
-+        return Unmeasured;
-+    }
-+    if (!precise) {
-+        return value ? Unmeasured : 0;
-+    }
-+    return std::max<std::uint64_t>((value * scale + 0xFFFF) >> 16, value);
-+}
-+
-+/// SET_PREDICATION's outcome for the draws up to its clear: unknown draws (a wrong "occluded"
-+/// makes geometry vanish), else draw when the visibility is the one asked for.
-+constexpr bool PredicatedDraws(bool visible, bool unknown, bool draw_if_visible) {
-+    return unknown || visible == draw_if_visible;
-+}
-+
-+} // namespace OcclusionModel
-diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
-new file mode 100644
-index 0000000..d85d112
---- /dev/null
-+++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.cpp
-@@ -0,0 +1,426 @@
-+// SPDX-License-Identifier: GPL-2.0-or-later
-+// bbport: real occlusion query results (vk_occlusion.h). Design after droogie/bbhost b68ed17.
-+
-+#include <algorithm>
-+#include <array>
-+#include <chrono>
-+#include <cstdio>
-+#include <cstdlib>
-+#include <cstring>
-+
-+#include "bbport_toggles.h"
-+#include "core/memory.h"
-+#include "video_core/renderer_vulkan/occlusion_model.h"
-+#include "video_core/renderer_vulkan/scene_resolution.h"
-+#include "video_core/renderer_vulkan/vk_instance.h"
-+#include "video_core/renderer_vulkan/vk_occlusion.h"
-+#include "video_core/renderer_vulkan/vk_rasterizer.h"
-+#include "video_core/renderer_vulkan/vk_scheduler.h"
-+
-+extern "C" void runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
-+
-+namespace Vulkan {
-+
-+namespace {
-+using OcclusionModel::MaxPipes;
-+using OcclusionModel::Share;
-+using OcclusionModel::Unmeasured;
-+using OcclusionModel::ValidBit;
-+
-+u64 EnvU64(const char* name, u64 fallback) {
-+    const char* env = std::getenv(name);
-+    return env && *env ? std::strtoull(env, nullptr, 10) : fallback;
-+}
-+
-+/// Reads guest memory through the runtime's backing view: no page protection (a read fault on
-+/// this thread would wait for the GPU thread), zeroes where nothing is mapped.
-+void ReadGuest(VAddr address, void* data, u64 size) {
-+    runtime_memory_read_backing(address, data, size);
-+}
-+
-+/// A Gnm block as the game reads it now.
-+OcclusionModel::Block ReadBlock(VAddr block, u32 pipes) {
-+    std::array<u64, 2 * MaxPipes> words{};
-+    ReadGuest(block, words.data(), 16ull * pipes);
-+    return OcclusionModel::ReadBlock(words.data(), pipes);
-+}
-+} // namespace
-+
-+struct Occlusion::Shared {
-+    /// The resolver's state and the pool's life (the destructor takes it too).
-+    std::mutex mutex;
-+    /// Only the queue: the recording side never waits for a resolve in progress.
-+    std::mutex queue_mutex;
-+    bool alive = true;
-+    vk::Device device;
-+    vk::QueryPool pool;
-+    Rasterizer* rasterizer = nullptr;
-+    bool precise = false;
-+    u64 max_lag = 3;
-+
-+    struct Pending {
-+        u64 tick;   ///< the submission holding the dump (and every query before it)
-+        VAddr va;
-+        u64 frame;
-+        u64 serial;
-+        u64 first;  ///< the interval's first query, as a running count
-+        u32 count;  ///< its queries
-+        u32 pipes;
-+        bool poison; ///< a draw in the interval got no query
++static inline int bb_patch_respawn_delay(unsigned char *image, size_t size) {
++    static const unsigned char init[] = {
++        0x41,0x80,0xbc,0x24,0xe4,0x00,0x00,0x00,0x00, /* cmp byte [r12+0xe4],0 */
++        0x74,0x0a,                                    /* je +10 */
++        0xc5,0xfa,0x10,0x05,0x5c,0xf5,0xfe,0x02,      /* vmovss xmm0,[rip+..] (12.0) */
++        0xeb,0x04,0xc5,0xf8,0x57,0xc0,                /* jmp +4; vxorps xmm0,xmm0,xmm0 */
++        0xc4,0xc1,0x7a,0x11,0x84,0x24,0x78,0x02,0x00,0x00, /* countdown = xmm0 */
++        0x41,0xc7,0x84,0x24,0x7c,0x02,0x00,0x00,0x00,0x00,0x70,0x41 /* 15 s timeout */
 +    };
-+    std::deque<Pending> pending; ///< under queue_mutex
-+    std::vector<Pending> ready;  ///< taken from it by the resolver
-+    /// Per query: the sample scale of its draw (16.16; reduced scene targets), written by the
-+    /// recording side before the dump is queued under the mutex.
-+    std::array<u32, PoolSize> scale{};
-+    std::atomic<u64> released{0};        ///< queries read and reset (reusable)
-+    std::atomic<u64> resolved_serial{0}; ///< dumps processed, in order
-+
-+    u64 total = 0; ///< the DBs' running count
-+    /// What we last wrote at each dump address: our own value may be overwritten (a block the
-+    /// game reuses), anything else that is not zero is not ours to write over.
-+    std::unordered_map<VAddr, u64> written;
-+    std::vector<u64> results;
-+
-+    // Statistics (BB_FRAME_STATS), under the mutex except the recording side's atomics.
-+    u64 dumps = 0, queries = 0, unavailable = 0, poisoned = 0, visible = 0, occluded = 0;
-+    u64 late = 0, foreign = 0, unbacked = 0, written_dumps = 0;
-+    std::atomic<u64> pool_full{0}, pred_sets{0}, pred_resolved{0}, pred_skipped{0},
-+        pred_drawn{0};
-+    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
-+    u64 window_frames = 0, window_draws = 0;
-+    std::array<u64, 12> last{};
-+
-+    void Resolve(u64 tick);
-+    void Process(const Pending& dump);
-+    void WriteBlock(const Pending& dump);
-+    void Report();
-+};
-+
-+bool Occlusion::Wanted() {
-+    static const bool on = [] {
-+        const char* env = std::getenv("BB_OCCLUSION");
-+        return !(env && env[0] == '0');
-+    }();
-+    return on;
-+}
-+
-+Occlusion::Occlusion(const Instance& instance_, Scheduler& scheduler_, Rasterizer& rasterizer_)
-+    : instance{instance_}, scheduler{scheduler_}, rasterizer{rasterizer_} {}
-+
-+std::unique_ptr<Occlusion> Occlusion::Create(const Instance& instance, Scheduler& scheduler,
-+                                             Rasterizer& rasterizer) {
-+    if (!Wanted()) {
-+        std::printf("Occlusion: off (BB_OCCLUSION=0): every query the game makes reads visible\n");
-+        return nullptr;
-+    }
-+    std::unique_ptr<Occlusion> occlusion{new Occlusion(instance, scheduler, rasterizer)};
-+    if (!occlusion->Init()) {
-+        return nullptr;
-+    }
-+    return occlusion;
-+}
-+
-+bool Occlusion::Init() {
-+    // Results are read and the queries reset on the CPU once the GPU is past them: no reset
-+    // commands outside render passes, no waits.
-+    if (!instance.IsHostQueryResetSupported()) {
-+        std::printf("Occlusion: off - the device has no host query reset; every query the game "
-+                    "makes reads visible, as before\n");
-+        return false;
-+    }
-+    const vk::Device device = instance.GetDevice();
-+    const vk::QueryPoolCreateInfo info = {
-+        .queryType = vk::QueryType::eOcclusion,
-+        .queryCount = PoolSize,
++    static const unsigned char ready[] = {
++        0xc5,0xf8,0x2e,0xca,0x0f,0x87,0x53,0x06,0x00,0x00,
++        0x45,0x84,0xff,0x0f,0x84,0x4a,0x06,0x00,0x00
 +    };
-+    const auto [result, pool] = device.createQueryPool(info);
-+    if (result != vk::Result::eSuccess) {
-+        std::printf("Occlusion: off - no query pool (%s); every query the game makes reads "
-+                    "visible, as before\n",
-+                    vk::to_string(result).c_str());
-+        return false;
++    static const unsigned char twelve[] = {0x00,0x00,0x40,0x41};
++    static const unsigned char zero[] = {0xc5,0xf8,0x57,0xc0,0x0f,0x1f,0x40,0x00};
++    const size_t init_at = 0x1938b59, instruction_at = 0x1938b64;
++    const size_t twelve_at = 0x49280c8, ready_at = 0x193a581;
++    unsigned char expected[sizeof(init)];
++    if (!image || size < twelve_at + sizeof(twelve)) return BB_RESPAWN_UNSUPPORTED;
++    if (memcmp(image + twelve_at, twelve, sizeof(twelve)) ||
++        memcmp(image + ready_at, ready, sizeof(ready))) return BB_RESPAWN_UNSUPPORTED;
++    if (!memcmp(image + init_at, init, sizeof(init))) {
++        memcpy(image + instruction_at, zero, sizeof(zero));
++        return BB_RESPAWN_APPLIED;
 +    }
-+    device.resetQueryPool(pool, 0, PoolSize);
-+    precise = instance.IsOcclusionQueryPreciseSupported();
-+    cap = static_cast<u32>(std::clamp<u64>(EnvU64("BB_OCCLUSION_CAP", 64), 1, 1024));
-+    shared = std::make_shared<Shared>();
-+    shared->device = device;
-+    shared->pool = pool;
-+    shared->rasterizer = &rasterizer;
-+    shared->precise = precise;
-+    shared->max_lag = EnvU64("BB_OCCLUSION_MAX_LAG", 3);
-+    shared->results.resize(2ull * PoolSize);
-+    std::printf("Occlusion: real sample counts (BB_OCCLUSION=0: the old always-visible fake) - a "
-+                "query on each of the %u draws after a block's begin, results written when the "
-+                "GPU has run them (at most %llu frames late), %s; SET_PREDICATION skips only on "
-+                "known results\n",
-+                cap, static_cast<unsigned long long>(shared->max_lag),
-+                precise ? "precise" : "not precise (a nonzero count reads plainly visible)");
-+    return true;
++    memcpy(expected, init, sizeof(init));
++    memcpy(expected + (instruction_at - init_at), zero, sizeof(zero));
++    return !memcmp(image + init_at, expected, sizeof(expected)) ?
++        BB_RESPAWN_ALREADY_APPLIED : BB_RESPAWN_UNSUPPORTED;
 +}
 +
-+Occlusion::~Occlusion() {
-+    if (!shared) {
-+        return;
-+    }
-+    // A resolve still queued on the scheduler's thread finds it gone and does nothing.
-+    std::scoped_lock lk{shared->mutex};
-+    shared->alive = false;
-+    shared->device.destroyQueryPool(shared->pool);
-+    shared->pool = nullptr;
-+}
-+
-+Occlusion::DumpTask Occlusion::MakeDump(VAddr va, u32 num_pipes) const noexcept {
-+    return {va, issued, BbStats::submit_done_calls.load(std::memory_order_relaxed),
-+            std::clamp(num_pipes, 1u, MaxPipes), 0};
-+}
-+
-+void Occlusion::Dump(const DumpTask& task) {
-+    // Every draw stage A decoded since the last dump got a query, or the interval reads visible:
-+    // a draw dropped before recording (pipeline still compiling, filtered, failed) must not
-+    // count as occluded.
-+    const bool poison =
-+        !interval.open || task.issued - interval.issued_at != interval.queries;
-+    const u64 tick = scheduler.CurrentTick();
-+    const u64 serial = ++dump_serial;
-+    if (block_serial.size() > 65536) {
-+        block_serial.clear();
-+    }
-+    block_serial[task.va & ~15ull] = serial;
-+    {
-+        std::scoped_lock lk{shared->queue_mutex};
-+        shared->pending.push_back({tick, task.va, task.frame, serial, interval.first,
-+                                   interval.queries, task.pipes, poison});
-+    }
-+    if (tick != registered_tick) {
-+        // One resolve per submission, on the scheduler's thread once the GPU has finished it.
-+        registered_tick = tick;
-+        scheduler.DeferPriorityOperation(
-+            [shared = shared, tick] { shared->Resolve(tick); });
-+    }
-+    // Gnm's begin dump (+0 of a 16-byte cell) measures the draws up to its end dump; after any
-+    // other dump only the next draw is measured (droogie's caps), the rest read visible.
-+    interval = {true, (task.va & 15) == 0 ? cap : 1u, 0, query_head, task.issued};
-+    pipes = task.pipes;
-+}
-+
-+Occlusion::DrawQuery Occlusion::AllocateQuery(u32 scene_size) noexcept {
-+    if (query_head - shared->released.load(std::memory_order_acquire) >= PoolSize) {
-+        shared->pool_full.fetch_add(1, std::memory_order_relaxed);
-+        return {}; // unmeasured: reads visible
-+    }
-+    const u32 index = static_cast<u32>(query_head % PoolSize);
-+    // A pass into the reduced scene targets counts fewer samples than the PS4's 1920x1080; the
-+    // count is scaled back so a threshold the game applies means the same.
-+    u32 scale = 1u << 16;
-+    if (scene_size) {
-+        const auto size = SceneResolution::Unpack(scene_size);
-+        scale = OcclusionModel::SampleScale(size.width, size.height);
-+    }
-+    shared->scale[index] = scale;
-+    ++query_head;
-+    ++interval.queries;
-+    return {shared->pool, index,
-+            precise ? vk::QueryControlFlags{vk::QueryControlFlagBits::ePrecise}
-+                    : vk::QueryControlFlags{}};
-+}
-+
-+void Occlusion::SetPredication(const PredicationTask& task) {
-+    shared->pred_sets.fetch_add(1, std::memory_order_relaxed);
-+    if (task.op == 0) {
-+        pred_mode = PredMode::None;
-+        pred_visible = pred_unknown = false;
-+        return;
-+    }
-+    if (task.op != 1) {
-+        pred_mode = PredMode::Draw; // primitive-count predication (streamout): not emulated
-+        return;
-+    }
-+    if (!(task.cont && pred_mode != PredMode::None)) {
-+        pred_visible = pred_unknown = false;
-+    }
-+    // Known only when every dump into the block has been resolved: then the block holds this
-+    // use's result (or is not ready). Results come a frame late, so mostly unknown: drawn.
-+    const auto it = block_serial.find(task.block);
-+    if (it != block_serial.end() &&
-+        shared->resolved_serial.load(std::memory_order_acquire) >= it->second) {
-+        const auto state = ReadBlock(task.block, pipes);
-+        pred_unknown |= state == OcclusionModel::Block::NotReady;
-+        pred_visible |= state == OcclusionModel::Block::Visible;
-+        if (state != OcclusionModel::Block::NotReady) {
-+            shared->pred_resolved.fetch_add(1, std::memory_order_relaxed);
-+        }
-+    } else {
-+        pred_unknown = true;
-+    }
-+    // A wrong "occluded" makes geometry vanish: unknown draws.
-+    const bool draw =
-+        OcclusionModel::PredicatedDraws(pred_visible, pred_unknown, task.draw_if_visible != 0);
-+    pred_mode = draw ? PredMode::Draw : PredMode::Skip;
-+}
-+
-+bool Occlusion::SkipPredicated() noexcept {
-+    if (pred_mode == PredMode::Skip) {
-+        shared->pred_skipped.fetch_add(1, std::memory_order_relaxed);
-+        return true;
-+    }
-+    shared->pred_drawn.fetch_add(1, std::memory_order_relaxed);
-+    return false;
-+}
-+
-+void Occlusion::Shared::Resolve(u64 tick) {
-+    std::scoped_lock lk{mutex};
-+    if (!alive) {
-+        return;
-+    }
-+    ready.clear();
-+    {
-+        std::scoped_lock queue{queue_mutex};
-+        while (!pending.empty() && pending.front().tick <= tick) {
-+            ready.push_back(pending.front());
-+            pending.pop_front();
-+        }
-+    }
-+    for (const Pending& dump : ready) {
-+        Process(dump);
-+    }
-+    Report();
-+}
-+
-+void Occlusion::Shared::Process(const Pending& dump) {
-+    ++dumps;
-+    bool bad = dump.poison;
-+    u64 samples = 0;
-+    if (dump.count) {
-+        queries += dump.count;
-+        // The ring may wrap inside the interval: at most two ranges.
-+        const u32 first = static_cast<u32>(dump.first % PoolSize);
-+        const u32 head_part = std::min<u32>(dump.count, PoolSize - first);
-+        const std::array<std::pair<u32, u32>, 2> ranges{{{first, head_part},
-+                                                         {0, dump.count - head_part}}};
-+        for (const auto& [start, count] : ranges) {
-+            if (!count) {
-+                continue;
-+            }
-+            // Without waiting: the GPU has finished the submission. A query a driver did not
-+            // resolve (AMD while the window is unfocused, KyoPS4x #220) reads visible.
-+            const vk::Result result = device.getQueryPoolResults(
-+                pool, start, count, 16ull * count, results.data(), 16,
-+                vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
-+            for (u32 i = 0; i < count; ++i) {
-+                const bool failed = result != vk::Result::eSuccess &&
-+                                    result != vk::Result::eNotReady;
-+                const bool available = !failed && results[2 * i + 1] != 0;
-+                unavailable += available ? 0 : 1;
-+                // Imprecise results may be 0/1 (NVIDIA): one sample read as "nearly hidden" was
-+                // the likeliest cause of KyoPS4x #219's black world.
-+                samples += OcclusionModel::Samples(results[2 * i], available, precise,
-+                                                   scale[start + i]);
-+            }
-+            device.resetQueryPool(pool, start, count);
-+        }
-+        released.fetch_add(dump.count, std::memory_order_release);
-+    }
-+    if (bad) {
-+        ++poisoned;
-+        samples += Unmeasured;
-+    }
-+    total += samples;
-+    if (BbStats::submit_done_calls.load(std::memory_order_relaxed) - dump.frame > max_lag) {
-+        // The game may have freed and reused the block by now: left as it is (not ready).
-+        ++late;
-+    } else {
-+        WriteBlock(dump);
-+    }
-+    resolved_serial.store(dump.serial, std::memory_order_release);
-+}
-+
-+void Occlusion::Shared::WriteBlock(const Pending& dump) {
-+    std::array<u64, 2 * MaxPipes> words{};
-+    const u64 extent = 16ull * (dump.pipes - 1) + 8;
-+    ReadGuest(dump.va, words.data(), extent);
-+    const auto own = written.find(dump.va);
-+    for (u32 k = 0; k < dump.pipes; ++k) {
-+        const u64 word = words[2 * k];
-+        const bool ours = own != written.end() &&
-+                          word == (Share(own->second, dump.pipes, k) | ValidBit);
-+        if (word != 0 && !ours) {
-+            ++foreign;
-+            return; // neither the game's zeroes nor our last value: not a query block now
-+        }
-+    }
-+    auto* memory = Core::Memory::Instance();
-+    for (u32 k = 0; k < dump.pipes; ++k) {
-+        const u64 value = Share(total, dump.pipes, k) | ValidBit;
-+        auto* address = reinterpret_cast<u8*>(dump.va + 16ull * k);
-+        // Through the backing view (no protection fault on this thread; fails rather than
-+        // writing where nothing is mapped any more).
-+        if (!memory->TryWriteBacking(address, &value, sizeof(value))) {
-+            ++unbacked;
-+            return;
-+        }
-+        rasterizer->NoteLateCommandWrite(dump.va + 16ull * k, &value, sizeof(value));
-+    }
-+    ++written_dumps;
-+    if (written.size() > 262144) {
-+        written.clear();
-+    }
-+    written[dump.va] = total;
-+    // The end dump of a Gnm block (+8): how the pair reads, for the statistics.
-+    if ((dump.va & 15) == 8) {
-+        if (const auto begin = written.find(dump.va - 8); begin != written.end()) {
-+            ++(total != begin->second ? visible : occluded);
-+        }
-+    }
-+}
-+
-+void Occlusion::Shared::Report() {
-+    static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
-+    if (!stats) {
-+        return;
-+    }
-+    const auto now = std::chrono::steady_clock::now();
-+    const double seconds = std::chrono::duration<double>(now - window).count();
-+    if (seconds < 5.0) {
-+        return;
-+    }
-+    window = now;
-+    const u64 frames_now = BbStats::submit_done_calls.load(std::memory_order_relaxed);
-+    const u64 draws_now = BbStats::draws.load(std::memory_order_relaxed);
-+    const std::array<u64, 12> now_counts{
-+        dumps,
-+        queries,
-+        visible,
-+        occluded,
-+        poisoned,
-+        unavailable,
-+        late + foreign + unbacked,
-+        pool_full.load(std::memory_order_relaxed),
-+        pred_sets.load(std::memory_order_relaxed),
-+        pred_resolved.load(std::memory_order_relaxed),
-+        pred_skipped.load(std::memory_order_relaxed),
-+        pred_drawn.load(std::memory_order_relaxed),
-+    };
-+    std::array<double, 12> d{};
-+    const double frames = std::max<double>(1.0, double(frames_now - window_frames));
-+    for (size_t i = 0; i < d.size(); ++i) {
-+        d[i] = double(now_counts[i] - last[i]) / frames;
-+    }
-+    const double pairs = d[2] + d[3];
-+    std::printf("Occlusion per frame: %.1f dumps, %.1f queries, objects %.1f visible / %.1f "
-+                "culled (%.0f%%), %.1f intervals read visible (%.1f queries unavailable), %.1f "
-+                "dumps not written (totals: late %llu, reused memory %llu, unmapped %llu), pool "
-+                "full %.1f; SET_PREDICATION %.1f (%.1f known), predicated draws %.1f skipped / "
-+                "%.1f drawn; %.0f draws/frame\n",
-+                d[0], d[1], d[2], d[3], pairs > 0 ? 100.0 * d[3] / pairs : 0.0, d[4], d[5], d[6],
-+                (unsigned long long)late, (unsigned long long)foreign,
-+                (unsigned long long)unbacked, d[7], d[8], d[9], d[10], d[11],
-+                double(draws_now - window_draws) / frames);
-+    std::fflush(stdout);
-+    last = now_counts;
-+    window_frames = frames_now;
-+    window_draws = draws_now;
-+}
-+
-+} // namespace Vulkan
-diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
-new file mode 100644
-index 0000000..39e9668
---- /dev/null
-+++ b/gpu/shadps4/video_core/renderer_vulkan/vk_occlusion.h
-@@ -0,0 +1,168 @@
-+// SPDX-License-Identifier: GPL-2.0-or-later
-+// bbport: real occlusion query results (BB_OCCLUSION, default on; 0: the old fake counts).
-+//
-+// The design follows droogie/bbhost commit b68ed17 ("occlusion: the game's own GPU occlusion
-+// culling works", Kyoskii, after KyoPS4x #217-#220), adapted to this renderer: there the GPU
-+// writes the counts with a compute shader before the labels; here labels are written when the
-+// work is recorded (not when the GPU has run it), so the counts are written by the CPU once the
-+// GPU has finished the submission holding the queries, a frame or so after the game asked.
-+//
-+// The PS4 model: each depth block (DB, 8 on a base PS4) keeps a running count of the samples
-+// that passed; an EVENT_WRITE of PIXEL_PIPE_STAT_DUMP / ZPASS_DONE stores every DB's count, bit
-+// 63 (valid) set, at the dump's address + 16 * db. Gnm's query block is {begin, end} per DB:
-+// the game zeroes it, dumps at +0 before the draws it measures and at +8 after, and reads the
-+// sum of end - begin. Bloodborne tests its culling proxies that way (GX GetData, CPU readback,
-+// ~180 blocks a frame in a dense view: when the answer is "no samples" it does not submit the
-+// object's draws at all) and also predicates draws on blocks with SET_PREDICATION (Gnm's
-+// setZPassPredicationEnable, called from the game at 0x216a79e and 0x2250745).
-+//
-+// Here:
-+// - Stage A counts the draws it decodes and hands each dump to the recording side in order
-+//   (RunInOrder). Draws recorded after a dump get a Vulkan occlusion query each, begun and ended
-+//   around the vkCmdDraw itself (never across a render pass): up to BB_OCCLUSION_CAP (64) after
-+//   a block's begin dump, one after any other dump. An interval holding a draw without a query
-+//   (past the cap, filtered, its pipeline not ready yet, failed) reads plainly visible.
-+// - At the dump the interval's queries and the block address are queued; once the GPU has
-+//   finished that submission (Scheduler::DeferPriorityOperation, its own thread) the results
-+//   are read without waiting, a running total is kept like the DBs keep theirs, and the dump
-+//   writes it, split over the DBs with the valid bit, into the game's memory. Never a stall:
-+//   no thread waits for a query, the game polls its blocks and takes "not ready" as it would on
-+//   the PS4 (it keeps the object drawn and asks again).
-+// - Fail-safe towards "visible": an unavailable query, a missing query, an imprecise device's
-+//   nonzero result, all add a large count. A dump more than BB_OCCLUSION_MAX_LAG frames late,
-+//   or over memory that holds neither the game's zeroes nor our own last value (freed and
-+//   reused), is not written: the block stays not ready.
-+// - SET_PREDICATION: the draws between a ZPASS set and its clear are skipped only when every
-+//   dump into the block has been resolved and the block reads occluded; otherwise they are
-+//   drawn. The results arrive a frame late, so this rarely skips: GPU conditional rendering
-+//   would need a render pass split per predicated object to copy the result on the GPU and
-+//   would still record every draw (the CPU cost this port is bound by), so it is not done.
-+//   BB_FRAME_STATS counts how many predicated draws there are.
-+//
-+// Latency: an object coming into view is drawn again once the game has read the result of a
-+// query it issued while the object was hidden: one or two frames later than on the PS4 (the
-+// game itself already lags a frame there). Popping at the edge of occluders is the visible risk.
-+
-+#pragma once
-+
-+#include <atomic>
-+#include <deque>
-+#include <memory>
-+#include <mutex>
-+#include <unordered_map>
-+#include <vector>
-+
-+#include "common/types.h"
-+#include "video_core/renderer_vulkan/vk_common.h"
-+
-+namespace Vulkan {
-+
-+class Instance;
-+class Scheduler;
-+class Rasterizer;
-+
-+class Occlusion {
-+public:
-+    /// BB_OCCLUSION (default on). Off: the fake counts and SET_PREDICATION ignored, as before.
-+    static bool Wanted();
-+
-+    /// Null when the device cannot do it (no host query reset, no query pool): the fake then.
-+    static std::unique_ptr<Occlusion> Create(const Instance& instance, Scheduler& scheduler,
-+                                             Rasterizer& rasterizer);
-+    ~Occlusion();
-+
-+    /// Stage A (GPU command thread): a draw packet decoded (direct or indirect).
-+    void NoteIssued() noexcept {
-+        ++issued;
-+    }
-+
-+    /// Stage A: what a dump hands to the recording side.
-+    struct DumpTask {
-+        VAddr va;
-+        u64 issued;    ///< draws decoded before the dump
-+        u64 frame;     ///< sceGnmSubmitDone calls when it was decoded
-+        u32 pipes;     ///< DBs the dump writes
-+        u32 pad;
-+    };
-+    DumpTask MakeDump(VAddr va, u32 num_pipes) const noexcept;
-+
-+    struct PredicationTask {
-+        VAddr block;
-+        u32 op; ///< 0 clear, 1 ZPASS, 2 primitive count (not emulated: drawn)
-+        u8 draw_if_visible;
-+        u8 cont;
-+        u16 pad;
-+    };
-+    /// Stage A: whether a SET_PREDICATION region is open (the submission end clears it).
-+    bool predication_open = false;
-+
-+    /// Dumps were queued into the submission `current_tick` (not sent to the GPU yet). Read on
-+    /// stage A with the draw pipe drained.
-+    bool HasUnsubmittedDumps(u64 current_tick) const noexcept {
-+        return registered_tick == current_tick;
-+    }
-+
-+    // ---- the recording side (stage B, or stage A after a drain), in stream order ----
-+    void Dump(const DumpTask& task);
-+    void SetPredication(const PredicationTask& task);
-+    /// At the start of a draw's recording: true when SET_PREDICATION skips it.
-+    bool SkipDraw() noexcept {
-+        if (pred_mode == PredMode::None) [[likely]] {
-+            return false;
-+        }
-+        return SkipPredicated();
-+    }
-+    /// The query to wrap the draw about to be recorded in (pool null: none). `scene_size`: the
-+    /// draw's push_data.scene_size (reduced scene targets count fewer samples).
-+    struct DrawQuery {
-+        vk::QueryPool pool{};
-+        u32 index = 0;
-+        vk::QueryControlFlags flags{};
-+    };
-+    DrawQuery BeginDraw(u32 scene_size) noexcept {
-+        if (!interval.open || interval.queries >= interval.cap) [[likely]] {
-+            return {};
-+        }
-+        return AllocateQuery(scene_size);
-+    }
-+
-+private:
-+    Occlusion(const Instance& instance, Scheduler& scheduler, Rasterizer& rasterizer);
-+    bool Init();
-+    DrawQuery AllocateQuery(u32 scene_size) noexcept;
-+    bool SkipPredicated() noexcept;
-+
-+    static constexpr u32 PoolSize = 16384;
-+
-+    const Instance& instance;
-+    Scheduler& scheduler;
-+    Rasterizer& rasterizer;
-+    bool precise = false;
-+    u32 cap = 64;
-+    u32 pipes = 8; ///< DBs of the last dump (a Neo has 16)
-+
-+    // Stage A.
-+    u64 issued = 0;
-+
-+    // The recording side.
-+    struct Interval {
-+        bool open = false;
-+        u32 cap = 0;
-+        u32 queries = 0;    ///< queries handed out in it (one per measured draw)
-+        u64 first = 0;      ///< its first query, as a running count
-+        u64 issued_at = 0;  ///< stage A's draw count at the dump that opened it
-+    } interval;
-+    u64 query_head = 0;     ///< queries handed out so far
-+    u64 dump_serial = 0;
-+    u64 registered_tick = ~0ull;
-+    std::unordered_map<VAddr, u64> block_serial; ///< a block's last dump (either half)
-+    enum class PredMode : u8 { None, Skip, Draw };
-+    PredMode pred_mode = PredMode::None;
-+    bool pred_visible = false, pred_unknown = false; ///< CONTINUE chains OR blocks together
-+
-+    /// What the resolver thread and the recording side share.
-+    struct Shared;
-+    std::shared_ptr<Shared> shared;
-+};
-+
-+} // namespace Vulkan
++#endif
 diff --git a/tests/test_occlusion.cpp b/tests/test_occlusion.cpp
 new file mode 100644
 index 0000000..bb3b29a
