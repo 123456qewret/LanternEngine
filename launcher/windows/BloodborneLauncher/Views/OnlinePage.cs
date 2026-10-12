@@ -19,8 +19,12 @@ namespace BloodborneLauncher.Views
         private readonly StackPanel _results = new();
         private readonly Button _test;
 
+        /// <summary>Where shadNet accounts are made (the public server's).</summary>
+        private const string ShadnetSignUp = "https://shadnet.shadps4.net";
+
         public OnlinePage() : base("Online",
-            "Messages, bloodstains and ghosts come from the game server; sign-in, bells and summons go through a shadNet server. " +
+            "1. Make a shadNet account (button below). 2. Turn on Play online. 3. Enter that account's name and password. " +
+            "4. In the game, choose online at the title screen: The Hunter's Dream's welcome message means you are online. " +
             "Everyone needs game version 1.09 and the same servers.")
         {
             // Earlier versions defaulted the game server to the shadNet Web API, which has none.
@@ -53,20 +57,26 @@ namespace BloodborneLauncher.Views
             IniText(SymbolRegular.Link24, "Web API", "Empty: the server with port 31315", "http://srv.shadps4.net:31315", "online_webapi");
 
             Group("Account");
-            Body.Children.Add(Text("Your account name on that server (up to 16 characters), not an email address. The password is " +
-                                   "kept with the launcher's settings on this PC, not in bbport.ini.", "Faint"));
+            Body.Children.Add(Text("A shadNet account (shadPS4's co-op server), not a Hunter's Dream one: The Hunter's Dream " +
+                                   "needs no account here, its messages and bloodstains come on their own (its accounts are for the " +
+                                   "bbhost launcher). Enter the account name you registered (up to 16 characters), not an email " +
+                                   "address. The password is kept encrypted for your Windows user, not in bbport.ini.", "Faint"));
+            Add(Card(SymbolRegular.PersonAdd24, "No shadNet account yet?", "Register one on shadPS4's site, then enter it below",
+                SmallButton("Create account", SymbolRegular.Open24, (_, _) =>
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(ShadnetSignUp) { UseShellExecute = true })),
+                out _));
             IniText(SymbolRegular.Person24, "Account name", null, "Account name", "online_username");
             var password = new PasswordBox
             {
                 Width = 300,
                 PlaceholderText = "Password",
                 PlaceholderEnabled = true,
-                Password = S.Str("online_password"),
+                Password = S.OnlinePassword,
                 VerticalAlignment = VerticalAlignment.Center,
             };
             password.PasswordChanged += (_, _) =>
             {
-                S.Set("online_password", password.Password);
+                S.OnlinePassword = password.Password;
                 Ws.SaveSoon();
             };
             Add(Card(SymbolRegular.Password24, "Password", null, password, out _));
@@ -74,7 +84,9 @@ namespace BloodborneLauncher.Views
             Group("Connection");
             ToggleRow(SymbolRegular.Router24, "UPnP", "Open the port on the router automatically; turn off with a VPN",
                 () => Ini.Get("online_upnp") == "1", v => Ini.Set("online_upnp", v ? "1" : "0"));
-            IniText(SymbolRegular.Router24, "Local P2P port", "Empty picks one automatically", "Automatic", "online_p2p_port", 120);
+            IniText(SymbolRegular.Router24, "Local P2P port", "Empty: 3658, the PS4's (UPnP opens it on the router)", "3658", "online_p2p_port", 120);
+            ComboRow(SymbolRegular.Timer24, "Summon sign timeout", "How long a sign you touched waits for its host before giving up",
+                Choices.SignTimeout, () => Ini.Get("online_sign_timeout", "30"), v => Ini.Set("online_sign_timeout", v));
             _test = SmallButton("Test", SymbolRegular.PlayCircle24, async (_, _) => await TestAsync());
             Add(Card(SymbolRegular.Pulse24, "Test the connection", "Checks the game server, the co-op server and its Web API", _test, out _));
             Body.Children.Add(_results);
@@ -101,13 +113,21 @@ namespace BloodborneLauncher.Views
             _test.Content = "Testing…";
             try
             {
-                foreach (var r in await Online.CheckAsync(Online.GameServer(Ini.Get("online_game_api")), $"{host}:{port}", webapi))
+                var results = await Online.CheckAsync(Online.GameServer(Ini.Get("online_game_api")), $"{host}:{port}", webapi);
+                var p2p = int.TryParse(Ini.Get("online_p2p_port").Trim(), out var pinned) && pinned is > 0 and < 65536 ? pinned : 3658;
+                if (await Online.CheckUdpAsync(host, int.TryParse(port, out var tcp) ? tcp : 31313,
+                        Ini.Get("online_username").Trim(), p2p) is { } udp)
+                    results.Add(udp);
+                else
+                    Ws.Log("Co-op UDP: no answer outside the game (the server answers signed-in players); summons are the real test", LogLevel.Info);
+                foreach (var r in results)
                 {
+                    var said = r.Ok ? (r.Detail.Length > 0 ? $"Reachable: {r.Detail}" : "Reachable") : $"Not reachable ({r.Detail})";
                     var card = Card(r.Ok ? SymbolRegular.CheckmarkCircle24 : SymbolRegular.ErrorCircle24,
-                        $"{r.Name}: {r.Address}", r.Ok ? "Reachable" : $"Not reachable ({r.Detail})", null, out _);
+                        $"{r.Name}: {r.Address}", said, null, out _);
                     card.ShowIcon = true;
                     card.Icon.SetResourceReference(ForegroundProperty, r.Ok ? "GoodTextBrush" : "DangerTextBrush");
-                    SetHint(card.Hint, r.Ok ? "Reachable" : $"Not reachable ({r.Detail})");
+                    SetHint(card.Hint, said);
                     card.Margin = new Thickness(24, 0, 0, 4);
                     _results.Children.Add(card);
                     Ws.Log($"{r.Name} {r.Address}: {(r.Ok ? "reachable" : "not reachable " + r.Detail)}", r.Ok ? LogLevel.Good : LogLevel.Warn);

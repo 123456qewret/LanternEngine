@@ -366,7 +366,7 @@ namespace BloodborneLauncher
                 var problem = ini.Get("online_host").Trim().Length == 0 ? "Enter the server before playing online."
                     : ini.Get("online_username").Contains('@') ? "The account name is the name registered on the server, not an email address."
                     : ini.Get("online_username").Trim().Length == 0 ? "Enter the account name before playing online."
-                    : s.Str("online_password").Length == 0 ? "Enter the account password before playing online."
+                    : s.OnlinePassword.Length == 0 ? "Enter the shadNet account password before playing online."
                     : null;
                 if (problem != null)
                 {

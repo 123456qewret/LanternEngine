@@ -114,7 +114,7 @@ namespace BloodborneLauncher.Core
                 env["BB_MODS_ENABLED"] = "0";
             }
             // The account password never goes to bbport.ini; the engine takes it from here.
-            if (s.Str("online_password").Length > 0) env["BB_SHADNET_PASSWORD"] = s.Str("online_password");
+            if (s.OnlinePassword is { Length: > 0 } password) env["BB_SHADNET_PASSWORD"] = password;
 
             foreach (var item in s.Str("extra_env").Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {

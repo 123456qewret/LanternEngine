@@ -92,6 +92,13 @@ namespace BloodborneLauncher.Core
                     // from earlier versions saved the old default (off), so it is switched on once.
                     if (Updater.CurrentBeta > 0 && !saved.ContainsKey("occlusion_default_on"))
                         _data["exp_occlusion"] = true;
+                    // Older launchers kept the shadNet password in plain text: encrypted now, and
+                    // the file rewritten without it.
+                    if (Str("online_password") is { Length: > 0 } plain && !Secret.IsProtected(plain))
+                    {
+                        OnlinePassword = plain;
+                        Save();
+                    }
                 }
             }
             catch
@@ -105,6 +112,13 @@ namespace BloodborneLauncher.Core
             Directory.CreateDirectory(Paths.ConfigDir);
             File.WriteAllText(Paths.ConfigFile,
                 _data.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        /// <summary>The shadNet password, kept encrypted for this Windows user (Core/Secret.cs).</summary>
+        public string OnlinePassword
+        {
+            get => Secret.Unprotect(Str("online_password"));
+            set => Set("online_password", Secret.Protect(value));
         }
 
         public string Str(string key)

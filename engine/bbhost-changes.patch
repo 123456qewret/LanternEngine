@@ -7487,7 +7487,7 @@ index cf4fbd8..8bde180 100644
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..73cb615 100644
+index c0e8a94..51b0871 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -7506,7 +7506,25 @@ index c0e8a94..73cb615 100644
  
  /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
  /// menu label, default (the game's own behaviour).
-@@ -50,6 +57,28 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
+@@ -33,11 +40,13 @@ struct Effect {
+     bool default_on;
+ };
+ inline constexpr Effect Effects[] = {
+-    {"effect_chromatic_aberration", "Chromatic aberration", "Хроматическая аберрация", true},
+-    {"effect_dof", "Depth of field (DoF)", "Глубина резкости (DoF)", true},
+-    {"effect_motion_blur", "Motion blur", "Размытие в движении", true},
++    // bbport: chromatic aberration, depth of field, motion blur and the game's own anti-aliasing start
++    // off - a clearer picture, and the upscalers anti-alias.
++    {"effect_chromatic_aberration", "Chromatic aberration", "Хроматическая аберрация", false},
++    {"effect_dof", "Depth of field (DoF)", "Глубина резкости (DoF)", false},
++    {"effect_motion_blur", "Motion blur", "Размытие в движении", false},
+     {"effect_ssao", "Ambient occlusion (SSAO)", "Затенение SSAO", true},
+-    {"effect_game_aa", "Game's own anti-aliasing", "Собственное сглаживание игры", true},
++    {"effect_game_aa", "Game's own anti-aliasing", "Собственное сглаживание игры", false},
+     {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
+     {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
+     {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
+@@ -50,6 +59,28 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
  inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
  inline constexpr int OutputCount = 10;
  inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
@@ -7535,7 +7553,7 @@ index c0e8a94..73cb615 100644
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -80,11 +109,35 @@ struct Values {
+@@ -80,11 +111,35 @@ struct Values {
      std::atomic<bool> change_appearance{false}, rebirth{false}; // next launch, engine features
      std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
      std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
@@ -7571,7 +7589,7 @@ index c0e8a94..73cb615 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +153,12 @@ struct Values {
+@@ -100,10 +155,12 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
@@ -7666,18 +7684,19 @@ index f176cc1..cee7291 100644
      bool IsPatchShaders() { return false; }
      bool IsPipelineCacheArchived() { return false; }
 diff --git a/gpu/shim/engine/change_appearance.cpp b/gpu/shim/engine/change_appearance.cpp
-index eff8103..c663792 100644
+index eff8103..ccfda8f 100644
 --- a/gpu/shim/engine/change_appearance.cpp
 +++ b/gpu/shim/engine/change_appearance.cpp
-@@ -9,6 +9,7 @@
+@@ -9,6 +9,8 @@
  #include "rebirth.h"
  #include "menu_memory.h"
  #include "graphics.h"
 +#include "cheats.h"
++#include "online_fixes.h"
  #include "bbport_settings.h"
  #include "bbport_platform.h"
  #include <atomic>
-@@ -159,6 +160,7 @@ std::int64_t __attribute__((sysv_abi)) FrameHook(std::uint64_t, const std::uint6
+@@ -159,6 +161,7 @@ std::int64_t __attribute__((sysv_abi)) FrameHook(std::uint64_t, const std::uint6
      BbInput::Tick();
      Camera::Tick();
      Widescreen::Tick();
@@ -7685,7 +7704,7 @@ index eff8103..c663792 100644
      return 0; // The established FPS++ implementation still runs, byte for byte.
  }
  } // namespace
-@@ -168,7 +170,9 @@ void Install(std::uint8_t* image, std::size_t size) {
+@@ -168,7 +171,9 @@ void Install(std::uint8_t* image, std::size_t size) {
      const char* identity = std::getenv("BB_ENGINE_IMAGE_SHA256");
      const bool mirror = asset && *asset;
      const bool respec=std::getenv("BB_REBIRTH_ASSET");
@@ -7696,7 +7715,7 @@ index eff8103..c663792 100644
      if (!identity || std::strcmp(identity, "071df19c8880086d97182dbc057bc8cb37badaca57d9112683836b24a0444c0a")) {
          Log("mirror disabled: executable identity was not verified"); return;
      }
-@@ -180,7 +184,6 @@ void Install(std::uint8_t* image, std::size_t size) {
+@@ -180,7 +185,6 @@ void Install(std::uint8_t* image, std::size_t size) {
          !std::filesystem::equivalent(resolved, std::filesystem::path(original) / "dvdroot_ps4/map/mapstudio/m21_00_00_00.msb.dcx", error))) {
          Log("mirror disabled: a user mod owns the Dream layout");
          asset = nullptr;
@@ -7704,13 +7723,14 @@ index eff8103..c663792 100644
      }
      Hook hooks[2];
      if (!Prepare(hooks[0], image, size, 0x1c1cce0, kStepPrologue, StepHook) ||
-@@ -204,7 +207,8 @@ void Install(std::uint8_t* image, std::size_t size) {
+@@ -204,7 +208,9 @@ void Install(std::uint8_t* image, std::size_t size) {
          Log("mirror disabled: native editor memory budget differs");
      }
      const bool rebirth=menus && Rebirth::Install(image,size);
 -    if (!g_frame_on && !camera && !rebirth && !menus && !graphics && !wide && !input) {
 +    const bool cheats=Cheats::Install(image,size);
-+    if (!g_frame_on && !camera && !rebirth && !menus && !graphics && !wide && !input && !cheats) {
++    const bool online=OnlineFixes::Install(image,size);
++    if (!g_frame_on && !camera && !rebirth && !menus && !graphics && !wide && !input && !cheats && !online) {
          for (auto& hook : hooks) Discard(hook);
          Log("engine enhancements disabled: no compatible feature could be prepared"); return;
      }
@@ -8190,6 +8210,22 @@ index f475c39..8b574fb 100644
          if (BbOverlay::HandleEvent(event)) {
              continue;
          }
+diff --git a/licenses/BBHOST-PORTS.md b/licenses/BBHOST-PORTS.md
+index ba73307..dbaf849 100644
+--- a/licenses/BBHOST-PORTS.md
++++ b/licenses/BBHOST-PORTS.md
+@@ -53,3 +53,11 @@ vertical FOV and uses this port's output size. Vulkan UI composition adds unifor
+ centered fitting, including stencil masks and window-space vertices. The existing
+ presenter already letterboxes. The existing renderer, temporal resources,
+ synchronization, shader and motion-vector paths remain in use.
++
++Online and picture sources:
++https://github.com/droogie/bbhost/tree/566184a74f071166299bb656c4af479e5bbe2771
++
++engine/online_fixes.cpp adapts src/engine/chara_id.cpp (the login's character step clears the
++empty-list character id) and src/engine/sos_signs.cpp (the summon sign timeout). The fog control in
++engine/graphics.cpp adapts the fog table upload hook of src/engine/graphics_patch.cpp, redirected
++through the function's padding; the play-log redirect in scripts/online.py follows src/hle/http.cpp.
 diff --git a/licenses/SHADNET-PORT.md b/licenses/SHADNET-PORT.md
 index 4fbbd84..7f7cce2 100644
 --- a/licenses/SHADNET-PORT.md
@@ -8205,10 +8241,10 @@ index 4fbbd84..7f7cce2 100644
  `third_party/httplib/httplib.h` and `third_party/wepoll/` retain their embedded
  third-party license notices.
 diff --git a/scripts/online.py b/scripts/online.py
-index fdbf8c4..e36395e 100644
+index fdbf8c4..d0e1ad9 100644
 --- a/scripts/online.py
 +++ b/scripts/online.py
-@@ -6,6 +6,17 @@ from pathlib import Path
+@@ -6,8 +6,22 @@ from pathlib import Path
  from urllib.parse import urlsplit
  
  GAME_STATUS_ORIGIN = 'https://ss4.scej-network.jp:20443'
@@ -8223,10 +8259,16 @@ index fdbf8c4..e36395e 100644
 +# P2P (co-op) port when none is set: the PS4's own, so UPnP and firewall rules stay the same
 +# between games.
 +DEFAULT_P2P_PORT = 3658
++# Seconds a summon sign entry waits for its host (the game's 180; engine/online_fixes.cpp).
++DEFAULT_SIGN_TIMEOUT = 30
  ONLINE_ENV = ('BB_ONLINE', 'BB_SHADNET_SERVER', 'BB_SHADNET_WEBAPI', 'BB_SHADNET_NPID',
-               'BB_SHADNET_PASSWORD', 'BB_SHADNET_TOKEN', 'BB_UPNP', 'SHADPS4_P2P_PORT', 'SHADPS4_HTTP_HOST_OVERRIDES_JSON')
+-              'BB_SHADNET_PASSWORD', 'BB_SHADNET_TOKEN', 'BB_UPNP', 'SHADPS4_P2P_PORT', 'SHADPS4_HTTP_HOST_OVERRIDES_JSON')
++              'BB_SHADNET_PASSWORD', 'BB_SHADNET_TOKEN', 'BB_UPNP', 'SHADPS4_P2P_PORT', 'SHADPS4_HTTP_HOST_OVERRIDES_JSON',
++              'BB_SIGN_TIMEOUT')
  
-@@ -19,6 +30,19 @@ def read_settings(path):
+ def read_settings(path):
+     settings = {}
+@@ -19,6 +33,19 @@ def read_settings(path):
              settings[key.strip()] = value.strip()
      return settings
  
@@ -8246,7 +8288,7 @@ index fdbf8c4..e36395e 100644
  def http_base(text):
      if not text or any(ord(c) < 32 for c in text):
          raise ValueError('Online requires an explicit WebAPI / game API URL')
-@@ -41,8 +65,8 @@ def configure_online(settings, data, env):
+@@ -41,8 +68,8 @@ def configure_online(settings, data, env):
      port = int(settings.get('online_port', ''))
      if not 1 <= port <= 65535:
          raise ValueError('shadNet TCP port must be between 1 and 65535')
@@ -8257,7 +8299,7 @@ index fdbf8c4..e36395e 100644
      if urlsplit(webapi).path not in ('', '/') or urlsplit(game_api).path not in ('', '/'):
          raise ValueError('WebAPI and game API require a server origin without an extra path')
      username = settings.get('online_username', '')
-@@ -58,13 +82,13 @@ def configure_online(settings, data, env):
+@@ -58,13 +85,15 @@ def configure_online(settings, data, env):
      destination = Path(data) / 'network/host_overrides.json'
      destination.parent.mkdir(parents=True, exist_ok=True)
      temporary = destination.with_suffix('.json.tmp')
@@ -8274,6 +8316,8 @@ index fdbf8c4..e36395e 100644
 -    if p2p:
 -        env['SHADPS4_P2P_PORT'] = str(int(p2p))
 +    env['SHADPS4_P2P_PORT'] = str(int(p2p)) if p2p else str(DEFAULT_P2P_PORT)
++    timeout = settings.get('online_sign_timeout', '').strip()
++    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
 index ea6daf1..3991891 100644
@@ -9399,7 +9443,7 @@ index 75eca24..45ea45d 100644
  void runtime_memory_set_guest_chunk_whole(int) {}
  int runtime_memory_vma_info(uintptr_t, int*, int*, uintptr_t*) { std::abort(); }
 diff --git a/tests/test_online.py b/tests/test_online.py
-index bf0d998..0861977 100644
+index bf0d998..cc87b81 100644
 --- a/tests/test_online.py
 +++ b/tests/test_online.py
 @@ -6,7 +6,12 @@ import tempfile
@@ -9408,7 +9452,7 @@ index bf0d998..0861977 100644
  sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 -from online import configure_online, http_base, ONLINE_ENV, GAME_STATUS_ORIGIN
 +from online import (configure_online, game_server, http_base, ONLINE_ENV, GAME_STATUS_ORIGIN, HUNTERS_DREAM,
-+                    PLAY_LOG_HOSTS, DEFAULT_P2P_PORT)
++                    PLAY_LOG_HOSTS, DEFAULT_P2P_PORT, DEFAULT_SIGN_TIMEOUT)
 +
 +
 +def play_logs(host):
@@ -9431,7 +9475,7 @@ index bf0d998..0861977 100644
          self.assertEqual(self.env['BB_SHADNET_SERVER'], 'server.example:31413')
          self.assertEqual(self.env['BB_SHADNET_WEBAPI'], 'http://server.example:31415')
          self.assertEqual(self.env['SHADPS4_P2P_PORT'], '32000')
-@@ -41,17 +47,27 @@ class OnlineProfileTests(unittest.TestCase):
+@@ -41,17 +47,34 @@ class OnlineProfileTests(unittest.TestCase):
          self.assertNotIn('synthetic-test-password', path.read_text())
          self.assertFalse(path.with_suffix('.json.tmp').exists())
  
@@ -9443,6 +9487,13 @@ index bf0d998..0861977 100644
 -        self.assertNotIn('SHADPS4_P2P_PORT', self.env)
 +        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:HUNTERS_DREAM, **play_logs('thehuntersdream.com')})
 +        self.assertEqual(self.env['SHADPS4_P2P_PORT'], str(DEFAULT_P2P_PORT))
++        self.assertEqual(self.env['BB_SIGN_TIMEOUT'], str(DEFAULT_SIGN_TIMEOUT))
++
++    def test_sign_timeout_setting(self):
++        for typed, expected in (('0', '0'), ('180', '180'), ('9999', '600'), ('abc', '30'), ('', '30')):
++            self.settings['online_sign_timeout'] = typed
++            configure_online(self.settings, self.data, self.env)
++            self.assertEqual(self.env['BB_SIGN_TIMEOUT'], expected)
 +
 +    def test_game_server_bare_name_and_old_shadnet_default(self):
 +        self.assertEqual(game_server('thehuntersdream.com'), 'https://thehuntersdream.com')
@@ -14952,6 +15003,101 @@ index 0000000..1c7cb8b
 +void AddEchoes(int amount);
 +void AddInsight(int amount);
 +} // namespace BbEngine::Cheats
+diff --git a/gpu/shim/engine/online_fixes.cpp b/gpu/shim/engine/online_fixes.cpp
+new file mode 100644
+index 0000000..af312b6
+--- /dev/null
++++ b/gpu/shim/engine/online_fixes.cpp
+@@ -0,0 +1,89 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Game-side fixes for playing online, adapted from droogie/bbhost src/engine/chara_id.cpp and
++// src/engine/sos_signs.cpp (566184a); see licenses/BBHOST-PORTS.md. Binary Ninja addresses
++// (image base 0x400000), as the other engine hooks.
++#include "online_fixes.h"
++#include "engine_state.h"
++#include <algorithm>
++#include <atomic>
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++
++namespace BbEngine::OnlineFixes {
++namespace {
++#define GUEST_ABI __attribute__((sysv_abi))
++
++// The network login's character step (0x2043ee0): when GameDataMan's local PlayerGameData
++// (0x593b130 -> +8) holds a character id at +0x690 it hands it to FrpgNetMan and goes on; when it
++// holds 0 it asks the server (sync_chara_id), whose first PublishCharacterIdList entry the
++// callback stores with no check - 0x8000000000000000 when the list is empty, as The Hunter's Dream
++// answered until 2026-10-10. The save keeps that, and the character never asks again: so it is
++// put back to 0 before the step runs, and the step asks.
++constexpr std::uint64_t kCharaStep = 0x2043ee0;
++// push rbp; mov rbp, rsp; push r15; push r14; push r12; push rbx; sub rsp, 0x40
++const std::uint8_t kCharaStepPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
++                                           0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x40};
++constexpr std::uint64_t kGameDataMan = 0x593b130;
++constexpr std::size_t kPlayerGameData = 0x8, kCharaId = 0x690;
++constexpr std::uint64_t kUnset = 0x8000000000000000ull;
++
++// A summon sign entry waits this long for its host (.rodata 180.0f, read by the sign code).
++constexpr std::uint64_t kSignTimeout = 0x4d27a5c;
++constexpr float kGameSignTimeout = 180.0f;
++
++std::uint8_t* g_game_data_man = nullptr;  // the pointer's slot in the image
++std::atomic<int> g_cleared{0};
++
++template<typename T> bool Read(std::uint64_t at, T* out) {
++    return at && host_read_safe(reinterpret_cast<void*>(at), out, sizeof(T));
++}
++
++GUEST_ABI std::int64_t CharaStep(std::uint64_t, const std::uint64_t*) {
++    std::uint64_t man = 0, data = 0, id = 0;
++    if (!Read(reinterpret_cast<std::uint64_t>(g_game_data_man), &man) || !Read(man + kPlayerGameData, &data) ||
++        !Read(data + kCharaId, &id)) return 0;
++    if (id == kUnset) {
++        const std::uint64_t none = 0;
++        std::memcpy(reinterpret_cast<void*>(data + kCharaId), &none, sizeof(none));
++        if (g_cleared.fetch_add(1) < 4)
++            host_log("online: this character has no id from the server (0x8000000000000000); asking for one");
++    } else if (id) {
++        static std::atomic<bool> said{false};
++        if (!said.exchange(true)) host_log("online: character id %llu", static_cast<unsigned long long>(id));
++    }
++    return 0;  // the step runs as it would
++}
++} // namespace
++
++bool Install(std::uint8_t* image, std::size_t size) {
++    const char* online = std::getenv("BB_ONLINE");
++    if (!online || online[0] != '1') return false;
++    bool any = false;
++    Hook hook;
++    if (Prepare(hook, image, size, kCharaStep - 0x400000, kCharaStepPrologue, CharaStep)) {
++        g_game_data_man = image + (kGameDataMan - 0x400000);
++        Commit(std::span{&hook, 1});
++        any = true;
++    } else {
++        host_log("online: character id fix off: the login's character step differs from 1.09");
++    }
++    // BB_SIGN_TIMEOUT seconds (the launcher's; 0 or unset keeps the game's 180).
++    const char* timeout = std::getenv("BB_SIGN_TIMEOUT");
++    const long seconds = timeout ? std::strtol(timeout, nullptr, 10) : 0;
++    const std::size_t at = kSignTimeout - 0x400000;
++    float value = 0;
++    if (seconds > 0 && seconds != 180 && size >= at + sizeof(value)) {
++        std::memcpy(&value, image + at, sizeof(value));
++        if (value == kGameSignTimeout) {
++            value = static_cast<float>(std::min(seconds, 600L));
++            std::memcpy(image + at, &value, sizeof(value));  // the loader still owns the image writable
++            host_log("online: a summon sign entry times out after %.0f s (the game's 180)", value);
++            any = true;
++        } else {
++            host_log("online: sign timeout left alone: 0x%llx is not 180.0", static_cast<unsigned long long>(kSignTimeout));
++        }
++    }
++    return any;
++}
++} // namespace BbEngine::OnlineFixes
 diff --git a/gpu/shim/engine/online_fixes.h b/gpu/shim/engine/online_fixes.h
 new file mode 100644
 index 0000000..1b042f6

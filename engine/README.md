@@ -34,6 +34,7 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Write faults at the end of a GPU mapping handled (they ended the game, 0xC0000005); unclaimed faults on guest pages get access back; crash dump next to the log; display loss and unknown formats no longer exit | |
 | Picture tuning live: the picture hooks are always installed and the switch gates them per call; wider ranges, typed values | `graphics_controls` |
 | HDR native mode: the game's UI at its own brightness and colours (sRGB to DCI-P3) | `hdr_ui_brightness`, `hdr_ui_color` |
+| Online: characters given no id (0x8000000000000000) ask again; summon sign timeout (droogie bbhost 566184a) | `BB_SIGN_TIMEOUT` (`online_sign_timeout`) |
 | Online co-op: shadNet server framing for signaling, UPnP port mapping (Supermedo 004d2c37), P2P port 3658 by default, play logs to the game server | `SHADPS4_P2P_PORT` |
 | In-game PC Colour page (brightness, contrast, saturation, hue from the game's own tone map) and a fog slider on PC Graphics, live; the same in the launcher's Picture tuning | `graphics_brightness`, `graphics_contrast`, `graphics_hue`, `graphics_fog` |
 | HDR output: HDR10 or scRGB swapchain with paper white, peak and highlight boost; native mode takes highlight brightness from the game's scene (a gain map), expand mode from the SDR picture | `hdr`, `hdr_mode`, `hdr_paper_white`, `hdr_peak`, `hdr_boost` |

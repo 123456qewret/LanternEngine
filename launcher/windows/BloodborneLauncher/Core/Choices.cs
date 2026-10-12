@@ -35,13 +35,15 @@
             new("3840 × 2160", "3840x2160"),
         };
 
+        // Chromatic aberration, depth of field, motion blur and the game's own anti-aliasing start off:
+        // the picture is clearer without them, and the upscalers anti-alias (players' advice).
         public static readonly Effect[] Effects =
         {
-            new("effect_chromatic_aberration", "Chromatic aberration", true),
-            new("effect_dof", "Depth of field", true),
-            new("effect_motion_blur", "Motion blur", true),
+            new("effect_chromatic_aberration", "Chromatic aberration", false),
+            new("effect_dof", "Depth of field", false),
+            new("effect_motion_blur", "Motion blur", false),
             new("effect_ssao", "Ambient occlusion (SSAO)", true),
-            new("effect_game_aa", "Game's own anti-aliasing", true),
+            new("effect_game_aa", "Game's own anti-aliasing", false),
             new("effect_dynamic_shadows", "Shadows from dynamic lights", true),
             new("effect_ssr", "Screen-space reflections", false, "Not in the original game"),
             new("skip_intro", "Skip intro videos", false),
@@ -138,6 +140,11 @@
         public static readonly Choice[] HdrUiColor =
         {
             new("Exact (sRGB)", "0"), new("In between", "0.5"), new("Vivid (default)", "1"),
+        };
+
+        public static readonly Choice[] SignTimeout =
+        {
+            new("30 seconds (default)", "30"), new("60 seconds", "60"), new("The game's own (180 seconds)", "0"),
         };
 
         public static readonly Choice[] LiveResolution =
