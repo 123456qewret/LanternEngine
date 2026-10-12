@@ -130,6 +130,16 @@
             new("Off", "0"), new("Low (default)", "0.25"), new("Medium", "0.5"), new("High", "1"),
         };
 
+        public static readonly Choice[] HdrUiBrightness =
+        {
+            new("Dimmer", "0.75"), new("Paper white (default)", "1"), new("Brighter", "1.25"), new("Much brighter", "1.5"),
+        };
+
+        public static readonly Choice[] HdrUiColor =
+        {
+            new("Exact (sRGB)", "0"), new("In between", "0.5"), new("Vivid (default)", "1"),
+        };
+
         public static readonly Choice[] LiveResolution =
         {
             new("Auto (by GPU)", "auto"),

@@ -40,16 +40,16 @@ namespace BloodborneLauncher.Views
             // The engine's picture and camera controls (bbport_settings.cpp clamps the same ranges).
             Group("Picture");
             var picture = new StackPanel();
-            IniToggle(SymbolRegular.Color24, "Picture tuning", "Turns the settings below on, here and in the game's System menu (PC Graphics, PC Effects, PC Colour)", "graphics_controls");
+            IniToggle(SymbolRegular.Color24, "Picture tuning", "Turns the settings below on, live. Also in the game's System menu (PC Graphics, PC Effects, PC Colour) and the Insert menu", "graphics_controls");
             IniToggle(SymbolRegular.CircleHalfFill24, "Vignette", null, "graphics_vignette", picture);
-            IniSlider(SymbolRegular.DarkTheme24, "Ambient occlusion strength", 0, 2, "graphics_ao_strength", picture);
-            IniSlider(SymbolRegular.WeatherSunny24, "Shadow resolution", 1, 3, "graphics_shadow_scale", picture);
-            IniSlider(SymbolRegular.Lightbulb24, "Bloom", 0, 1, "graphics_bloom", picture);
-            IniSlider(SymbolRegular.Color24, "Saturation", 0, 2, "graphics_saturation", picture);
-            IniSlider(SymbolRegular.BrightnessHigh24, "Brightness", 0.5, 1.5, "graphics_brightness", picture);
-            IniSlider(SymbolRegular.DarkTheme24, "Contrast", 0.95, 1.05, "graphics_contrast", picture, step: 0.01);
-            IniSlider(SymbolRegular.Color24, "Hue", -20, 20, "graphics_hue", picture, step: 1, fallback: 0);
-            IniSlider(SymbolRegular.WeatherFog24, "Fog", 0, 1, "graphics_fog", picture);
+            IniSlider(SymbolRegular.DarkTheme24, "Ambient occlusion strength", 0, 3, "graphics_ao_strength", picture);
+            IniSlider(SymbolRegular.WeatherSunny24, "Shadow distance", 0.5, 4, "graphics_shadow_scale", picture);
+            IniSlider(SymbolRegular.Lightbulb24, "Bloom", 0, 3, "graphics_bloom", picture);
+            IniSlider(SymbolRegular.Color24, "Saturation", 0, 3, "graphics_saturation", picture);
+            IniSlider(SymbolRegular.BrightnessHigh24, "Brightness", 0, 3, "graphics_brightness", picture);
+            IniSlider(SymbolRegular.DarkTheme24, "Contrast", 0.8, 1.2, "graphics_contrast", picture, step: 0.01);
+            IniSlider(SymbolRegular.Color24, "Hue", -180, 180, "graphics_hue", picture, step: 1, fallback: 0);
+            IniSlider(SymbolRegular.WeatherFog24, "Fog", 0, 3, "graphics_fog", picture);
             Body.Children.Add(picture);
 
             Group("Camera");

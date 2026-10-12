@@ -247,6 +247,237 @@ index f51df72..5db6764 100644
 +    shim/bbport_menu_i18n.cpp)
  target_include_directories(widescreen-test PRIVATE shim)
  target_compile_options(widescreen-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/network/net_upnp.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/network/net_upnp.cpp
+index a014737..b3cfd54 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/network/net_upnp.cpp
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/network/net_upnp.cpp
+@@ -17,6 +17,8 @@
+ 
+ namespace Libraries::Net {
+ 
++u16 GetP2PConfiguredPort(); // p2p_sockets.cpp
++
+ UPnPClient& UPnPClient::Instance() {
+     static UPnPClient instance;
+     return instance;
+@@ -112,6 +114,12 @@ void UPnPClient::DiscoverThread() {
+ 
+     m_done = true;
+     m_cv.notify_all();
++
++    // The P2P transport usually has its port before the router answers; when it comes up later
++    // it asks for the mapping itself (P2PTransport::Start).
++    if (const u16 port = GetP2PConfiguredPort(); port != 0) {
++        AddMapping(port);
++    }
+ }
+ 
+ void UPnPClient::AddMapping(u16 port) {
+@@ -121,6 +129,10 @@ void UPnPClient::AddMapping(u16 port) {
+     if (!m_available.load())
+         return;
+ 
++    std::lock_guard lock(m_mutex);
++    if (m_external_port.load() == port)
++        return;
++
+     const std::string port_str = std::to_string(port);
+     const int ret =
+         UPNP_AddPortMapping(m_urls.controlURL, m_data.first.servicetype, port_str.c_str(),
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp
+index 54df194..1322406 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/network/p2p_sockets.cpp
+@@ -23,6 +23,7 @@
+ #include "common/logging/log.h"
+ #include "common/singleton.h"
+ #include "core/libraries/kernel/kernel.h"
++#include "core/libraries/network/net_upnp.h"
+ #include "core/libraries/network/net_util.h"
+ #include "net.h"
+ #include "net_error.h"
+@@ -33,6 +34,10 @@ namespace {
+ 
+ constexpr u16 kSignalingVPortNbo = 0xffff;
+ constexpr size_t kVPortHeaderSize = 4;
++// The shadPS4 team's shadNet server frames its UDP (STUN) packets as a PS4 P2P datagram:
++// [0xFF][0x80 | 3][src vport FFFF][dst vport FFFF][payload]. The shadp2p server takes the
++// 4-byte vport header above; each server drops the other's frames.
++constexpr u8 kServerSignalingHeader[] = {0xFF, 0x83, 0xFF, 0xFF, 0xFF, 0xFF};
+ constexpr size_t kMaxUdpPayload = 65507;
+ constexpr size_t kMaxP2PPayload = kMaxUdpPayload - kVPortHeaderSize;
+ 
+@@ -54,6 +59,17 @@ struct QueuedPacket {
+     std::vector<u8> payload;
+ };
+ 
++// Two instances on one machine (SHADPS4_P2P_SAME_HOST=1): the server gives the peer as this
++// network's own public address, which reaches it only through a router that loops such traffic
++// back; the peer's socket is on this host, so the transport uses loopback for that address.
++bool SameHostPeers() {
++    static const bool enabled = [] {
++        const char* env = std::getenv("SHADPS4_P2P_SAME_HOST");
++        return env != nullptr && *env != '\0' && *env != '0';
++    }();
++    return enabled;
++}
++
+ int FailWith(int error) {
+     *Libraries::Kernel::__Error() = error;
+     return -1;
+@@ -217,6 +233,9 @@ public:
+         LOG_INFO(Lib_Net,
+                  "P2P transport ready: UDP physical_port={} (set SHADPS4_P2P_PORT to pin it)",
+                  physical_port);
++        // Peers reach this port from outside only through a mapping on the router (no-op until
++        // the router has been found; UPnPClient asks again then).
++        UPnPClient::Instance().AddMapping(physical_port);
+         return true;
+ #endif
+     }
+@@ -304,6 +323,13 @@ public:
+             std::memcpy(framed.data() + kVPortHeaderSize, data, len);
+         }
+ 
++        if (SameHostPeers()) {
++            const u32 own = Common::Singleton<NetUtil::NetUtilInternal>::Instance()->GetExternalIp();
++            if (own != 0 && dest_addr_nbo == own) {
++                dest_addr_nbo = htonl(INADDR_LOOPBACK);
++            }
++        }
++
+         sockaddr_in dest{};
+         dest.sin_family = AF_INET;
+         dest.sin_addr.s_addr = dest_addr_nbo;
+@@ -326,10 +352,21 @@ public:
+     }
+ 
+     int SendInternal(const void* data, u32 len, u32 dest_addr_nbo, u16 dest_port_nbo) {
++        // To the shadNet server: once in each server's framing, as which one it is is not known
++        // (it answers only its own, and the reply is taken in either).
++        if (dest_addr_nbo != 0 && dest_addr_nbo == server_addr.load(std::memory_order_relaxed) &&
++            dest_port_nbo == server_port.load(std::memory_order_relaxed)) {
++            SendServerFrame(data, len, dest_addr_nbo, dest_port_nbo);
++        }
+         return SendFrame(kSignalingVPortNbo, kSignalingVPortNbo, data, len, dest_addr_nbo,
+                          dest_port_nbo);
+     }
+ 
++    void SetServerEndpoint(u32 addr_nbo, u16 port_nbo) {
++        server_addr.store(addr_nbo, std::memory_order_relaxed);
++        server_port.store(port_nbo, std::memory_order_relaxed);
++    }
++
+     int ReceiveInternal(InternalChannel channel, void* buf, u32 len, u32* from_addr,
+                         u16* from_port) {
+         std::lock_guard lock(internal_mutex);
+@@ -357,6 +394,26 @@ public:
+ private:
+     P2PTransport() = default;
+ 
++    void SendServerFrame(const void* data, u32 len, u32 dest_addr_nbo, u16 dest_port_nbo) {
++#if defined(__linux__) || defined(_WIN32)
++        if (!Start() || !IsValidSocket(host_socket) || data == nullptr || len == 0 ||
++            len > kMaxUdpPayload - sizeof(kServerSignalingHeader)) {
++            return;
++        }
++        std::vector<u8> framed(sizeof(kServerSignalingHeader) + len);
++        std::memcpy(framed.data(), kServerSignalingHeader, sizeof(kServerSignalingHeader));
++        std::memcpy(framed.data() + sizeof(kServerSignalingHeader), data, len);
++
++        sockaddr_in dest{};
++        dest.sin_family = AF_INET;
++        dest.sin_addr.s_addr = dest_addr_nbo;
++        dest.sin_port = dest_port_nbo;
++        (void)::sendto(host_socket, reinterpret_cast<const char*>(framed.data()),
++                       static_cast<int>(framed.size()), 0,
++                       reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
++#endif
++    }
++
+     std::deque<QueuedPacket>& QueueFor(InternalChannel channel) {
+         switch (channel) {
+         case InternalChannel::Signaling:
+@@ -424,6 +481,26 @@ private:
+                 continue;
+             }
+ 
++            // The other instance of SameHostPeers(): seen at the address the server gives for
++            // it, so the game and the signaling state know one address for the peer.
++            if (SameHostPeers() && from.sin_addr.s_addr == htonl(INADDR_LOOPBACK)) {
++                const u32 own =
++                    Common::Singleton<NetUtil::NetUtilInternal>::Instance()->GetExternalIp();
++                if (own != 0) {
++                    from.sin_addr.s_addr = own;
++                }
++            }
++
++            if (static_cast<size_t>(rc) >= sizeof(kServerSignalingHeader) &&
++                std::memcmp(buffer.data(), kServerSignalingHeader,
++                            sizeof(kServerSignalingHeader)) == 0) {
++                const u8* payload = buffer.data() + sizeof(kServerSignalingHeader);
++                const size_t payload_size = static_cast<size_t>(rc) - sizeof(kServerSignalingHeader);
++                PushInternal(ClassifyInternal(payload, payload_size), from.sin_addr.s_addr,
++                             from.sin_port, payload, payload_size);
++                continue;
++            }
++
+             u16 source_vport_nbo = 0;
+             u16 dest_vport_nbo = 0;
+             std::memcpy(&source_vport_nbo, buffer.data(), sizeof(source_vport_nbo));
+@@ -462,6 +539,8 @@ private:
+ 
+     net_socket host_socket{kInvalidSocket};
+     u16 physical_port{0};
++    std::atomic<u32> server_addr{0};
++    std::atomic<u16> server_port{0};
+ 
+     std::mutex registry_mutex;
+     std::unordered_map<u16, P2PSocket*> game_sockets;
+@@ -966,6 +1045,10 @@ bool P2PTransportIsReady() {
+     return P2PTransport::Instance().IsReady();
+ }
+ 
++void SetP2PServerEndpoint(u32 addr_nbo, u16 port_nbo) {
++    P2PTransport::Instance().SetServerEndpoint(addr_nbo, port_nbo);
++}
++
+ int P2PSignalingSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port) {
+     return P2PTransport::Instance().SendInternal(data, len, dest_addr, dest_port);
+ }
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/network/sockets.h b/gpu/bbnet/vendor/shadps4/core/libraries/network/sockets.h
+index 35faa3f..3f899cd 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/network/sockets.h
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/network/sockets.h
+@@ -232,6 +232,7 @@ u16 GetP2PConfiguredPort();
+ u32 GetP2PAdvertisedAddr();
+ bool EnsureP2PTransport();
+ bool P2PTransportIsReady();
++void SetP2PServerEndpoint(u32 addr_nbo, u16 port_nbo);
+ int P2PSignalingSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port);
+ int P2PSignalingRecvFrom(void* buf, u32 len, u32* from_addr, u16* from_port);
+ int P2PControlSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port);
+diff --git a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
+index 94882fd..6d59a31 100644
+--- a/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
++++ b/gpu/bbnet/vendor/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp
+@@ -673,6 +673,7 @@ void SetMmShadNetClient(std::shared_ptr<ShadNet::ShadNetClient> client,
+     }
+     LOG_INFO(Lib_NpMatching2, "ShadNet features: matching2_enabled={}", matching2_enabled);
+     Net::UPnPClient::Instance().SetP2PFeaturesEnabled(matching2_enabled);
++    Net::SetP2PServerEndpoint(client ? server_addr : 0, client ? server_udp_port : 0);
+ 
+     if (!client) {
+         NpSignaling::Stubs::SetTransportHooks({});
+@@ -1215,6 +1216,8 @@ bool RequestSignalingInfos(std::string_view target_online_id, u32* out_addr, u16
+         g_mm.sig_replies.erase(pkt_id);
+     }
+     if (reply.first != ShadNet::ErrorType::NoError) {
++        LOG_WARNING(Lib_NpMatching2, "'{}': server error {}", target_online_id,
++                    static_cast<int>(reply.first));
+         return false;
+     }
+ 
 diff --git a/gpu/shadps4/common/thread.cpp b/gpu/shadps4/common/thread.cpp
 index e2061f7..724dbe2 100644
 --- a/gpu/shadps4/common/thread.cpp
@@ -2519,7 +2750,7 @@ index c171d07..cb211e2 100644
  concept VulkanHandleType = vk::isVulkanHandleType<T>::value;
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
-index 602cb30..2e83545 100644
+index 602cb30..9529089 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
 @@ -13,6 +13,7 @@
@@ -2543,7 +2774,7 @@ index 602cb30..2e83545 100644
  
  }
  
-@@ -172,6 +179,267 @@ Presenter::~Presenter() {
+@@ -172,6 +179,273 @@ Presenter::~Presenter() {
          device.destroyImageView(frame.image_view);
          device.destroyFence(frame.present_done);
      }
@@ -2739,10 +2970,16 @@ index 602cb30..2e83545 100644
 +        .flags = (scrgb ? HostPasses::HdrOutputPass::FlagScRgb : 0u) |
 +                 (overlay ? HostPasses::HdrOutputPass::FlagOverlay : 0u) |
 +                 (native ? HostPasses::HdrOutputPass::FlagNative : 0u) |
-+                 (debug ? HostPasses::HdrOutputPass::FlagDebug : 0u),
++                 (debug ? HostPasses::HdrOutputPass::FlagDebug : 0u) |
++                 (mode == BbSettings::HdrModeNative && !native ? HostPasses::HdrOutputPass::FlagUiFrame : 0u),
 +        .gain_offset = {float(fit.offset.x), float(fit.offset.y)},
 +        .gain_scale = {1.0f / float(std::max(fit.extent.width, 1u)),
 +                       1.0f / float(std::max(fit.extent.height, 1u))},
++        .ui_white = mode == BbSettings::HdrModeNative
++                        ? std::clamp(settings.hdr_ui_brightness.load(), BbSettings::HdrUiBrightnessMin,
++                                     BbSettings::HdrUiBrightnessMax)
++                        : 1.0f,
++        .ui_vivid = mode == BbSettings::HdrModeNative ? std::clamp(settings.hdr_ui_color.load(), 0.0f, 1.0f) : 0.0f,
 +    };
 +    // bbport: MaxCLL, the brightest the content gets: native mode's highlights reach the peak;
 +    // expand mode's SDR white goes to boost's share of it. It changes with the settings, not
@@ -2811,7 +3048,7 @@ index 602cb30..2e83545 100644
  }
  
  bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
-@@ -331,6 +599,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup&
+@@ -331,6 +605,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup&
      }
  
      Frame* frame = GetRenderFrame();
@@ -2822,7 +3059,7 @@ index 602cb30..2e83545 100644
  
      const auto frame_subresources = vk::ImageSubresourceRange{
          .aspectMask = vk::ImageAspectFlagBits::eColor,
-@@ -475,6 +747,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup&
+@@ -475,6 +753,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup&
  Frame* Presenter::PrepareBlankFrame(bool present_thread) {
      // Request a free presentation frame.
      Frame* frame = GetRenderFrame();
@@ -2830,7 +3067,7 @@ index 602cb30..2e83545 100644
  
      auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
      scheduler.EndRendering();
-@@ -601,7 +874,19 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
+@@ -601,7 +880,19 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
          });
      }
  
@@ -2851,7 +3088,7 @@ index 602cb30..2e83545 100644
          const vk::Extent2D extent = swapchain.GetExtent();
          SetExpectedGameSize(s32(extent.width), s32(extent.height));
          const vk::ImageSubresourceRange color_range{
-@@ -714,11 +999,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
+@@ -714,11 +1005,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
      scheduler.Flush(info);
  
      // Present to swapchain.
@@ -6385,7 +6622,7 @@ index f9d2884..caf3e6c 100644
          std::unique_lock lk{mutex};
          while (true) {
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..946ff93 100644
+index 83e5538..2d28f7d 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -12,12 +12,15 @@
@@ -6405,19 +6642,20 @@ index 83e5538..946ff93 100644
  #ifdef _WIN32
  // PE/COFF assemblers have no .hidden/.previous: the compiler embeds the file (#embed, a GCC
  // extension in C++).
-@@ -156,12 +159,45 @@ void Checkbox(const char* label, std::atomic<bool>& value) {
+@@ -156,10 +159,44 @@ void Checkbox(const char* label, std::atomic<bool>& value) {
      Store(value, v, changed);
  }
  
 -void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
-+void Slider(const char* label, std::atomic<float>& value, float lo, float hi,
++bool Slider(const char* label, std::atomic<float>& value, float lo, float hi,
 +            const char* format = "%.2f", ImGuiSliderFlags flags = ImGuiSliderFlags_None) {
      float v = value;
 -    const bool changed = ImGui::SliderFloat(label, &v, lo, hi, "%.2f");
 +    const bool changed = ImGui::SliderFloat(label, &v, lo, hi, format, flags);
      Store(value, v, changed);
- }
- 
++    return changed;
++}
++
 +// The amounts Custom starts from (the last one chosen in this session).
 +int custom_vials = 20, custom_bullets = 20;
 +
@@ -6448,12 +6686,10 @@ index 83e5538..946ff93 100644
 +        ImGui::TextDisabled("%s: %s", BbSettings::MenuText("Unavailable", "Недоступно"), why);
 +    }
 +    ImGui::PopID();
-+}
-+
+ }
+ 
  void Hint(const char* text) {
-     ImGui::SameLine();
-     ImGui::TextDisabled("(?)");
-@@ -173,6 +209,184 @@ void Hint(const char* text) {
+@@ -173,6 +210,208 @@ void Hint(const char* text) {
      }
  }
  
@@ -6574,6 +6810,21 @@ index 83e5538..946ff93 100644
 +           ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
 +    Slider(BbSettings::MenuText("Highlight boost", "Усиление светлых участков"), s.hdr_boost, 0.0f,
 +           1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
++    if (mode == BbSettings::HdrModeNative) {
++        Slider(BbSettings::MenuText("UI brightness", "Яркость интерфейса"), s.hdr_ui_brightness,
++               BbSettings::HdrUiBrightnessMin, BbSettings::HdrUiBrightnessMax, "%.2f", ImGuiSliderFlags_AlwaysClamp);
++        Slider(BbSettings::MenuText("UI colour", "Цвета интерфейса"), s.hdr_ui_color, 0.0f, 1.0f, "%.2f",
++               ImGuiSliderFlags_AlwaysClamp);
++        Hint(BbSettings::MenuText(
++            "Native mode only: the game's HUD, menus, subtitles and loading screens. UI brightness: their "
++            "white, times paper white. UI colour: 0 shows their exact sRGB colours, 1 the wider colours a "
++            "wide-gamut monitor shows SDR with (the usual look; exact sRGB can look washed out next to "
++            "it). Live.",
++            "Только в нативном режиме: интерфейс игры, меню, субтитры и экраны загрузки. Яркость "
++            "интерфейса: его белый, умноженный на белый SDR. Цвета интерфейса: 0 — точные цвета sRGB, "
++            "1 — более насыщенные, как на мониторе с широким охватом в SDR (привычный вид; точный sRGB "
++            "рядом с ним может казаться блёклым). Меняются сразу."));
++    }
 +    Hint(BbSettings::MenuText(
 +        "Paper white: how bright the game's white (and this menu) is; about 200 suits a dim room. "
 +        "Peak: your display's peak brightness (its HDR specs, or the Windows HDR Calibration app). "
@@ -6589,29 +6840,35 @@ index 83e5538..946ff93 100644
 +        "1 — весь (до пика). Меняются сразу. Ctrl+клик по ползунку — ввести точное значение."));
 +}
 +
-+// The game's own picture for each area (engine/graphics.cpp), changed live once the hooks are in:
-+// Picture tuning is read at startup.
++// The game's own picture for each area (engine/graphics.cpp), live: Picture tuning too.
 +void PictureSection() {
 +    auto& s = BbSettings::Get();
 +    ImGui::SeparatorText(BbSettings::MenuText("Picture", "Изображение"));
-+    Checkbox(BbSettings::MenuText("Picture tuning (restart required)", "Настройка изображения (после перезапуска)"),
-+             s.graphics_controls);
 +    const bool live = BbEngine::Graphics::Enabled();
 +    if (!live) {
-+        ImGui::TextDisabled("%s", BbSettings::MenuText("Turn on Picture tuning and restart the game to use these.",
-+                                                       "Включите настройку изображения и перезапустите игру."));
++        ImGui::TextDisabled("%s", BbSettings::MenuText("Unavailable: the game's code differs from version 1.09.",
++                                                       "Недоступно: код игры отличается от версии 1.09."));
 +    }
 +    ImGui::BeginDisabled(!live);
-+    Slider(BbSettings::MenuText("Brightness", "Яркость"), s.graphics_brightness, 0.5f, 1.5f);
-+    Slider(BbSettings::MenuText("Contrast", "Контраст"), s.graphics_contrast, 0.95f, 1.05f);
-+    Slider(BbSettings::MenuText("Saturation", "Насыщенность"), s.graphics_saturation, 0.0f, 2.0f);
-+    Slider(BbSettings::MenuText("Hue", "Оттенок"), s.graphics_hue, -20.0f, 20.0f, "%.0f");
-+    Slider(BbSettings::MenuText("Fog", "Туман"), s.graphics_fog, 0.0f, 1.0f);
-+    Slider("Bloom", s.graphics_bloom, 0.0f, 1.0f);
++    Checkbox(BbSettings::MenuText("Picture tuning", "Настройка изображения"), s.graphics_controls);
++    // A moved setting turns Picture tuning on: it gates them all.
++    const bool vignette = s.graphics_vignette;
++    // The useful range on the slider; Ctrl+click types any value (bbport_settings.cpp keeps it
++    // within wide limits).
++    bool moved = Slider(BbSettings::MenuText("Brightness", "Яркость"), s.graphics_brightness, 0.0f, 3.0f);
++    moved |= Slider(BbSettings::MenuText("Contrast", "Контраст"), s.graphics_contrast, 0.8f, 1.2f, "%.3f");
++    moved |= Slider(BbSettings::MenuText("Saturation", "Насыщенность"), s.graphics_saturation, 0.0f, 3.0f);
++    moved |= Slider(BbSettings::MenuText("Hue", "Оттенок"), s.graphics_hue, -180.0f, 180.0f, "%.0f");
++    moved |= Slider(BbSettings::MenuText("Fog", "Туман"), s.graphics_fog, 0.0f, 3.0f);
++    moved |= Slider("Bloom", s.graphics_bloom, 0.0f, 3.0f);
 +    Checkbox(BbSettings::MenuText("Vignette", "Виньетка"), s.graphics_vignette);
-+    Slider(BbSettings::MenuText("Ambient occlusion strength", "Сила затенения (AO)"), s.graphics_ao_strength, 0.0f,
-+           2.0f);
-+    Slider(BbSettings::MenuText("Shadow distance", "Дальность теней"), s.graphics_shadow_scale, 1.0f, 3.0f);
++    moved |= vignette != s.graphics_vignette;
++    moved |= Slider(BbSettings::MenuText("Ambient occlusion strength", "Сила затенения (AO)"), s.graphics_ao_strength,
++                    0.0f, 3.0f);
++    moved |= Slider(BbSettings::MenuText("Shadow distance", "Дальность теней"), s.graphics_shadow_scale, 0.5f, 4.0f);
++    if (moved && !s.graphics_controls) {
++        Store(s.graphics_controls, true, true);
++    }
 +    if (ImGui::Button(BbSettings::MenuText("Game's own picture", "Как в игре"))) {
 +        Store(s.graphics_brightness, 1.0f, true);
 +        Store(s.graphics_contrast, 1.0f, true);
@@ -6625,20 +6882,23 @@ index 83e5538..946ff93 100644
 +    }
 +    ImGui::EndDisabled();
 +    Hint(BbSettings::MenuText(
-+        "Changes apply live, to the game's own colour, fog and lighting of each area (the HUD and menus "
-+        "keep theirs). 1.00 and Hue 0 are the game's. Fog 0 clears the haze over distant streets. The "
++        "Changes apply live, Picture tuning too, to the game's own colour, fog and lighting of each area "
++        "(the HUD and menus keep theirs). Moving one turns Picture tuning on; off: the game's own picture. 1.00 and Hue 0 are the game's. Fog 0 clears the haze over distant streets. The "
 +        "same settings are in the game's System menu (PC Graphics, PC Effects, PC Colour) and the "
-+        "launcher. Ctrl+click a slider to type a value.",
-+        "Меняются сразу: собственные цвет, туман и освещение каждой области (интерфейс и меню не "
-+        "меняются). 1.00 и оттенок 0 — как в игре. Туман 0 убирает дымку над дальними улицами. Те же "
++        "launcher. Ctrl+click a slider to type any value, beyond its ends too (brightness, saturation and fog "
++        "up to 5, contrast 0.5-1.5, hue -180-180, bloom up to 10, shadow distance 0.25-8).",
++        "Меняются сразу, как и сама настройка: собственные цвет, туман и освещение каждой области "
++        "(интерфейс и меню не меняются). Выкл. — картинка игры. 1.00 и оттенок 0 — как в игре. Туман 0 убирает дымку над дальними улицами. Те же "
 +        "настройки есть в системном меню игры (PC Graphics, PC Effects, PC Colour) и в лаунчере. "
-+        "Ctrl+клик по ползунку — ввести точное значение."));
++        "Ctrl+клик по ползунку — ввести любое значение, в том числе за его краями (яркость, "
++        "насыщенность и туман до 5, контраст 0.5-1.5, оттенок -180-180, bloom до 10, дальность теней "
++        "0.25-8)."));
 +}
 +
  void Menu() {
      auto& s = BbSettings::Get();
      const ImGuiViewport* viewport = ImGui::GetMainViewport();
-@@ -185,6 +399,18 @@ void Menu() {
+@@ -185,6 +424,18 @@ void Menu() {
          pos.y = viewport->WorkPos.y +
                  std::clamp(s.menu_y * viewport->WorkSize.y, 0.0f, std::max(viewport->WorkSize.y - margin, 0.0f));
      }
@@ -6657,7 +6917,7 @@ index 83e5538..946ff93 100644
      ImGui::SetNextWindowPos(pos, ImGuiCond_Appearing);
      ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
      bool keep_open = true;
-@@ -195,6 +421,8 @@ void Menu() {
+@@ -195,6 +446,8 @@ void Menu() {
          ImGui::End();
          return;
      }
@@ -6666,7 +6926,7 @@ index 83e5538..946ff93 100644
      // Moved: remembered (saved with the settings when the menu closes).
      if (!ImGui::IsWindowAppearing() && viewport->WorkSize.x > 0.0f && viewport->WorkSize.y > 0.0f) {
          const ImVec2 at = ImGui::GetWindowPos();
-@@ -206,12 +434,15 @@ void Menu() {
+@@ -206,12 +459,15 @@ void Menu() {
              dirty = true;
          }
      }
@@ -6687,7 +6947,7 @@ index 83e5538..946ff93 100644
          BbSettings::Save();
      }
      ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-@@ -439,6 +670,8 @@ void Menu() {
+@@ -439,6 +695,8 @@ void Menu() {
          "остаётся в 1080p — на Steam Deck и старых видеокартах это заметно медленнее. "
          "Выключена: всё рисуется в разрешении пресета, смена — через перезапуск. Авто включает "
          "её на мощных дискретных видеокартах. Применяется после перезапуска игры."));
@@ -6696,18 +6956,17 @@ index 83e5538..946ff93 100644
      ImGui::SeparatorText(BbSettings::MenuText("Game effects (restart required)",
                                                "Эффекты игры (после перезапуска)"));
      const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
-@@ -478,7 +711,9 @@ void Menu() {
+@@ -478,7 +736,8 @@ void Menu() {
  
      bool restart =
          s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
 -        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
 +        s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
-+        s.graphics_controls != s.startup_graphics_controls ||
 +        BbSettings::ResolutionNeedsRestart();
      for (int e = 0; e < BbSettings::EffectCount; ++e) {
          restart |= s.effects[e] != s.startup_effects[e];
      }
-@@ -499,6 +734,81 @@ void Menu() {
+@@ -499,6 +758,81 @@ void Menu() {
      Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
      Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
  
@@ -6789,7 +7048,7 @@ index 83e5538..946ff93 100644
      ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
      Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
  
-@@ -587,6 +897,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -587,6 +921,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -6950,7 +7209,7 @@ index f88cc52..e4fee68 100644
  } // namespace BbSections
  
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..37f0600 100644
+index cf4fbd8..8bde180 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -7031,18 +7290,31 @@ index cf4fbd8..37f0600 100644
      } else if (key == "upscaler") {
          for (int u = 0; u < UpscalerCount; ++u) {
              if (value == UpscalerName(u)) {
-@@ -117,12 +168,59 @@ void Set(Values& v, const std::string& key, const std::string& value) {
-         v.graphics_bloom=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
+@@ -109,20 +160,72 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+         v.graphics_controls=i!=0;
+     } else if (key == "graphics_vignette") {
+         v.graphics_vignette=i!=0;
++    // Wide limits: the menu's sliders show the useful range, Ctrl+click types any value up to these.
+     } else if (key == "graphics_ao_strength") {
+-        v.graphics_ao_strength=Clamp(std::isfinite(f)?f:1.0f,0.0f,2.0f);
++        v.graphics_ao_strength=Clamp(std::isfinite(f)?f:1.0f,0.0f,5.0f);
+     } else if (key == "graphics_shadow_scale") {
+-        v.graphics_shadow_scale=Clamp(std::isfinite(f)?f:1.0f,1.0f,3.0f);
++        v.graphics_shadow_scale=Clamp(std::isfinite(f)?f:1.0f,0.25f,8.0f);
+     } else if (key == "graphics_bloom") {
+-        v.graphics_bloom=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
++        v.graphics_bloom=Clamp(std::isfinite(f)?f:1.0f,0.0f,10.0f);
      } else if (key == "graphics_saturation") {
-         v.graphics_saturation=Clamp(std::isfinite(f)?f:1.0f,0.0f,2.0f);
+-        v.graphics_saturation=Clamp(std::isfinite(f)?f:1.0f,0.0f,2.0f);
++        v.graphics_saturation=Clamp(std::isfinite(f)?f:1.0f,0.0f,5.0f);
 +    } else if (key == "graphics_fog") {
-+        v.graphics_fog=Clamp(std::isfinite(f)?f:1.0f,0.0f,1.0f);
++        v.graphics_fog=Clamp(std::isfinite(f)?f:1.0f,0.0f,5.0f);
 +    } else if (key == "graphics_brightness") {
-+        v.graphics_brightness=Clamp(std::isfinite(f)?f:1.0f,0.5f,1.5f);
++        v.graphics_brightness=Clamp(std::isfinite(f)?f:1.0f,0.0f,5.0f);
 +    } else if (key == "graphics_contrast") {
-+        v.graphics_contrast=Clamp(std::isfinite(f)?f:1.0f,0.95f,1.05f);
++        v.graphics_contrast=Clamp(std::isfinite(f)?f:1.0f,0.5f,1.5f);
 +    } else if (key == "graphics_hue") {
-+        v.graphics_hue=Clamp(std::isfinite(f)?f:0.0f,-20.0f,20.0f);
++        v.graphics_hue=Clamp(std::isfinite(f)?f:0.0f,-180.0f,180.0f);
      } else if (key == "model_lod") {
          v.model_lod = std::clamp(i, -2, 2);
      } else if (key == "fullscreen") {
@@ -7056,6 +7328,10 @@ index cf4fbd8..37f0600 100644
 +        v.hdr_peak = Clamp(std::isfinite(f) ? f : HdrPeakDefault, HdrPeakMin, HdrPeakMax);
 +    } else if (key == "hdr_boost") {
 +        v.hdr_boost = Clamp(std::isfinite(f) ? f : HdrBoostDefault, 0.0f, 1.0f);
++    } else if (key == "hdr_ui_brightness") {
++        v.hdr_ui_brightness = Clamp(std::isfinite(f) ? f : 1.0f, HdrUiBrightnessMin, HdrUiBrightnessMax);
++    } else if (key == "hdr_ui_color") {
++        v.hdr_ui_color = Clamp(std::isfinite(f) ? f : HdrUiColorDefault, 0.0f, 1.0f);
 +    } else if (key == "hdr_mode") {
 +        int mode = -1;
 +        for (int m = 0; m < HdrModeCount; ++m) {
@@ -7091,7 +7367,7 @@ index cf4fbd8..37f0600 100644
      } else if (key == "output_res") {
          for (int r = 0; r < OutputCount; ++r) {
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
-@@ -138,6 +236,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -138,6 +241,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -7119,7 +7395,7 @@ index cf4fbd8..37f0600 100644
  } // namespace
  
  Values& Get() {
-@@ -146,7 +265,11 @@ Values& Get() {
+@@ -146,7 +270,11 @@ Values& Get() {
  }
  
  const char* MenuText(const char* english, const char* russian) {
@@ -7132,7 +7408,7 @@ index cf4fbd8..37f0600 100644
  }
  
  void Load() {
-@@ -166,9 +289,7 @@ void Load() {
+@@ -166,9 +294,7 @@ void Load() {
                  }
              }
          }
@@ -7143,7 +7419,7 @@ index cf4fbd8..37f0600 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -196,6 +317,9 @@ void Load() {
+@@ -196,6 +322,9 @@ void Load() {
          {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
          {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
          {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
@@ -7153,16 +7429,15 @@ index cf4fbd8..37f0600 100644
      };
      for (const auto& [env, key] : env_keys) {
          if (const char* value = std::getenv(env)) {
-@@ -211,6 +335,8 @@ void Load() {
+@@ -211,6 +340,7 @@ void Load() {
      v.startup_model_lod = v.model_lod;
      v.startup_output_res = v.output_res;
      v.startup_live_resolution = v.live_resolution;
 +    v.startup_hdr = v.hdr;
-+    v.startup_graphics_controls = v.graphics_controls;
  }
  
  void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
-@@ -264,7 +390,7 @@ void Save() {
+@@ -264,7 +394,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -7171,7 +7446,7 @@ index cf4fbd8..37f0600 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -284,12 +410,21 @@ void Save() {
+@@ -284,12 +414,23 @@ void Save() {
          put(Effects[e].key, flag(v.effects[e]));
      }
      put("fullscreen", flag(v.fullscreen));
@@ -7179,6 +7454,8 @@ index cf4fbd8..37f0600 100644
 +    put("hdr_paper_white", fixed(v.hdr_paper_white, 0));
 +    put("hdr_peak", fixed(v.hdr_peak, 0));
 +    put("hdr_boost", fixed(v.hdr_boost, 2));
++    put("hdr_ui_brightness", fixed(v.hdr_ui_brightness, 2));
++    put("hdr_ui_color", fixed(v.hdr_ui_color, 2));
 +    put("hdr_mode", HdrModeNames[std::clamp(v.hdr_mode.load(), 0, HdrModeCount - 1)]);
      put("graphics_controls",flag(v.graphics_controls));
      put("graphics_vignette",flag(v.graphics_vignette));
@@ -7193,7 +7470,7 @@ index cf4fbd8..37f0600 100644
      put("camera_controls", flag(v.camera_controls));
      put("widescreen",flag(v.widescreen));
      put("pc_controls",flag(v.pc_controls));
-@@ -305,6 +440,15 @@ void Save() {
+@@ -305,6 +446,15 @@ void Save() {
      put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
      put("camera_height_scale", fixed(v.camera_height_scale, 2));
      put("model_lod", std::to_string(v.model_lod.load()));
@@ -7210,7 +7487,7 @@ index cf4fbd8..37f0600 100644
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..87bf30e 100644
+index c0e8a94..73cb615 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -7229,7 +7506,7 @@ index c0e8a94..87bf30e 100644
  
  /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
  /// menu label, default (the game's own behaviour).
-@@ -50,6 +57,25 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
+@@ -50,6 +57,28 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
  inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
  inline constexpr int OutputCount = 10;
  inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
@@ -7244,6 +7521,9 @@ index c0e8a94..87bf30e 100644
 +inline constexpr float HdrPaperWhiteDefault = 200.0f, HdrPaperWhiteMin = 80.0f, HdrPaperWhiteMax = 500.0f;
 +inline constexpr float HdrPeakDefault = 1000.0f, HdrPeakMin = 400.0f, HdrPeakMax = 10000.0f;
 +inline constexpr float HdrBoostDefault = 0.25f;
++/// Native mode: the game's UI at hdr_ui_brightness times paper white, and hdr_ui_color of the way
++/// from sRGB's colours (0) to a wide-gamut SDR monitor's (1, DCI-P3).
++inline constexpr float HdrUiBrightnessMin = 0.5f, HdrUiBrightnessMax = 2.0f, HdrUiColorDefault = 1.0f;
 +/// The swapchain's HDR signal (Values::hdr_output).
 +enum HdrOutput : int { HdrOutputOff = 0, HdrOutputHdr10 = 1, HdrOutputScRgb = 2 };
 +/// hdr_mode in bbport.ini (docs/hdr.md). Native: the highlights' brightness from the game's own
@@ -7255,7 +7535,7 @@ index c0e8a94..87bf30e 100644
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -80,11 +106,34 @@ struct Values {
+@@ -80,11 +109,35 @@ struct Values {
      std::atomic<bool> change_appearance{false}, rebirth{false}; // next launch, engine features
      std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
      std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
@@ -7282,6 +7562,7 @@ index c0e8a94..87bf30e 100644
 +    /// BB_HDR_BOOST).
 +    std::atomic<float> hdr_paper_white{HdrPaperWhiteDefault}, hdr_peak{HdrPeakDefault},
 +        hdr_boost{HdrBoostDefault};
++    std::atomic<float> hdr_ui_brightness{1.0f}, hdr_ui_color{HdrUiColorDefault};
 +    /// HdrMode (hdr_mode, BB_HDR_MODE); live. In native mode boost is the share of the scene's
 +    /// highlight range shown: sqrt(boost) of it in log2 (0.25: half, 1: all of it).
 +    std::atomic<int> hdr_mode{HdrModeNative};
@@ -7290,12 +7571,11 @@ index c0e8a94..87bf30e 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +149,13 @@ struct Values {
+@@ -100,10 +153,12 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
 +    bool startup_hdr = false;
-+    bool startup_graphics_controls = false;  ///< the picture hooks are installed at startup
  };
  
  Values& Get();
@@ -7612,10 +7892,18 @@ index a2bc45d..ad7e742 100644
  bool player_stat_set(const char* name,std::int64_t value);
  bool player_origin(int* origin);
 diff --git a/gpu/shim/engine/graphics.cpp b/gpu/shim/engine/graphics.cpp
-index c1e5ac1..7a9226c 100644
+index c1e5ac1..6f357cb 100644
 --- a/gpu/shim/engine/graphics.cpp
 +++ b/gpu/shim/engine/graphics.cpp
-@@ -24,6 +24,13 @@ const std::uint8_t kYebisRecordPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
+@@ -4,6 +4,7 @@
+ #include "graphics.h"
+ #include "engine_state.h"
+ #include "bbport_settings.h"
++#include <algorithm>
+ #include <atomic>
+ #include <cstring>
+ #include <cmath>
+@@ -24,6 +25,13 @@ const std::uint8_t kYebisRecordPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
                                               0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x28, 0x4d, 0x89, 0xcd};
  constexpr std::uint64_t kPostBlock = 0x59406e0;
  constexpr std::size_t kSaturation = 0xc8, kVignettePower = 0xd0, kGlareLuminance = 0xdc;
@@ -7629,7 +7917,7 @@ index c1e5ac1..7a9226c 100644
  constexpr std::size_t kYebisHeld = 0x2710;  // on the YEBIS object: the block was not refreshed
  std::uint8_t* g_post_block = nullptr;
  
-@@ -51,6 +58,21 @@ const std::uint8_t kShadowSetupPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
+@@ -51,9 +59,29 @@ const std::uint8_t kShadowSetupPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57,
  constexpr std::size_t kShadowBlock = 0x80, kShadowHeld = 0x297c;  // on the renderer
  constexpr std::size_t kShadowScaled[] = {0x38, 0x3c, 0x44, 0x48};
  
@@ -7650,8 +7938,37 @@ index c1e5ac1..7a9226c 100644
 +
  template<typename T> bool Read(std::uint64_t at,T* out) { return at && host_read_safe(reinterpret_cast<void*>(at),out,sizeof(T)); }
  template<typename T> void Write(std::uint64_t at,const T& value) { std::memcpy(reinterpret_cast<void*>(at),&value,sizeof(T)); }
++// bbport: the hooks are installed whatever Picture tuning is (graphics_controls), which they
++// read every call: off, each returns at once and the game's own values stand - so the switch
++// and every setting are live.
++bool On() { return BbSettings::Get().graphics_controls.load(std::memory_order_relaxed); }
  GUEST_ABI std::int64_t RenderView(std::uint64_t,const std::uint64_t* saved) {
-@@ -81,10 +103,25 @@ GUEST_ABI std::int64_t YebisRecord(std::uint64_t,const std::uint64_t* saved) {
++    if (!On()) return 0;
+     const auto r=saved[0];std::uint64_t caps=0;
+     if (!r || !Read(r+kCapabilities,&caps)) return 0;
+     const std::uint8_t ssao=BbSettings::Get().effects[3].load() && (caps&kSsaoCapability);
+@@ -62,6 +90,7 @@ GUEST_ABI std::int64_t RenderView(std::uint64_t,const std::uint64_t* saved) {
+     return 0;
+ }
+ GUEST_ABI std::int64_t AoDraw(std::uint64_t,const std::uint64_t* saved) {
++    if (!On()) return 0;
+     const auto object=saved[5];const float k=BbSettings::Get().graphics_ao_strength;
+     std::uint8_t held=1;float v=0,o=0;
+     if (!object || k==1 || !Read(object+kSsaoHeld,&held) || held ||
+@@ -70,6 +99,7 @@ GUEST_ABI std::int64_t AoDraw(std::uint64_t,const std::uint64_t* saved) {
+     return 0;
+ }
+ GUEST_ABI std::int64_t ShadowSetup(std::uint64_t,const std::uint64_t* saved) {
++    if (!On()) return 0;
+     const auto block=saved[4];const float k=BbSettings::Get().graphics_shadow_scale;
+     std::uint8_t held=1;
+     if (!block || k==1 || !Read(block+kShadowHeld-kShadowBlock,&held) || held) return 0;
+@@ -77,20 +107,38 @@ GUEST_ABI std::int64_t ShadowSetup(std::uint64_t,const std::uint64_t* saved) {
+     return 0;
+ }
+ GUEST_ABI std::int64_t YebisRecord(std::uint64_t,const std::uint64_t* saved) {
++    if (!On()) return 0;
+     const auto object=saved[5];std::uint8_t held=1;
      if (!object || !g_post_block || !Read(object+kYebisHeld,&held) || held) return 0;
      const auto& s=BbSettings::Get();
      const auto block=reinterpret_cast<std::uint64_t>(g_post_block);
@@ -7670,15 +7987,24 @@ index c1e5ac1..7a9226c 100644
 +GUEST_ABI std::int64_t FogUpload(std::uint64_t,const std::uint64_t* saved) {
 +    const float k=BbSettings::Get().graphics_fog;
 +    std::uint64_t manager=0,fog=0,map=0,table=0;std::uint32_t count=0;
-+    if (k==1 || !std::isfinite(k) || !Read(reinterpret_cast<std::uint64_t>(g_graphics_manager),&manager) ||
++    if (!On() || k==1 || !std::isfinite(k) || !Read(reinterpret_cast<std::uint64_t>(g_graphics_manager),&manager) ||
 +        !Read(manager+kFogManager,&fog) || !Read(fog+kFogMap,&map) || !Read(fog+kFogTable,&table) ||
 +        !Read(fog+kFogCount,&count) || map!=saved[5] || table!=saved[3] || !table || !count || count>4096) return 0;
 +    auto* blocks=reinterpret_cast<float*>(table);
-+    for (std::uint32_t i=0;i<count;++i) for (const int o:kFogOpacity) blocks[i*(kFogBlock/4)+o]*=k;
++    for (std::uint32_t i=0;i<count;++i) for (const int o:kFogOpacity) {
++        float& opacity=blocks[i*(kFogBlock/4)+o];
++        opacity=k>1 ? std::min(opacity*k,std::max(opacity,1.0f)) : opacity*k;  // more fog: up to opaque
++    }
      return 0;
  }
  }
-@@ -100,8 +137,22 @@ bool Install(std::uint8_t* image,std::size_t size) {
+ bool Enabled() { return enabled; }
+ bool Install(std::uint8_t* image,std::size_t size) {
+-    if (!BbSettings::Get().graphics_controls) return false;
+     Hook hooks[4];
+     if (size<0x55406e0+0x370 || !Prepare(hooks[0],image,size,kRenderView-0x400000,kRenderViewPrologue,RenderView) ||
+         !Prepare(hooks[1],image,size,kYebisRecord-0x400000,kYebisRecordPrologue,YebisRecord) ||
+@@ -100,8 +148,23 @@ bool Install(std::uint8_t* image,std::size_t size) {
          host_log("live graphics disabled: engine bytes differ; all original paths retained");return false;
      }
      g_post_block=image+0x55406e0;
@@ -7697,16 +8023,17 @@ index c1e5ac1..7a9226c 100644
 +        const auto target=reinterpret_cast<std::uint64_t>(fog);std::memcpy(p,&target,8);p+=8;*p++=0x41;*p++=0xff;*p=0xe3;
 +        const std::int32_t to_padding=static_cast<std::int32_t>(padding-(jump+5));std::memcpy(image+jump+1,&to_padding,4);
 +    }
-+    host_log("bbhost live graphics enabled: AA, SSAO, AO strength, shadow distance, bloom, saturation, vignette, "
-+             "brightness, contrast, hue%s",fog ? " and fog" : " (fog: engine bytes differ, left alone)");
++    host_log("bbhost live graphics enabled (Picture tuning %s, live): AA, SSAO, AO strength, shadow distance, bloom, "
++             "saturation, vignette, brightness, contrast, hue%s",On() ? "on" : "off",
++             fog ? " and fog" : " (fog: engine bytes differ, left alone)");
      return true;
  }
  }
 diff --git a/gpu/shim/engine/option_menu.cpp b/gpu/shim/engine/option_menu.cpp
-index cf652fe..a4938ac 100644
+index cf652fe..b0da711 100644
 --- a/gpu/shim/engine/option_menu.cpp
 +++ b/gpu/shim/engine/option_menu.cpp
-@@ -606,7 +606,12 @@ Slider camera[] = {
+@@ -606,8 +606,14 @@ Slider camera[] = {
  bool seeded=false;
  bool camera_page=false,graphics_page=false,input_page=false;
  Slider graphics_sliders[]={{nullptr,117007,0,0.2f,5},{nullptr,117006,1,0.2f,0}};
@@ -7716,11 +8043,13 @@ index cf652fe..a4938ac 100644
 +// Brightness, contrast, saturation and hue (bbport): 5 is the area's own.
 +Slider color_sliders[]={{nullptr,125000,0.5f,0.1f,5},{nullptr,125001,0.95f,0.01f,5},{nullptr,125002,0,0.2f,5},
 +                        {nullptr,125003,-20.0f,4.0f,5}};
-+bool color_seeded=false;
  struct StartupToggle { std::atomic<bool>* setting=nullptr; std::uint32_t id; std::uint8_t value=0,last=0; };
++StartupToggle color_toggle[]={{nullptr,125004}};  // Picture tuning, live
++bool color_seeded=false;
  StartupToggle enhancements[]={{nullptr,124001},{nullptr,124002},{nullptr,124004}};
  bool enhancements_seeded=false;
-@@ -662,7 +667,9 @@ GUEST_ABI void GraphicsHandler(void* dialog,void* params) {
+ StartupToggle graphics_toggles[]={{nullptr,117001},{nullptr,117000}};
+@@ -662,7 +668,9 @@ GUEST_ABI void GraphicsHandler(void* dialog,void* params) {
      for (auto& s:graphics_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
      output_resolution=last_resolution=BbSettings::Get().output_res;
      add_list_row(dialog,&output_resolution,117004,outputs,BbSettings::OutputCount,BbSettings::OutputDefault);
@@ -7731,7 +8060,7 @@ index cf652fe..a4938ac 100644
  }
  GUEST_ABI void EffectsHandler(void* dialog,void* params) {
      host_log("pc-options: PCEffects opened, dialog=%p params=%p",dialog,params);
-@@ -671,7 +678,15 @@ GUEST_ABI void EffectsHandler(void* dialog,void* params) {
+@@ -671,7 +679,16 @@ GUEST_ABI void EffectsHandler(void* dialog,void* params) {
      for (auto& t:effect_toggles) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,1); }
      SeedSliders(effect_sliders);
      for (auto& s:effect_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
@@ -7742,13 +8071,14 @@ index cf652fe..a4938ac 100644
 +    host_log("pc-options: PCColour opened, dialog=%p params=%p",dialog,params);
 +    alignas(16) std::uint8_t scratch[0x100]{};
 +    hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
++    for (auto& t:color_toggle) { t.value=t.last=t.setting->load()?1:0;add_toggle_row(dialog,&t.value,t.id,1); }
 +    SeedSliders(color_sliders);
 +    for (auto& s:color_sliders) add_slider_row(dialog,&s.value,s.id,s.def);
-+    color_seeded=true;log_rows("PCColour",dialog,4,4);
++    color_seeded=true;log_rows("PCColour",dialog,5,5);
  }
  GUEST_ABI std::int64_t OpenGraphics(void* root,void* params) {
      return open_named(root,params,"PCGraphics",reinterpret_cast<void*>(&GraphicsHandler),4);
-@@ -687,6 +702,13 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
+@@ -687,6 +704,13 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
      GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenEffects));
      hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;
  }
@@ -7762,7 +8092,7 @@ index cf652fe..a4938ac 100644
  
  StartupToggle controls[]={{nullptr,118000},{nullptr,118002},{nullptr,118003},{nullptr,116002},{nullptr,118005}};
  std::uint8_t sensitivity=5,last_sensitivity=5;bool controls_seeded=false;
-@@ -712,6 +734,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -712,6 +736,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
          { Captions c(110010);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenEffectsRow));
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
@@ -7771,7 +8101,7 @@ index cf652fe..a4938ac 100644
      }
      if(input_page) {
          {Captions c(110008);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenControlsRow));hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag);}
-@@ -720,7 +744,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -720,7 +746,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
      if (camera_page) { Captions c(110011);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenCameraRow));
        hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
      hle_call_guest<std::int64_t>(guest_fn(kSystemFinalize),out,builder,arg3);
@@ -7780,7 +8110,7 @@ index cf652fe..a4938ac 100644
      return out;
  }
  } // namespace
-@@ -783,7 +807,9 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -783,7 +809,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
      graphics_sliders[0].setting=&settings.graphics_ao_strength;graphics_sliders[1].setting=&settings.graphics_shadow_scale;
      effect_toggles[0].setting=&settings.effects[2];effect_toggles[1].setting=&settings.effects[1];
      effect_toggles[2].setting=&settings.effects[0];effect_toggles[3].setting=&settings.graphics_vignette;
@@ -7788,10 +8118,11 @@ index cf652fe..a4938ac 100644
 +    effect_sliders[0].setting=&settings.graphics_bloom;fog_slider[0].setting=&settings.graphics_fog;
 +    color_sliders[0].setting=&settings.graphics_brightness;color_sliders[1].setting=&settings.graphics_contrast;
 +    color_sliders[2].setting=&settings.graphics_saturation;color_sliders[3].setting=&settings.graphics_hue;
++    color_toggle[0].setting=&settings.graphics_controls;
      enhancements[0].setting=&settings.change_appearance;
      enhancements[1].setting=&settings.rebirth;
      enhancements[2].setting=&settings.camera_controls;
-@@ -797,7 +823,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -797,7 +826,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
      std::memcpy(p,&target,8); p+=8; *p++=0x41; *p++=0xff; *p=0xe3;
      const std::int32_t to_pad=pad-(call+5); std::memcpy(image+call+1,&to_pad,4);
      g_installed=true;
@@ -7800,14 +8131,42 @@ index cf652fe..a4938ac 100644
      return true;
  }
  bool ClickDecides(std::uint8_t* list, int index) {
-@@ -858,6 +884,7 @@ void Tick() {
-         for (auto& t:rows) if (t.value!=t.last) { t.last=t.value;*t.setting=t.value!=0;changed=true; }
+@@ -850,17 +879,29 @@ void Tick() {
+         changed=true;
+     }
+     auto push_sliders=[&](auto& rows,bool active) {
+-        if (!active) return;
+-        for (auto& s:rows) if (s.value!=s.last) { s.last=std::min<std::uint8_t>(s.value,10);*s.setting=s.base+s.last*s.step;changed=true; }
++        bool moved=false;
++        if (!active) return moved;
++        for (auto& s:rows) if (s.value!=s.last) { s.last=std::min<std::uint8_t>(s.value,10);*s.setting=s.base+s.last*s.step;changed=moved=true; }
++        return moved;
      };
-     push_sliders(graphics_sliders,graphics_seeded);push_sliders(effect_sliders,effects_seeded);
-+    push_sliders(fog_slider,graphics_seeded);push_sliders(color_sliders,color_seeded);
+     auto push_toggles=[&](auto& rows,bool active) {
+-        if (!active) return;
+-        for (auto& t:rows) if (t.value!=t.last) { t.last=t.value;*t.setting=t.value!=0;changed=true; }
++        bool moved=false;
++        if (!active) return moved;
++        for (auto& t:rows) if (t.value!=t.last) { t.last=t.value;*t.setting=t.value!=0;changed=moved=true; }
++        return moved;
+     };
+-    push_sliders(graphics_sliders,graphics_seeded);push_sliders(effect_sliders,effects_seeded);
++    // Picture tuning gates the picture settings (engine/graphics.cpp), live: moving one of them
++    // turns it on, and its own switch is on PC Colour.
++    push_toggles(color_toggle,color_seeded);
++    bool picture=push_sliders(graphics_sliders,graphics_seeded);picture|=push_sliders(effect_sliders,effects_seeded);
++    picture|=push_sliders(fog_slider,graphics_seeded);picture|=push_sliders(color_sliders,color_seeded);
      push_toggles(controls,controls_seeded);
      if(controls_seeded && sensitivity!=last_sensitivity){last_sensitivity=std::min<std::uint8_t>(sensitivity,10);BbSettings::Get().mouse_sensitivity=last_sensitivity;changed=true;}
-     push_toggles(graphics_toggles,graphics_seeded);push_toggles(effect_toggles,effects_seeded);
+-    push_toggles(graphics_toggles,graphics_seeded);push_toggles(effect_toggles,effects_seeded);
++    picture|=push_toggles(graphics_toggles,graphics_seeded);picture|=push_toggles(effect_toggles,effects_seeded);
++    if (picture && !BbSettings::Get().graphics_controls) {
++        BbSettings::Get().graphics_controls=true;
++        for (auto& t:color_toggle) t.value=t.last=1;
++    }
+     if (graphics_seeded && output_resolution!=last_resolution) {
+         last_resolution=std::clamp(output_resolution,0,BbSettings::OutputCount-1);
+         BbSettings::Get().output_res=last_resolution;changed=true;
 diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
 index f475c39..8b574fb 100644
 --- a/gpu/shim/window.cpp
@@ -7831,21 +8190,43 @@ index f475c39..8b574fb 100644
          if (BbOverlay::HandleEvent(event)) {
              continue;
          }
+diff --git a/licenses/SHADNET-PORT.md b/licenses/SHADNET-PORT.md
+index 4fbbd84..7f7cce2 100644
+--- a/licenses/SHADNET-PORT.md
++++ b/licenses/SHADNET-PORT.md
+@@ -2,7 +2,8 @@
+ 
+ The network-only source in `gpu/bbnet/` is adapted from
+ https://github.com/Supermedo/bloodborne_pc/tree/e0761196535bac06e5d5beb1c43da5124a06dd4c
+-(the `windows` branch inspected on 2026-10-09). Original RPCS3, shadPS4 and
++(the `windows` branch inspected on 2026-10-09). The co-op signaling fix (shadNet server framing, UPnP
++mapping) is from https://github.com/Supermedo/bloodborne_pc/commit/004d2c3792110371b419f2b4c34324552644c03d. Original RPCS3, shadPS4 and
+ shadp2p notices remain in the files. These portions are GPL-2.0-or-later.
+ `third_party/httplib/httplib.h` and `third_party/wepoll/` retain their embedded
+ third-party license notices.
 diff --git a/scripts/online.py b/scripts/online.py
-index fdbf8c4..6c56f77 100644
+index fdbf8c4..e36395e 100644
 --- a/scripts/online.py
 +++ b/scripts/online.py
-@@ -6,6 +6,9 @@ from pathlib import Path
+@@ -6,6 +6,17 @@ from pathlib import Path
  from urllib.parse import urlsplit
  
  GAME_STATUS_ORIGIN = 'https://ss4.scej-network.jp:20443'
 +# Messages, bloodstains and ghosts: Bloodborne's own game server. shadNet servers only sign in and
 +# match players (co-op); the public one has no game server, so The Hunter's Dream is the default.
 +HUNTERS_DREAM = 'https://thehuntersdream.com'
++# The game PUTs its play logs to FromSoftware's S3 buckets (bucket names nobody here owns); the game
++# server takes them on its API port instead (PUT /<date>/<file>, plain HTTP), as bbhost sends them
++# (droogie/bbhost src/hle/http.cpp).
++PLAY_LOG_HOSTS = ('bb-playlog-prod.s3.amazonaws.com', 'bb-playlog-test.s3.amazonaws.com')
++GAME_API_PORT = 18671
++# P2P (co-op) port when none is set: the PS4's own, so UPnP and firewall rules stay the same
++# between games.
++DEFAULT_P2P_PORT = 3658
  ONLINE_ENV = ('BB_ONLINE', 'BB_SHADNET_SERVER', 'BB_SHADNET_WEBAPI', 'BB_SHADNET_NPID',
                'BB_SHADNET_PASSWORD', 'BB_SHADNET_TOKEN', 'BB_UPNP', 'SHADPS4_P2P_PORT', 'SHADPS4_HTTP_HOST_OVERRIDES_JSON')
  
-@@ -19,6 +22,19 @@ def read_settings(path):
+@@ -19,6 +30,19 @@ def read_settings(path):
              settings[key.strip()] = value.strip()
      return settings
  
@@ -7865,7 +8246,7 @@ index fdbf8c4..6c56f77 100644
  def http_base(text):
      if not text or any(ord(c) < 32 for c in text):
          raise ValueError('Online requires an explicit WebAPI / game API URL')
-@@ -41,8 +57,8 @@ def configure_online(settings, data, env):
+@@ -41,8 +65,8 @@ def configure_online(settings, data, env):
      port = int(settings.get('online_port', ''))
      if not 1 <= port <= 65535:
          raise ValueError('shadNet TCP port must be between 1 and 65535')
@@ -7876,6 +8257,24 @@ index fdbf8c4..6c56f77 100644
      if urlsplit(webapi).path not in ('', '/') or urlsplit(game_api).path not in ('', '/'):
          raise ValueError('WebAPI and game API require a server origin without an extra path')
      username = settings.get('online_username', '')
+@@ -58,13 +82,13 @@ def configure_online(settings, data, env):
+     destination = Path(data) / 'network/host_overrides.json'
+     destination.parent.mkdir(parents=True, exist_ok=True)
+     temporary = destination.with_suffix('.json.tmp')
+-    temporary.write_text(json.dumps({GAME_STATUS_ORIGIN: game_api}, indent=2), encoding='utf-8')
++    overrides = {GAME_STATUS_ORIGIN: game_api}
++    overrides.update({h: f'http://{urlsplit(game_api).hostname}:{GAME_API_PORT}' for h in PLAY_LOG_HOSTS})
++    temporary.write_text(json.dumps(overrides, indent=2), encoding='utf-8')
+     os.replace(temporary, destination)
+     env.update(BB_ONLINE='1', BB_SHADNET_SERVER=(f'[{host}]' if ':' in host else host) + f':{port}',
+                BB_SHADNET_WEBAPI=webapi, BB_SHADNET_NPID=username,
+                BB_UPNP='1' if settings.get('online_upnp') == '1' else '0',
+                SHADPS4_HTTP_HOST_OVERRIDES_JSON=str(destination.resolve()))
+-    env.pop('SHADPS4_P2P_PORT', None)
+-    if p2p:
+-        env['SHADPS4_P2P_PORT'] = str(int(p2p))
++    env['SHADPS4_P2P_PORT'] = str(int(p2p)) if p2p else str(DEFAULT_P2P_PORT)
+     return destination
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
 index ea6daf1..3991891 100644
 --- a/scripts/run_windows.py
@@ -9000,30 +9399,51 @@ index 75eca24..45ea45d 100644
  void runtime_memory_set_guest_chunk_whole(int) {}
  int runtime_memory_vma_info(uintptr_t, int*, int*, uintptr_t*) { std::abort(); }
 diff --git a/tests/test_online.py b/tests/test_online.py
-index bf0d998..86cde4b 100644
+index bf0d998..0861977 100644
 --- a/tests/test_online.py
 +++ b/tests/test_online.py
-@@ -6,7 +6,7 @@ import tempfile
+@@ -6,7 +6,12 @@ import tempfile
  import unittest
  
  sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 -from online import configure_online, http_base, ONLINE_ENV, GAME_STATUS_ORIGIN
-+from online import configure_online, game_server, http_base, ONLINE_ENV, GAME_STATUS_ORIGIN, HUNTERS_DREAM
++from online import (configure_online, game_server, http_base, ONLINE_ENV, GAME_STATUS_ORIGIN, HUNTERS_DREAM,
++                    PLAY_LOG_HOSTS, DEFAULT_P2P_PORT)
++
++
++def play_logs(host):
++    return {h: f'http://{host}:18671' for h in PLAY_LOG_HOSTS}
  
  
  class OnlineProfileTests(unittest.TestCase):
-@@ -41,17 +41,27 @@ class OnlineProfileTests(unittest.TestCase):
+@@ -28,11 +33,12 @@ class OnlineProfileTests(unittest.TestCase):
+             self.assertEqual(env, {'BB_ONLINE':'0','UNRELATED':'keep'})
+             self.assertFalse((self.data/'network').exists())
+ 
+-    def test_custom_ports_preserved_and_only_game_origin_redirected(self):
++    def test_custom_ports_preserved_and_only_game_origin_and_play_logs_redirected(self):
+         self.settings['online_game_api'] = 'https://game.example:31443'
+         self.settings['online_p2p_port'] = '32000'
+         path = configure_online(self.settings, self.data, self.env)
+-        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:'https://game.example:31443'})
++        self.assertEqual(json.loads(path.read_text()),
++                         {GAME_STATUS_ORIGIN:'https://game.example:31443', **play_logs('game.example')})
+         self.assertEqual(self.env['BB_SHADNET_SERVER'], 'server.example:31413')
+         self.assertEqual(self.env['BB_SHADNET_WEBAPI'], 'http://server.example:31415')
+         self.assertEqual(self.env['SHADPS4_P2P_PORT'], '32000')
+@@ -41,17 +47,27 @@ class OnlineProfileTests(unittest.TestCase):
          self.assertNotIn('synthetic-test-password', path.read_text())
          self.assertFalse(path.with_suffix('.json.tmp').exists())
  
 -    def test_same_api_fallback_and_automatic_port(self):
-+    def test_game_server_defaults_and_automatic_port(self):
++    def test_game_server_defaults_and_pinned_port(self):
          self.env['SHADPS4_P2P_PORT'] = 'inherited'
          path = configure_online(self.settings, self.data, self.env)
 -        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:self.settings['online_webapi']})
-+        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:HUNTERS_DREAM})
-         self.assertNotIn('SHADPS4_P2P_PORT', self.env)
- 
+-        self.assertNotIn('SHADPS4_P2P_PORT', self.env)
++        self.assertEqual(json.loads(path.read_text()), {GAME_STATUS_ORIGIN:HUNTERS_DREAM, **play_logs('thehuntersdream.com')})
++        self.assertEqual(self.env['SHADPS4_P2P_PORT'], str(DEFAULT_P2P_PORT))
++
 +    def test_game_server_bare_name_and_old_shadnet_default(self):
 +        self.assertEqual(game_server('thehuntersdream.com'), 'https://thehuntersdream.com')
 +        self.assertEqual(game_server('http://srv.shadps4.net:31315'), HUNTERS_DREAM)
@@ -9033,7 +9453,7 @@ index bf0d998..86cde4b 100644
 +        self.settings['online_webapi'] = ''
 +        configure_online(self.settings, self.data, self.env)
 +        self.assertEqual(self.env['BB_SHADNET_WEBAPI'], 'http://server.example:31315')
-+
+ 
      def test_invalid_profile_fails_before_writing_cache(self):
          for key, values in {
              'online_host':['', 'http://server.example', 'foo bar', '::1'],
@@ -9295,7 +9715,7 @@ index 593fed4..2087d68 100644
      std::puts("PASS: settings save keeps other keys, menu position");
  }
 diff --git a/tools/engine/menu_assets.cpp b/tools/engine/menu_assets.cpp
-index d51b554..1d2b1f1 100644
+index d51b554..60e312c 100644
 --- a/tools/engine/menu_assets.cpp
 +++ b/tools/engine/menu_assets.cpp
 @@ -31,7 +31,7 @@ using Bytes = std::vector<std::uint8_t>;
@@ -9329,12 +9749,12 @@ index d51b554..1d2b1f1 100644
      section("PCCamera", 121020, 388, 3, 0, {"Item_3_0", "Item_4_0", "Item_5_0"});
      section("PCDeck", 123020, 389, 2, 0, {"Item_2_0", "Item_3_0", "Item_4_0", "Item_5_0"});
      section("PCEnhance", 124020, 390, 3, 0, {"Item_3_0", "Item_4_0", "Item_5_0"});
-+    section("PCColour", 125020, 391, 4, 0, {"Item_4_0", "Item_5_0"});
++    section("PCColour", 125020, 391, 5, 0, {"Item_5_0"});
      return add_scrollbar(m, "Top", 1290, 354.5);
  }
  
 diff --git a/tools/engine/pc_option_messages.tsv b/tools/engine/pc_option_messages.tsv
-index 2199381..2c06fbf 100644
+index 2199381..664431c 100644
 --- a/tools/engine/pc_option_messages.tsv
 +++ b/tools/engine/pc_option_messages.tsv
 @@ -7,7 +7,7 @@
@@ -9354,12 +9774,13 @@ index 2199381..2c06fbf 100644
  116000	Vertical Sync	Wait for the display. Off can tear.
  116001	Fullscreen	Borderless, at the desktop resolution.
  116002	Mouse in Menus	Move and click to select.
-@@ -59,7 +60,11 @@
+@@ -59,7 +60,12 @@
  120020	PC Effects	
  120000	Bloom	The glow around bright light. 10 is the game's own.
  120001	Vignette	The darkened frame edges some areas use.
 -120002	Saturation	Colour. 5 is the game's own; 0 is black and white.
 +125020	PC Colour	
++125004	Picture Tuning	Applies PC Graphics, PC Effects and PC Colour live. Off: the game's own picture. Moving one of their settings turns it on.
 +125000	Brightness	How bright the picture is. 5 is the game's own.
 +125001	Contrast	The difference between dark and bright. 5 is the game's own.
 +125002	Saturation	Colour. 5 is the game's own; 0 is black and white.
@@ -9883,10 +10304,10 @@ index 0000000..048efd8
 +#endif
 diff --git a/gpu/shadps4/video_core/host_shaders/hdr_output.frag b/gpu/shadps4/video_core/host_shaders/hdr_output.frag
 new file mode 100644
-index 0000000..85a0636
+index 0000000..b3d6246
 --- /dev/null
 +++ b/gpu/shadps4/video_core/host_shaders/hdr_output.frag
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,159 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: HDR output. The game's SDR picture (letterboxed into a swapchain-sized sRGB-encoded
 +// image) and the settings menu's layer (premultiplied alpha, sRGB encoded) become the HDR
@@ -9896,6 +10317,10 @@ index 0000000..85a0636
 +// highlights; 1 for midtones and UI) brightens the highlights. Expand mode, and native frames
 +// without a scene (menus, loading, movies): boost expands the SDR picture's highlights towards
 +// the peak.
++// bbport: in native mode the game's UI (where the gain map is negative, and all of a frame
++// without a scene) has its own white (ui_white times paper white) and colours: ui_vivid of the
++// way from sRGB's (exact) to a wide-gamut SDR monitor's (the values taken as DCI-P3), which is
++// how most players have seen it - next to that, exact sRGB looks washed out.
 +
 +#version 450
 +
@@ -9912,12 +10337,15 @@ index 0000000..85a0636
 +    uint flags;
 +    vec2 gain_offset;  // the frame's rectangle in the output: its top left corner, pixels,
 +    vec2 gain_scale;   // and 1 / its size: output pixels -> gain map coordinates
++    float ui_white;    // native mode: the UI's white, times paper white
++    float ui_vivid;    // native mode: 0 the UI in sRGB's colours .. 1 in DCI-P3's
 +} hdr;
 +
 +const uint FLAG_SCRGB = 1u;   // scRGB output, else HDR10
 +const uint FLAG_OVERLAY = 2u; // the menu layer has something drawn
 +const uint FLAG_NATIVE = 4u;  // the gain map belongs to this frame
 +const uint FLAG_DEBUG = 8u;   // BB_HDR_DEBUG: the gain as a heat map
++const uint FLAG_UI_FRAME = 16u; // native mode, a frame without a scene: all of it is UI
 +
 +// Linear brightness (SDR white = 1) above which the highlights are expanded: high, so large
 +// bright areas (fog, sky) stay near paper white and only lamps, fire and sparks reach the peak.
@@ -9928,6 +10356,13 @@ index 0000000..85a0636
 +    0.6274, 0.0691, 0.0164,
 +    0.3293, 0.9195, 0.0880,
 +    0.0433, 0.0114, 0.8956);
++
++// DCI-P3 (D65) -> BT.709 primaries (columns): BT.709 values outside [0, 1] are the wider gamut,
++// which the BT.2020 and scRGB encodes below both carry.
++const mat3 P3_TO_BT709 = mat3(
++    1.2249, -0.0421, -0.0196,
++    -0.2249, 1.0421, -0.0786,
++    0.0, 0.0, 1.0983);
 +
 +// The game's picture is made for SDR displays, which show it with a 2.2 power curve. The
 +// piecewise sRGB curve (what Windows uses for SDR content in HDR) lifts the shadows: dark
@@ -9975,12 +10410,14 @@ index 0000000..85a0636
 +    vec3 linear;
 +    float applied = 1.0; // the brightest channel's gain (debug view)
 +    bool ui = false;
++    float ui_amount = (hdr.flags & FLAG_UI_FRAME) != 0u ? 1.0 : 0.0; // filtered: soft UI edges
 +    if ((hdr.flags & FLAG_NATIVE) != 0u) {
 +        // Outside the frame (letterbox bars) the map is not sampled: gain 1.
 +        vec2 uv = (gl_FragCoord.xy - hdr.gain_offset) * hdr.gain_scale;
 +        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
 +            float g = textureLod(gain, uv, 0.0).r;
 +            ui = g < 0.0;
++            ui_amount = clamp(-g, 0.0, 1.0);
 +            applied = max(abs(g), 1.0);
 +        }
 +        // The map keeps the brightest channel within the peak; filtering and the letterbox
@@ -9990,6 +10427,11 @@ index 0000000..85a0636
 +        linear = ExpandHighlights(sdr_linear, white);
 +        float m = max(sdr_linear.r, max(sdr_linear.g, sdr_linear.b));
 +        applied = m > 0.0 ? max(linear.r, max(linear.g, linear.b)) / m : 1.0;
++    }
++    if (ui_amount > 0.0) {
++        linear *= mix(1.0, hdr.ui_white, ui_amount);
++        linear = mix(linear, P3_TO_BT709 * linear, ui_amount * clamp(hdr.ui_vivid, 0.0, 1.0));
++        linear = min(linear, vec3(peak_white));
 +    }
 +    if ((hdr.flags & FLAG_DEBUG) != 0u) {
 +        // The picture in grey at a third of paper white, the gain over it from blue (a little)
@@ -10290,10 +10732,10 @@ index 0000000..a263cce
 +} // namespace Vulkan::HostPasses
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.h b/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.h
 new file mode 100644
-index 0000000..e392ed1
+index 0000000..db4f57f
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/host_passes/hdr_pass.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,60 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: HDR output (hdr in bbport.ini). Encodes the swapchain-sized SDR composite (the game's
 +// frame letterboxed, plus the menu layer) into the HDR swapchain image: HDR10 PQ or scRGB.
@@ -10321,11 +10763,15 @@ index 0000000..e392ed1
 +        /// 1 / its size, mapping output pixels to gain map coordinates.
 +        std::array<float, 2> gain_offset{};
 +        std::array<float, 2> gain_scale{};
++        /// Native mode: the UI's white (times paper white) and colours (0 sRGB .. 1 DCI-P3).
++        float ui_white = 1.0f;
++        float ui_vivid = 0.0f;
 +    };
 +    static constexpr u32 FlagScRgb = 1;   ///< scRGB (linear BT.709) output, else HDR10 PQ
 +    static constexpr u32 FlagOverlay = 2; ///< the menu layer is drawn
 +    static constexpr u32 FlagNative = 4;  ///< `gain` is this frame's gain map (native mode)
 +    static constexpr u32 FlagDebug = 8;   ///< BB_HDR_DEBUG: the gain as a heat map
++    static constexpr u32 FlagUiFrame = 16; ///< native mode, a frame without a scene: all UI
 +
 +    /// `output_format`: the HDR swapchain's format.
 +    void Create(vk::Device device, vk::Format output_format);
@@ -12138,10 +12584,10 @@ index 0000000..2336643
 +} // namespace VideoCore
 diff --git a/gpu/shim/bbport_menu_i18n.cpp b/gpu/shim/bbport_menu_i18n.cpp
 new file mode 100644
-index 0000000..2de3468
+index 0000000..d22c785
 --- /dev/null
 +++ b/gpu/shim/bbport_menu_i18n.cpp
-@@ -0,0 +1,1255 @@
+@@ -0,0 +1,1269 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: the in-game menu (bbport_overlay.cpp) in the languages other than English and
 +// Russian, which MenuText takes at its call sites. Each table maps the English text, exactly as
@@ -12169,10 +12615,12 @@ index 0000000..2de3468
 +constexpr Entry kSpanish[] = {
 +    {"Picture",
 +     "Imagen"},
-+    {"Picture tuning (restart required)",
-+     "Ajuste de imagen (requiere reinicio)"},
-+    {"Turn on Picture tuning and restart the game to use these.",
-+     "Activa el ajuste de imagen y reinicia el juego para usarlos."},
++    {"Picture tuning",
++     "Ajuste de imagen"},
++    {"UI brightness",
++     "Brillo de la interfaz"},
++    {"UI colour",
++     "Color de la interfaz"},
 +    {"Brightness",
 +     "Brillo"},
 +    {"Contrast",
@@ -12340,10 +12788,12 @@ index 0000000..2de3468
 +constexpr Entry kPortugueseBrazil[] = {
 +    {"Picture",
 +     "Imagem"},
-+    {"Picture tuning (restart required)",
-+     "Ajuste de imagem (requer reinício)"},
-+    {"Turn on Picture tuning and restart the game to use these.",
-+     "Ative o ajuste de imagem e reinicie o jogo para usá-los."},
++    {"Picture tuning",
++     "Ajuste de imagem"},
++    {"UI brightness",
++     "Brilho da interface"},
++    {"UI colour",
++     "Cor da interface"},
 +    {"Brightness",
 +     "Brilho"},
 +    {"Contrast",
@@ -12510,10 +12960,12 @@ index 0000000..2de3468
 +constexpr Entry kFrench[] = {
 +    {"Picture",
 +     "Image"},
-+    {"Picture tuning (restart required)",
-+     "Réglage de l'image (redémarrage requis)"},
-+    {"Turn on Picture tuning and restart the game to use these.",
-+     "Activez le réglage de l'image et redémarrez le jeu pour les utiliser."},
++    {"Picture tuning",
++     "Réglage de l'image"},
++    {"UI brightness",
++     "Luminosité de l'interface"},
++    {"UI colour",
++     "Couleurs de l'interface"},
 +    {"Brightness",
 +     "Luminosité"},
 +    {"Contrast",
@@ -12682,10 +13134,12 @@ index 0000000..2de3468
 +constexpr Entry kGerman[] = {
 +    {"Picture",
 +     "Bild"},
-+    {"Picture tuning (restart required)",
-+     "Bildanpassung (Neustart nötig)"},
-+    {"Turn on Picture tuning and restart the game to use these.",
-+     "Bildanpassung einschalten und das Spiel neu starten, um sie zu nutzen."},
++    {"Picture tuning",
++     "Bildanpassung"},
++    {"UI brightness",
++     "Helligkeit der Oberfläche"},
++    {"UI colour",
++     "Farben der Oberfläche"},
 +    {"Brightness",
 +     "Helligkeit"},
 +    {"Contrast",
@@ -12854,10 +13308,12 @@ index 0000000..2de3468
 +constexpr Entry kItalian[] = {
 +    {"Picture",
 +     "Immagine"},
-+    {"Picture tuning (restart required)",
-+     "Regolazione immagine (riavvio richiesto)"},
-+    {"Turn on Picture tuning and restart the game to use these.",
-+     "Attiva la regolazione immagine e riavvia il gioco per usarle."},
++    {"Picture tuning",
++     "Regolazione immagine"},
++    {"UI brightness",
++     "Luminosità dell'interfaccia"},
++    {"UI colour",
++     "Colori dell'interfaccia"},
 +    {"Brightness",
 +     "Luminosità"},
 +    {"Contrast",
@@ -13026,10 +13482,12 @@ index 0000000..2de3468
 +constexpr Entry kPolish[] = {
 +    {"Picture",
 +     "Obraz"},
-+    {"Picture tuning (restart required)",
-+     "Strojenie obrazu (wymaga restartu)"},
-+    {"Turn on Picture tuning and restart the game to use these.",
-+     "Włącz strojenie obrazu i uruchom grę ponownie, aby ich użyć."},
++    {"Picture tuning",
++     "Strojenie obrazu"},
++    {"UI brightness",
++     "Jasność interfejsu"},
++    {"UI colour",
++     "Kolory interfejsu"},
 +    {"Brightness",
 +     "Jasność"},
 +    {"Contrast",
@@ -13195,10 +13653,12 @@ index 0000000..2de3468
 +constexpr Entry kTurkish[] = {
 +    {"Picture",
 +     "Görüntü"},
-+    {"Picture tuning (restart required)",
-+     "Görüntü ayarı (yeniden başlatma gerekir)"},
-+    {"Turn on Picture tuning and restart the game to use these.",
-+     "Bunları kullanmak için görüntü ayarını açın ve oyunu yeniden başlatın."},
++    {"Picture tuning",
++     "Görüntü ayarı"},
++    {"UI brightness",
++     "Arayüz parlaklığı"},
++    {"UI colour",
++     "Arayüz renkleri"},
 +    {"Brightness",
 +     "Parlaklık"},
 +    {"Contrast",
@@ -14492,6 +14952,24 @@ index 0000000..1c7cb8b
 +void AddEchoes(int amount);
 +void AddInsight(int amount);
 +} // namespace BbEngine::Cheats
+diff --git a/gpu/shim/engine/online_fixes.h b/gpu/shim/engine/online_fixes.h
+new file mode 100644
+index 0000000..1b042f6
+--- /dev/null
++++ b/gpu/shim/engine/online_fixes.h
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Game-side fixes for playing online (BB_ONLINE=1), after droogie/bbhost src/engine/chara_id.cpp
++// and sos_signs.cpp: a character the server once gave no id gets asked for one again, and a
++// summon sign entry times out sooner. See online_fixes.cpp.
++#pragma once
++#include <cstddef>
++#include <cstdint>
++
++namespace BbEngine::OnlineFixes {
++/// Loader start, after the executable is verified: nothing unless online. Commits its own hook.
++bool Install(std::uint8_t* image, std::size_t size);
++} // namespace BbEngine::OnlineFixes
 diff --git a/src/respawn_patch.h b/src/respawn_patch.h
 new file mode 100644
 index 0000000..c73a186

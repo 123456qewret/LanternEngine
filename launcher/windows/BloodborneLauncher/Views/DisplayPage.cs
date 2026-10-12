@@ -39,6 +39,10 @@ namespace BloodborneLauncher.Views
                 Choices.HdrPeak, () => Ini.Get("hdr_peak", "1000"), v => Ini.Set("hdr_peak", v));
             ComboRow(SymbolRegular.Sparkle24, "Highlight boost", "Off keeps the game's own look; higher makes lamps, fire and the sky brighter",
                 Choices.HdrBoost, () => Ini.Get("hdr_boost", "0.25"), v => Ini.Set("hdr_boost", v));
+            ComboRow(SymbolRegular.TextFont24, "UI brightness", "Native source only: how bright the HUD, menus and subtitles are, against paper white",
+                Choices.HdrUiBrightness, () => Ini.Get("hdr_ui_brightness", "1"), v => Ini.Set("hdr_ui_brightness", v));
+            ComboRow(SymbolRegular.Color24, "UI colour", "Native source only: Vivid shows the HUD and menus with the colours a wide-gamut monitor gives SDR; Exact keeps sRGB's",
+                Choices.HdrUiColor, () => Ini.Get("hdr_ui_color", "1"), v => Ini.Set("hdr_ui_color", v));
 
             Group("Frame rate");
             SettingCombo(SymbolRegular.Gauge24, "Frame rate", "30, 60 and 90 are fixed presets; 120 and Uncapped use the uncapped patch with the sprint fix", Choices.FpsModes, "fps_mode");
