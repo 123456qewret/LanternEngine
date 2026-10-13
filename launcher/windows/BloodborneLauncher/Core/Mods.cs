@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -119,7 +120,31 @@ namespace BloodborneLauncher.Core
     /// <summary>Third-party shadPS4 XML patches for 01.09 (scripts/patches.py; profile in patches.json).</summary>
     public static class Patches
     {
-        public sealed record Patch(string Key, string Name, string File, string Author, string Note, bool DefaultOn);
+        public sealed record Patch(string Key, string Name, string File, string Author, string Note, bool DefaultOn,
+            bool ChangesRegion = false);
+
+        // The game's region function (scripts/patches.py REGION_FUNCTION, as patch addresses).
+        // "Unlock Game Region" makes it return a region with no Bloodborne server.
+        private const long RegionStart = 0x23b9190, RegionEnd = 0x23b91e3;
+
+        private static bool WritesRegion(XElement line)
+        {
+            var address = ((string?)line.Attribute("Address") ?? "").Trim();
+            if (address.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                address = address[2..];
+            if (!long.TryParse(address, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var at))
+                return false;
+            var length = Math.Max(1, ((string?)line.Attribute("Value") ?? "").Trim().Length / 2);
+            return at < RegionEnd && RegionStart < at + length;
+        }
+
+        /// <summary>The enabled patches that change the game's region: with one on, Play online
+        /// fails ("Failure to acquire information from the Bloodborne server").</summary>
+        public static List<Patch> RegionChanging(string directory)
+        {
+            var profile = LoadProfile();
+            return Discover(directory).Where(p => p.ChangesRegion && IsOn(p, profile)).ToList();
+        }
 
         public static string ProfilePath => Path.Combine(Paths.DataDir, "patches.json");
 
@@ -158,7 +183,8 @@ namespace BloodborneLauncher.Core
                     found.Add(new Patch($"{file}/{name}", name.Length > 0 ? name : $"{file}/{name}", file,
                         (string?)meta.Attribute("Author") ?? "",
                         ((string?)meta.Attribute("Note") ?? "").Replace("\\n", "\n"),
-                        string.Equals((string?)meta.Attribute("isEnabled"), "true", StringComparison.OrdinalIgnoreCase)));
+                        string.Equals((string?)meta.Attribute("isEnabled"), "true", StringComparison.OrdinalIgnoreCase),
+                        meta.Descendants("Line").Any(WritesRegion)));
                 }
             }
             return found;

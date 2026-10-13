@@ -310,7 +310,18 @@ namespace BloodborneLauncher
             await InstallAsync(release, package: true);
         }
 
-        private async Task InstallAsync(Updater.Release release, bool package)
+        /// <summary>A release the player picked in Settings › Updates › Version, older ones included.</summary>
+        public async Task InstallVersionAsync(Updater.Release release)
+        {
+            if (release.IsCurrent)
+            {
+                Prompt.Tell("Already installed", $"You already have {Updater.CurrentLabel}.");
+                return;
+            }
+            await InstallAsync(release, await Updater.SwitchNeedsPackageAsync(release), chosen: true);
+        }
+
+        private async Task InstallAsync(Updater.Release release, bool package, bool chosen = false)
         {
             var ws = Workspace.Current;
             if (package && ws.Game.Running)
@@ -321,13 +332,18 @@ namespace BloodborneLauncher
             var notes = release.Notes.Trim();
             if (notes.Length > 1200) notes = notes[..1200] + "…";
             var size = package ? release.ZipSize : release.ExeSize;
+            var older = !release.IsNewerThan(Updater.Current, Updater.CurrentBeta);
             var body = $"You have {Updater.CurrentLabel}. " +
                        (package
-                           ? $"This update includes a new engine, so the whole package is downloaded ({size / 1048576} MB) and updated in place."
+                           ? $"{(chosen ? "This version has a different engine" : "This update includes a new engine")}, so the whole package is downloaded ({size / 1048576} MB) and replaced in place."
                            : $"The launcher downloads {release.Tag} ({size / 1048576} MB), replaces itself and restarts.") +
                        " Your settings, saves, mods and profiles stay." +
-                       (notes.Length > 0 ? "\n\nWhat's new:\n" + notes : "");
-            if (!Prompt.Confirm($"Update to {release.Name}?", body, "Update now"))
+                       (chosen && older
+                           ? "\n\nThis is an older version: settings it doesn't know are kept but not used, and the launcher may offer the newest version again at start."
+                           : "") +
+                       (notes.Length > 0 ? $"\n\n{(chosen && older ? "This version's notes" : "What's new")}:\n" + notes : "");
+            var verb = chosen ? "Switch" : "Update";
+            if (!Prompt.Confirm($"{verb} to {release.Name}?", body, $"{verb} now"))
                 return;
 
             TitleUpdate.Visibility = Visibility.Visible;
@@ -397,6 +413,24 @@ namespace BloodborneLauncher
                     ws.ResolvePort();
                     ws.SaveNow();
                 }
+            }
+
+            // A patch that changes the game's region (Unlock Game Region) leaves the game without a
+            // Bloodborne server: online, ask whether to leave it out for this session.
+            GameEnvironment.RegionPatchOnline = null;
+            if (ini.Get("online_enabled") == "1" && ini.Get("online_connected", "1") == "1" &&
+                Patches.RegionChanging(GameEnvironment.PatchesDir(s)) is { Count: > 0 } region)
+            {
+                var names = string.Join(", ", region.Select(p => $"\"{p.Name}\""));
+                var choice = Prompt.Choose("Play online with " + names + "?",
+                    names + " moves the game to a region that has no Bloodborne server, so Play online fails with " +
+                    "\"Failure to acquire information from the Bloodborne server\".\n\n" +
+                    "Leave it out for this session? It stays on for offline play.",
+                    "Cancel", "Keep it on", "Leave it out");
+                if (choice <= 0) return;
+                GameEnvironment.RegionPatchOnline = choice == 1 ? "keep" : "skip";
+                ws.Log(choice == 1 ? $"{names}: kept on while online; Play online will not reach the server."
+                    : $"{names}: left out while online; it applies again with online off.", LogLevel.Step);
             }
 
             if (!s.Bool("memory_check_off") && MemoryCheck.Problem(ws.Ini) is { } memory)

@@ -18,6 +18,11 @@ namespace BloodborneLauncher.Views
         private readonly StackPanel _customRows = new();
         private readonly TextBlock _updateHint;
         private readonly Wpf.Ui.Controls.Button _updateNow;
+        private readonly ComboBox _versions = new() { Width = 300, VerticalAlignment = VerticalAlignment.Center };
+        private readonly Wpf.Ui.Controls.Button _installVersion;
+        private readonly TextBlock _versionHint;
+        private IReadOnlyList<Updater.Release>? _releases;
+        private bool _versionsLoading;
 
         public SettingsPage() : base("Settings", "The Bloodborne PC engine, how the game is started, and keeping this launcher up to date.")
         {
@@ -124,6 +129,17 @@ namespace BloodborneLauncher.Views
                     _ = Ws.CheckForUpdatesAsync(quiet: false);
                 });
             SettingToggle(SymbolRegular.Alert24, "Check for updates at start", $"Looks at github.com/{Updater.Repository}/releases", "check_updates");
+            _installVersion = SmallButton("Install", SymbolRegular.ArrowDownload24, async (_, _) => await InstallChosenVersionAsync());
+            _installVersion.IsEnabled = false;
+            _versions.SelectionChanged += (_, _) =>
+                _installVersion.IsEnabled = _versions.SelectedItem is ComboBoxItem { Tag: Updater.Release r } && !r.IsCurrent;
+            Add(Card(SymbolRegular.History24, "Version",
+                "Every published release, stable and beta, newest first. Install any of them, older ones too, to go back if a " +
+                "version gives you trouble. Your settings, saves, mods and profiles stay",
+                Row(_versions, _installVersion,
+                    IconButton(SymbolRegular.ArrowClockwise24, "Reload the list", async (_, _) => await LoadVersionsAsync(force: true))),
+                out _versionHint));
+            SetHint(_versionHint, $"You have {Updater.CurrentLabel}");
             Ws.UpdateStateChanged += UpdateUpdates;
             UpdateUpdates();
 
@@ -144,6 +160,55 @@ namespace BloodborneLauncher.Views
         {
             Refresh();
             ShowMethod();
+            _ = LoadVersionsAsync(force: false);
+        }
+
+        /// <summary>Fills the version selector from the releases on GitHub (once, or again on reload).</summary>
+        private async Task LoadVersionsAsync(bool force)
+        {
+            if (_versionsLoading || (_releases != null && !force)) return;
+            _versionsLoading = true;
+            _versions.IsEnabled = false;
+            _installVersion.IsEnabled = false;
+            _versions.Items.Clear();
+            _versions.Items.Add(new ComboBoxItem { Content = "Loading…" });
+            _versions.SelectedIndex = 0;
+            try
+            {
+                _releases = await Updater.AllAsync();
+                _versions.Items.Clear();
+                ComboBoxItem? current = null;
+                foreach (var release in _releases)
+                {
+                    var label = Updater.Label(release.Version, release.Beta) +
+                                (release.Beta > 0 ? "" : "  · stable") +
+                                (release.IsCurrent ? "  (installed)" : "");
+                    var item = new ComboBoxItem { Content = label, Tag = release };
+                    _versions.Items.Add(item);
+                    if (release.IsCurrent) current = item;
+                }
+                _versions.SelectedItem = current ?? (_versions.Items.Count > 0 ? _versions.Items[0] : null);
+                _versions.IsEnabled = _versions.Items.Count > 0;
+                SetHint(_versionHint, _releases.Count == 0
+                    ? $"You have {Updater.CurrentLabel}; no release is published yet"
+                    : $"You have {Updater.CurrentLabel}. {_releases.Count} versions to choose from");
+            }
+            catch (Exception e)
+            {
+                _releases = null;
+                _versions.Items.Clear();
+                SetHint(_versionHint, $"You have {Updater.CurrentLabel}. The list could not be loaded: {e.GetBaseException().Message}");
+            }
+            finally
+            {
+                _versionsLoading = false;
+            }
+        }
+
+        private async Task InstallChosenVersionAsync()
+        {
+            if (_versions.SelectedItem is not ComboBoxItem { Tag: Updater.Release release }) return;
+            await MainWindow.Instance!.InstallVersionAsync(release);
         }
 
         private void Refresh()

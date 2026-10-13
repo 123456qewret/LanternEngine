@@ -28,6 +28,10 @@ namespace BloodborneLauncher.Core
         /// patch (scripts\run_windows.py turns them into BB_FPS=uncap with a limit).</summary>
         public static string Fps(LauncherSettings s) => s.Str("fps_mode") is "30" or "90" or "120" or "144" or "uncap" ? s.Str("fps_mode") : "60";
 
+        /// <summary>This launch's answer about a region-changing patch while online ("keep" or
+        /// "skip"; scripts/patches.py leaves it out unless "keep"), or null when none is on.</summary>
+        public static string? RegionPatchOnline { get; set; }
+
         public static Dictionary<string, string> Build(LauncherSettings s)
         {
             var fps = Fps(s);
@@ -50,6 +54,7 @@ namespace BloodborneLauncher.Core
                 ["BB_VBLANK_HZ"] = fps switch { "90" => "90", "30" or "60" => "60", _ => "0" },
                 ["PYTHONUNBUFFERED"] = "1",
             };
+            if (RegionPatchOnline is { } region) env["BB_REGION_PATCH_ONLINE"] = region;
             if (s.Str("present_mode").Length > 0) env["BB_PRESENT_MODE"] = s.Str("present_mode");
             if (s.Bool("frame_stats")) env["BB_FRAME_STATS"] = "1";
             if (s.Bool("fsr_profile")) env["BB_FSR4_PROFILE"] = "1";

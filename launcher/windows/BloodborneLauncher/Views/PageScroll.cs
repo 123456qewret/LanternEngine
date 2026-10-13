@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 
 namespace BloodborneLauncher.Views
@@ -15,12 +16,21 @@ namespace BloodborneLauncher.Views
         {
             page.PreviewMouseWheel += (_, e) =>
             {
-                if (e.Handled || Owned(e.OriginalSource as DependencyObject, page, e.Delta))
+                if (e.Handled || DropDownOpen(e.OriginalSource, page) ||
+                    Owned(e.OriginalSource as DependencyObject, page, e.Delta))
                     return;
                 page.ScrollToVerticalOffset(page.VerticalOffset - e.Delta);
                 e.Handled = true;
             };
         }
+
+        // An open drop-down list takes the wheel: its items are in a popup, a window of their own
+        // outside the page's visual tree (the walk below never reaches its ComboBox), and the
+        // ComboBox holds the mouse capture while it is open.
+        private static bool DropDownOpen(object source, ScrollViewer page) =>
+            Mouse.Captured is ComboBox { IsDropDownOpen: true } ||
+            (source is Visual visual && PresentationSource.FromVisual(visual) is { } window &&
+             !ReferenceEquals(window, PresentationSource.FromVisual(page)));
 
         private static bool Owned(DependencyObject? source, ScrollViewer page, int delta)
         {

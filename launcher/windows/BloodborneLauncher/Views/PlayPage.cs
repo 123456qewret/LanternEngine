@@ -147,6 +147,9 @@ namespace BloodborneLauncher.Views
                     Paths.OpenFolder(SaveBackups.Folder(S));
                 }),
                 backupToggle), out _backupHint));
+            Add(Card(SymbolRegular.ArrowImport24, "Import saves",
+                "From shadPS4, another Bloodborne port's folder or a copy. This profile's saves are backed up first",
+                SmallButton("Import…", SymbolRegular.FolderArrowRight24, (_, _) => ImportSaves()), out _));
 
             ComboRow(SymbolRegular.LocalLanguage24, "In-game menu language", "The port's settings menu (Insert or L3 + R3)",
                 Choices.MenuLanguages, () => Ini.Get("menu_language", "en"), v => Ini.Set("menu_language", v));
@@ -299,6 +302,59 @@ namespace BloodborneLauncher.Views
                 menu.Items.Add(item);
             }
             menu.IsOpen = true;
+        }
+
+        private void ImportSaves()
+        {
+            if (Ws.Game.Running)
+            {
+                Prompt.Tell("Import saves", "Close the game first: it has the saves open.");
+                return;
+            }
+            string? from = null;
+            if (SaveImport.Known(S).FirstOrDefault() is { } found)
+            {
+                var choice = Prompt.Choose("Import saves",
+                    $"Bloodborne saves found ({found.From}), last saved {found.Saved:d MMM yyyy, HH:mm}:\n{found.Dir}",
+                    "Cancel", "Another folder…", "Import these");
+                if (choice <= 0) return;
+                if (choice == 2) from = found.Dir;
+            }
+            if (from == null)
+            {
+                var folder = PickFolder("The folder with your saves (another port's whole folder is fine)", "");
+                if (folder == null) return;
+                if (SaveImport.Find(folder, "chosen folder").FirstOrDefault() is not { } inside)
+                {
+                    Prompt.Tell("Import saves", "No Bloodborne saves in that folder or the folders under it " +
+                        "(a SPRJ0005 folder with userdata files).");
+                    return;
+                }
+                from = inside.Dir;
+            }
+            var target = SaveImport.Target(S);
+            if (string.Equals(Path.GetFullPath(from), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
+            {
+                Prompt.Tell("Import saves", "Those are already this profile's saves.");
+                return;
+            }
+            var replacing = SaveImport.HasSaves(target)
+                ? "\n\nThis profile's current saves are backed up first: Save backups › Restore… brings them back."
+                : "";
+            if (!Prompt.Confirm("Import saves", $"Copy the saves from\n{from}\ninto {PlayerProfiles.Current(S)}'s saves?{replacing}", "Import"))
+                return;
+            try
+            {
+                SaveImport.Import(S, from);
+                Ws.Log($"Saves imported from {from}.", LogLevel.Good);
+                Prompt.Tell("Saves imported", "Start the game and choose Continue or Load Game.");
+            }
+            catch (Exception e)
+            {
+                Ws.Log("Could not import the saves: " + e.Message, LogLevel.Bad);
+                Prompt.Tell("Import saves", "Could not import: " + e.Message);
+            }
+            Refresh();
         }
 
         private void RestoreBackup(SaveBackups.Backup backup)

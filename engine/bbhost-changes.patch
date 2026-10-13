@@ -127,7 +127,7 @@ index 7a41a21..858148e 100644
  # Third-party decoders: compiled once, without this project's -Werror policy.
  atrac9=(third_party/LibAtrac9/C/src/*.c)
 diff --git a/gpu/CMakeLists.txt b/gpu/CMakeLists.txt
-index f51df72..5db6764 100644
+index f51df72..7fc48a7 100644
 --- a/gpu/CMakeLists.txt
 +++ b/gpu/CMakeLists.txt
 @@ -16,6 +16,14 @@ add_compile_options(-fno-omit-frame-pointer)
@@ -179,7 +179,22 @@ index f51df72..5db6764 100644
  add_host_shader(camera_motion.comp camera_motion_comp)
  add_host_shader(upscale_merge.comp upscale_merge_comp)
  add_host_shader(upscale_reactive.comp upscale_reactive_comp)
-@@ -212,6 +237,11 @@ if (WIN32)
+@@ -194,9 +219,13 @@ target_sources(bbgpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgui
+     third_party/imgui/backends/imgui_impl_vulkan.cpp)
+ target_include_directories(bbgpu PRIVATE third_party/imgui third_party/imgui/backends)
+ target_compile_definitions(bbgpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+-    BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
++    BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
++    BB_KEYCAP_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui/misc/fonts/Roboto-Medium.ttf")
+ set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
+     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf)
++# Keyboard prompts' keycaps (shim/engine/keycap_art.cpp): Roboto Medium (Apache License 2.0).
++set_source_files_properties(shim/engine/keycap_art.cpp PROPERTIES
++    OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui/misc/fonts/Roboto-Medium.ttf)
+ target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
+ target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
+ target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
+@@ -212,6 +241,11 @@ if (WIN32)
      # Windows headers: no min/max macros, no winsock 1 clash; Windows 10+ APIs (SetThreadDescription).
      target_compile_definitions(bbgpu PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
      target_link_libraries(bbgpu PUBLIC xbyak::xbyak)
@@ -191,7 +206,7 @@ index f51df72..5db6764 100644
      # bb-probe.exe links libbbgpu.a with these (out/gpu/bbgpu_link.txt, one argument per line,
      # in link order): the static library's transitive dependencies.
      include(cmake/LinkClosure.cmake)
-@@ -242,6 +272,18 @@ target_link_libraries(pipeline-archive-test PRIVATE fmt::fmt)
+@@ -242,6 +276,18 @@ target_link_libraries(pipeline-archive-test PRIVATE fmt::fmt)
  add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
  target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(motion-history-test PRIVATE ..)
@@ -210,7 +225,7 @@ index f51df72..5db6764 100644
  add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
  target_compile_options(motion-shader-test PRIVATE -UNDEBUG)
  target_include_directories(motion-shader-test PRIVATE shim shadps4 third_party/gcn/include)
-@@ -252,7 +294,8 @@ endif()
+@@ -252,7 +298,8 @@ endif()
  add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
  target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(ui-composition-test PRIVATE ..)
@@ -220,7 +235,7 @@ index f51df72..5db6764 100644
  target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  target_include_directories(settings-test PRIVATE .. shim)
  
-@@ -278,9 +321,16 @@ target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
+@@ -278,9 +325,16 @@ target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
  target_link_libraries(camera-motion-test PRIVATE bbgpu)
  add_dependencies(camera-motion-test host_shaders)
  
@@ -238,7 +253,7 @@ index f51df72..5db6764 100644
  target_include_directories(upscaler-support-test PRIVATE shim)
  target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
  
-@@ -315,6 +365,7 @@ target_include_directories(pc-input-test PRIVATE shim)
+@@ -315,6 +369,7 @@ target_include_directories(pc-input-test PRIVATE shim)
  target_link_libraries(pc-input-test PRIVATE PkgConfig::SDL3)
  target_compile_options(pc-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
  add_executable(widescreen-test EXCLUDE_FROM_ALL ../tests/test_widescreen.cpp
@@ -2166,10 +2181,47 @@ index fa3476b..8eb8214 100644
  }
  
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 944e6f6..a042497 100644
+index 944e6f6..f7b2bc0 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-@@ -994,6 +994,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -891,6 +891,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+                                                         bool is_written, bool is_texel_buffer) {
+     BB_SECTION(ObtainBuffer);
+     const bool stats = BufferStatsEnabled();
++    const auto note_hle = [&](u32 path) {
++        if (hle_obtain) {
++            ++hle_path_calls[(is_written ? 3 : 0) + path];
++            hle_path_bytes[(is_written ? 3 : 0) + path] += size;
++        }
++    };
+     if (stats) {
+         PrintBufferStats();
+         NoteHotUse(device_addr, size);
+@@ -937,6 +943,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+                 SynchronizeMemoryFromImage(arena, device_addr, size);
+             }
+             TraceBinding(device_addr, size, is_written, is_written ? 0 : 2);
++            note_hle(0);
+             if (!is_written && !is_texel_buffer) {
+                 if (const auto shadow = ShadowCopy(device_addr, size)) {
+                     return *shadow;
+@@ -948,6 +955,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
+     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+         BB_SECTION(ObtainStream);
++        note_hle(1);
+         if (stats) {
+             auto& region = Stats().regions[RegionKey(device_addr)];
+             ++region.stream_count;
+@@ -981,6 +989,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+     const auto* arena = GetArena(first_block, last_block);
+     EnsureResident(arena, first_block, last_block);
+     BB_SECTION(ObtainVram);
++    note_hle(2);
+     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
+     if (GuestInPlace()) {
+         BbStats::bound_vram_bytes.fetch_add(size, std::memory_order_relaxed);
+@@ -994,6 +1003,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
              BbStats::buffer_upload_bytes.load(std::memory_order_relaxed) - uploaded_before;
      }
      if (is_written) {
@@ -2177,7 +2229,26 @@ index 944e6f6..a042497 100644
          gpu_modified_ranges.Add(device_addr, size);
          WriteTicks().Note(device_addr, size, scheduler.CurrentTick());
          if (Readbacks()) {
-@@ -2462,6 +2463,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
+@@ -2299,6 +2309,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
+     boost::container::small_vector<vk::BufferCopy, 4> copies;
+     size_t total_size_bytes{};
+     const Buffer* src_buffer{};
++    BbSections::Scope track_scope{BbSections::VramTrack};
+     memory_tracker->ForEachUploadRange(
+         device_addr, size, is_written,
+         [&](u64 addr, u64 size) {
+@@ -2364,8 +2375,10 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
+                 copies.assign(staged.begin(), staged.end());
+                 total_size_bytes = staged_bytes;
+             }
++            BB_SECTION(VramUpload);
+             src_buffer = UploadCopies(arena, copies, total_size_bytes);
+         });
++    track_scope.End();
+ 
+     if (src_buffer) {
+         runtime.CopyBuffer(src_buffer, arena, copies);
+@@ -2462,6 +2475,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
  }
  
  bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size) {
@@ -2185,6 +2256,23 @@ index 944e6f6..a042497 100644
      if (auto type = texture_cache.IsMeta(device_addr)) {
          if (*type == TextureCache::MetaType::HTile) {
              static constexpr u32 ZmaskUncompressed = 0xf;
+diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
+index 77a9f9a..d3cbce7 100644
+--- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
++++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
+@@ -120,6 +120,12 @@ public:
+         ++packet_epoch;
+     }
+ 
++    /// bbport (BB_FRAME_STATS): ObtainBuffer calls made for the copy shader HLE (set around
++    /// them on the draw recording thread), counted by path: [read, written] x [in place, stream
++    /// copy, VRAM], with their bytes.
++    static inline bool hle_obtain = false;
++    static inline std::array<u64, 6> hle_path_calls{}, hle_path_bytes{};
++
+     /// Finds a buffer for the specified region.
+     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
+                                                              bool is_written,
 diff --git a/gpu/shadps4/video_core/page_manager.cpp b/gpu/shadps4/video_core/page_manager.cpp
 index 128e922..c79e2dd 100644
 --- a/gpu/shadps4/video_core/page_manager.cpp
@@ -3978,7 +4066,7 @@ index 0b3dc78..f090799 100644
      AmdGpu::Liverpool* liverpool;
      Scheduler draw_scheduler;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index 5fd360b..6a688cd 100644
+index 5fd360b..27e7f1f 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 @@ -5,6 +5,7 @@
@@ -4521,7 +4609,15 @@ index 5fd360b..6a688cd 100644
  u64 Rasterizer::Flush() {
      BB_SECTION(Flush);
      DrainDrawPipe();
-@@ -2051,10 +2309,10 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
+@@ -1976,6 +2234,7 @@ void Rasterizer::OnSubmit() {
+         buffer_cache.ProcessFaultBuffer();
+     }
+     texture_cache.ProcessDownloadImages();
++    texture_cache.UpdateKeyPrompts();
+     texture_cache.RunGarbageCollector();
+     runtime.TickFrame();
+ }
+@@ -2051,10 +2310,10 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
              !IsKnownFormat(data_fmt, num_fmt)) {
              continue; // null descriptor
          }
@@ -4534,7 +4630,7 @@ index 5fd360b..6a688cd 100644
              return false;
          }
          VideoCore::ImageId image_id = entry.found_id;
-@@ -2796,6 +3054,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
+@@ -2796,6 +3055,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                  bound_buffers.emplace_back(buffer, offset, size, desc.is_written);
                  if (desc.is_written) {
                      // Raw storage-buffer writes can also make an aliased cached image stale.
@@ -4542,7 +4638,7 @@ index 5fd360b..6a688cd 100644
                      texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                  }
                  needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
-@@ -2848,18 +3107,191 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
+@@ -2848,18 +3108,191 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
          entry.sharp = key;
          entry.flags = flags;
          entry.found_generation = ~0ULL;
@@ -4735,7 +4831,7 @@ index 5fd360b..6a688cd 100644
          // Descriptor writes: one per image (no mip arrays in a memoized set).
          for (u32 i = 0; i < stage.images.size(); ++i) {
              auto& set_write = set_writes[write_index++];
-@@ -2873,6 +3305,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2873,6 +3306,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
          BindSamplers(stage, prepared, binding, write_index);
          return;
      }
@@ -4750,7 +4846,7 @@ index 5fd360b..6a688cd 100644
      image_bindings.clear();
      image_binding_entries.clear();
      image_desc_overflow.clear();
-@@ -2882,17 +3322,39 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2882,17 +3323,39 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
      boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
      // TextureSetMemo: what this call resolves, to remember when the set qualifies.
      std::array<TextureSetEntry, TextureSet::MaxImages> resolved{};
@@ -4792,7 +4888,7 @@ index 5fd360b..6a688cd 100644
          // bbport: a hash lookup per texture per draw for a diagnostic only.
          static const bool warn_meta = std::getenv("BB_WARN_META_TEXTURE") != nullptr;
          if (warn_meta && texture_cache.IsMeta(tsharp.Address())) {
-@@ -2916,6 +3378,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2916,6 +3379,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                          "data_format={}, num_format={}",
                          tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                          static_cast<u32>(num_fmt));
@@ -4800,7 +4896,7 @@ index 5fd360b..6a688cd 100644
              image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
              image_binding_entries.push_back(nullptr);
              binding_proxy_ok.push_back(false);
-@@ -2934,8 +3397,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2934,8 +3398,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                                       mip_fallback_mode == Shader::MipStorageFallbackMode::None;
  
          auto& desc_entry =
@@ -4811,7 +4907,7 @@ index 5fd360b..6a688cd 100644
          // BB_SCENE_DEBUG: proxied scene targets this binding reads at the native size, and why.
          const auto debug_native = [&](const VideoCore::Image& image) {
              if (!scene_debug_frame || proxy_candidate || !image.scene_proxy) return;
-@@ -2951,9 +3414,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2951,9 +3415,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
              // bbport: a plain binding (no mip override) of the same T# resolves to the same image
              // while no image was registered or unregistered.
              if (mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
@@ -4825,7 +4921,7 @@ index 5fd360b..6a688cd 100644
                  auto& [image_id, _] =
                      image_bindings.emplace_back(desc_entry.found_id, &desc_entry.found_desc);
                  image_binding_entries.push_back(&desc_entry);
-@@ -2963,6 +3428,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2963,6 +3429,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                  if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                      image_id = depth_image_id;
                      image = &texture_cache.GetImage(image_id);
@@ -4833,7 +4929,7 @@ index 5fd360b..6a688cd 100644
                  }
                  debug_native(*image);
                  if (image->binding.is_bound) {
-@@ -2986,21 +3452,32 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -2986,21 +3453,32 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
              }
  
              const u64 generation = texture_cache.RegistryGeneration();
@@ -4866,7 +4962,7 @@ index 5fd360b..6a688cd 100644
              }
              debug_native(*image);
              if (image->binding.is_bound) {
-@@ -3014,8 +3491,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -3014,8 +3492,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
          image_descriptor_array_sizes.push_back(num_bindings);
      }
  
@@ -4881,7 +4977,7 @@ index 5fd360b..6a688cd 100644
          auto& [image_id, desc_ptr] = image_bindings[binding_index];
          auto* memo_entry = image_binding_entries[binding_index];
          const auto& desc = *desc_ptr;
-@@ -3046,10 +3529,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -3046,10 +3530,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                  !binding.is_target &&
                  !(upscaler->Enabled() && upscaler->RedirectsSampled(image_id))) {
                  if (const auto proxy = scene_targets->SampleProxy(image, desc.view_info)) {
@@ -4895,7 +4991,7 @@ index 5fd360b..6a688cd 100644
                                                     desc.view_info.range, true};
                      }
                      ++proxy_samples;
-@@ -3098,18 +3583,27 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -3098,18 +3584,27 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
              }
              image_infos.emplace_back(VK_NULL_HANDLE, view, layout);
              if (set_ok && binding_index < resolved.size()) {
@@ -4925,7 +5021,7 @@ index 5fd360b..6a688cd 100644
      } else if (set_slot) {
          set_slot->key = 0;
      }
-@@ -3150,7 +3644,9 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+@@ -3150,7 +3645,9 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
          static std::atomic<u64> seen{0};
          const u32 kind = u32(sharp.xy_min_filter.Value()) * 3 * 5 + u32(sharp.mip_filter.Value()) * 5 +
                           u32(sharp.max_aniso.Value());
@@ -4936,7 +5032,7 @@ index 5fd360b..6a688cd 100644
              std::printf("Sampler: game uses min filter %u, mip filter %u, anisotropy %.0fx\n",
                          u32(sharp.xy_min_filter.Value()), u32(sharp.mip_filter.Value()),
                          sharp.MaxAniso());
-@@ -3175,15 +3671,80 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+@@ -3175,15 +3672,80 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
      sharp.max_aniso.Assign(ratio);
  }
  
@@ -5019,7 +5115,7 @@ index 5fd360b..6a688cd 100644
          image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
          auto& set_write = set_writes[write_index++];
          set_write.dstSet = VK_NULL_HANDLE;
-@@ -3224,29 +3785,61 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
+@@ -3224,29 +3786,61 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
      return sig;
  }
  
@@ -5087,7 +5183,7 @@ index 5fd360b..6a688cd 100644
      if (!match) {
          const bool generation_miss = set.key == key && set.stage == &stage && set.count == count &&
                                       set.generation != generation;
-@@ -3285,10 +3878,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+@@ -3285,10 +3879,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
          set.stage = &stage;
          set.count = 0;
          set.generation = ~0ull;
@@ -5100,7 +5196,7 @@ index 5fd360b..6a688cd 100644
      for (u32 i = 0; i < count; ++i) {
          const auto& entry = set.entries[i];
          if (!entry.id) {
-@@ -3303,16 +3898,19 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+@@ -3303,16 +3899,19 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
              (entry.proxy ? !proxies_on ||
                                 !scene_targets->ProxyCurrent(image, entry.range.base.level,
                                                              entry.range.extent.levels)
@@ -5121,7 +5217,7 @@ index 5fd360b..6a688cd 100644
      for (u32 i = 0; i < count; ++i) {
          const auto& entry = set.entries[i];
          if (!entry.id) {
-@@ -3341,26 +3939,76 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
+@@ -3341,26 +3940,76 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
      return true;
  }
  
@@ -5201,7 +5297,7 @@ index 5fd360b..6a688cd 100644
      }
      BeginSignature signature;
      if (memo_on) {
-@@ -3369,7 +4017,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+@@ -3369,7 +4018,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
          bool usable = begin_memo.valid && scheduler.IsRenderingWith(begin_memo.state) &&
                        !regs.depth_render_control.depth_clear_enable &&
                        !regs.depth_render_control.stencil_clear_enable &&
@@ -5210,7 +5306,7 @@ index 5fd360b..6a688cd 100644
          for (const auto id : signature.ids) {
              if (usable && id) {
                  const auto& image = texture_cache.GetImage(id);
-@@ -3399,6 +4047,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
+@@ -3399,6 +4048,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
              // Recomputed after the full path: it may have started the scene (scene_started).
              begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
                            target_scale,target_offset};
@@ -5218,7 +5314,7 @@ index 5fd360b..6a688cd 100644
          }
      }
      return state;
-@@ -3824,7 +4473,10 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
+@@ -3824,7 +4474,10 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
              return;
          }
      }
@@ -5230,7 +5326,7 @@ index 5fd360b..6a688cd 100644
      const auto* gds_buffer = buffer_cache.GetGdsBuffer();
      const auto [src_buffer, src_offset] = [&] -> std::pair<const VideoCore::Buffer*, u64> {
          if (src_gds) {
-@@ -3866,6 +4518,7 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
+@@ -3866,6 +4519,7 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
  }
  
  void Rasterizer::NoteAssetWrite(VAddr addr, u64 size) {
@@ -5238,7 +5334,7 @@ index 5fd360b..6a688cd 100644
      buffer_cache.NoteAssetWrite(addr, size);
      InvalidateAfterWrite(addr, size);
  }
-@@ -3884,6 +4537,7 @@ void Rasterizer::InvalidateAfterWrite(VAddr addr, u64 size) {
+@@ -3884,6 +4538,7 @@ void Rasterizer::InvalidateAfterWrite(VAddr addr, u64 size) {
  }
  
  void Rasterizer::NoteCommandWrite(VAddr addr, const void* data, u64 size, bool recording_thread) {
@@ -5246,7 +5342,7 @@ index 5fd360b..6a688cd 100644
      if (VideoCore::WriteTracking() || !IsMapped(addr, size)) {
          return; // tracking catches it, or the GPU does not use it
      }
-@@ -3899,6 +4553,7 @@ void Rasterizer::NoteCommandWrite(VAddr addr, const void* data, u64 size, bool r
+@@ -3899,6 +4554,7 @@ void Rasterizer::NoteCommandWrite(VAddr addr, const void* data, u64 size, bool r
  }
  
  void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
@@ -5254,7 +5350,7 @@ index 5fd360b..6a688cd 100644
      BbStats::cpu_write_notes.fetch_add(1, std::memory_order_relaxed);
      BbStats::cpu_write_note_bytes.fetch_add(size, std::memory_order_relaxed);
      if (IsMapped(addr, size)) {
-@@ -3907,9 +4562,31 @@ void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
+@@ -3907,9 +4563,31 @@ void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
      }
  }
  
@@ -5919,7 +6015,7 @@ index a0c6485..8cc64fe 100644
          }
      }
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp
-index f777aac..b7bda6f 100644
+index f777aac..aba55a7 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_shader_hle.cpp
 @@ -1,6 +1,13 @@
@@ -5936,7 +6032,15 @@ index f777aac..b7bda6f 100644
  #include "shader_recompiler/info.h"
  #include "video_core/renderer_vulkan/vk_rasterizer.h"
  #include "video_core/renderer_vulkan/vk_runtime.h"
-@@ -135,6 +142,104 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
+@@ -9,6 +16,7 @@
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ #include "video_core/host_shaders/buffer_multi_copy_comp.h"
++#include "bbport_sections.h"
+ #include "bbport_toggles.h"
+ #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
+ 
+@@ -135,10 +143,109 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
      return true;
  }
  
@@ -6041,7 +6145,12 @@ index f777aac..b7bda6f 100644
  static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                   Rasterizer& rasterizer) {
      auto& runtime = rasterizer.GetRuntime();
-@@ -176,38 +281,57 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
+     auto& buffer_cache = rasterizer.GetBufferCache();
++    BbSections::Scope batch_scope{BbSections::HleBatch};
+ 
+     // Copy shader defines three formatted buffers as inputs: control, source, and destination.
+     const auto ctl_buf_sharp = info.buffers[0].GetSharp(info);
+@@ -176,44 +283,87 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
          const char* env = std::getenv("BB_COPY_MERGE_KB");
          return env ? vk::DeviceSize(std::strtoull(env, nullptr, 10)) * 1024 : vk::DeviceSize(64_KB);
      }();
@@ -6069,13 +6178,6 @@ index f777aac..b7bda6f 100644
 -            auto new_dst_offset_max = std::max(dst_offset_max, dst_offset + size);
 -            if (new_dst_offset_max - new_dst_offset_min > MaxDistanceForMerge) {
 -                break;
--            }
--
--            // We can batch this copy
--            src_offset_min = new_src_offset_min;
--            src_offset_max = new_src_offset_max;
--            dst_offset_min = new_dst_offset_min;
--            dst_offset_max = new_dst_offset_max;
 +    static std::vector<CopyBatch> batches, grouped_batches;
 +    static std::vector<vk::BufferCopy> grouped;
 +    FindBatches(copies, MaxDistanceForMerge, batches);
@@ -6101,8 +6203,12 @@ index f777aac..b7bda6f 100644
 +        } else if (++grouping_misses >= 4) {
 +            grouping_misses = 0;
 +            grouping_pause = 64;
-         }
++        }
 +    }
++    batch_scope.End();
++    // BB_FRAME_STATS: which ObtainBuffer path the batches take (BufferCache::hle_obtain).
++    using VideoCore::BufferCache;
++    static std::array<u64, 6> path_calls_before{}, path_bytes_before{};
 +    if (BbStats::enabled) {
 +        ++stat_dispatches;
 +        stat_ranges += copies.size();
@@ -6116,9 +6222,30 @@ index f777aac..b7bda6f 100644
 +                        "(%.0f fewer by destination grouping)\n",
 +                        stat_dispatches / seconds, stat_ranges / seconds, stat_batches / seconds,
 +                        stat_saved / seconds);
++            // [source, destination] x [in place, stream, VRAM]: calls/s and KiB per call.
++            const char* names[6] = {"src in place", "src stream", "src VRAM",
++                                    "dst in place", "dst stream", "dst VRAM"};
++            std::printf("  HLE copy ObtainBuffer paths:");
++            for (u32 i = 0; i < 6; ++i) {
++                const u64 calls = BufferCache::hle_path_calls[i] - path_calls_before[i];
++                const u64 bytes = BufferCache::hle_path_bytes[i] - path_bytes_before[i];
++                if (calls) {
++                    std::printf(" %s %.0f/s %.1f KiB,", names[i], calls / seconds,
++                                bytes / 1024.0 / calls);
++                }
+             }
+-
+-            // We can batch this copy
+-            src_offset_min = new_src_offset_min;
+-            src_offset_max = new_src_offset_max;
+-            dst_offset_min = new_dst_offset_min;
+-            dst_offset_max = new_dst_offset_max;
++            std::printf("\n");
++            path_calls_before = BufferCache::hle_path_calls;
++            path_bytes_before = BufferCache::hle_path_bytes;
 +            window = now;
 +            stat_dispatches = stat_ranges = stat_batches = stat_saved = 0;
-+        }
+         }
 +    }
 +    u32 batch_start = 0;
 +    for (const auto& batch : batches) {
@@ -6129,7 +6256,18 @@ index f777aac..b7bda6f 100644
 +        const auto dst_offset_max = batch.dst_max;
  
          // Obtain buffers for the total source and destination ranges.
++        BbSections::Scope obtain_scope{BbSections::HleObtain};
++        VideoCore::BufferCache::hle_obtain = BbStats::enabled;
          const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
+             src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min, false);
+         const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
+             dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min, true);
++        VideoCore::BufferCache::hle_obtain = false;
++        obtain_scope.End();
++        BB_SECTION(HleCopy);
+ 
+         // Apply found buffer base.
+         const auto vk_copies = std::span{copies}.subspan(batch_start, batch_end - batch_start);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 index ed0b5ca..c7524bf 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
@@ -6915,10 +7053,10 @@ index 21f9e6e..95523cc 100644
      u64 hash{};
  
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 98ccdd1..0e2acad 100644
+index 98ccdd1..c43bdbf 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-@@ -4,6 +4,8 @@
+@@ -4,8 +4,11 @@
  #include <xxhash.h>
  #include <algorithm>
  
@@ -6926,8 +7064,11 @@ index 98ccdd1..0e2acad 100644
 +#include "bbport_sections.h"
  #include "bbport_toggles.h"
  #include "bbport_free_check.h"
++#include "engine/key_prompts.h"
  #include "common/assert.h"
-@@ -150,10 +152,116 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
+ #include "common/debug.h"
+ #include "common/div_ceil.h"
+@@ -150,10 +153,116 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
          std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                        DEFAULT_CRITICAL_GC_MEMORY));
      trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
@@ -7044,7 +7185,7 @@ index 98ccdd1..0e2acad 100644
  std::string TextureCache::DescribeImagesIn(VAddr addr, u64 size) {
      std::unique_lock lock{mutex, std::try_to_lock}; // the caller may hold it already
      if (!lock.owns_lock()) {
-@@ -197,6 +305,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+@@ -197,6 +306,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
      const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
                                image.info.resources.layers * (image.info.num_bits / 8);
      ASSERT(download_size <= image.info.guest_size);
@@ -7052,7 +7193,7 @@ index 98ccdd1..0e2acad 100644
      vk::BufferImageCopy image_copy = {
          .bufferOffset = 0,
          .bufferRowLength = image.info.pitch,
-@@ -267,6 +376,157 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+@@ -267,6 +377,157 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
      }
  }
  
@@ -7210,7 +7351,7 @@ index 98ccdd1..0e2acad 100644
  void TextureCache::DumpImagesAt(VAddr address, const char* dir) {
      boost::container::small_vector<ImageId, 4> ids;
      {
-@@ -314,12 +574,44 @@ void TextureCache::DumpImagesAt(VAddr address, const char* dir) {
+@@ -314,12 +575,44 @@ void TextureCache::DumpImagesAt(VAddr address, const char* dir) {
      }
  }
  
@@ -7256,7 +7397,7 @@ index 98ccdd1..0e2acad 100644
  }
  
  void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
-@@ -338,9 +630,11 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
+@@ -338,9 +631,11 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
      ForEachImageInRegion(pages_start, pages_end - pages_start, [&](ImageId image_id, Image& image) {
          const auto image_begin = image.info.guest_address;
          const auto image_end = image.info.guest_address + image.info.guest_size;
@@ -7268,7 +7409,58 @@ index 98ccdd1..0e2acad 100644
              image.flags |= ImageFlagBits::CpuDirty;
              PageManager::NoteImageFault(image.info.guest_address, image.info.guest_size,
                                          image.info.size.width, image.info.size.height,
-@@ -374,6 +668,7 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
+@@ -365,6 +660,50 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
+     });
+ }
+ 
++bool TextureCache::KeyPromptData(const Image& image, std::vector<u8>& data) {
++    const ImageInfo& info = image.info;
++    const bool icon = info.guest_size == KeyPrompts::kIconBytes && info.size.width == 32;
++    const bool hud = info.guest_size == KeyPrompts::kHudBytes && info.size.width == 1024;
++    if ((!icon && !hud) || info.resources.levels != 1 || info.resources.layers != 1 ||
++        (info.pixel_format != vk::Format::eBc7UnormBlock &&
++         info.pixel_format != vk::Format::eBc7SrgbBlock)) {
++        return false;
++    }
++    const u8* guest = std::bit_cast<const u8*>(info.guest_address);
++    const int texture = KeyPrompts::Identify(guest, info.guest_size, info.size.width, info.size.height);
++    if (texture < 0) {
++        return false;
++    }
++    {
++        std::scoped_lock lock{key_icons_mutex};
++        const std::pair<VAddr, u32> where{info.guest_address, info.guest_size};
++        if (std::find(key_icons.begin(), key_icons.end(), where) == key_icons.end()) {
++            // The game loads its icons once; a few reloads elsewhere at most.
++            if (key_icons.size() >= 256) {
++                key_icons.erase(key_icons.begin());
++            }
++            key_icons.push_back(where);
++        }
++    }
++    data.assign(guest, guest + info.guest_size);
++    return KeyPrompts::Draw(texture, data.data(), data.size());
++}
++
++void TextureCache::UpdateKeyPrompts() {
++    if (!KeyPrompts::Changed()) {
++        return;
++    }
++    std::vector<std::pair<VAddr, u32>> icons;
++    {
++        std::scoped_lock lock{key_icons_mutex};
++        icons = key_icons;
++    }
++    // As a CPU write to them would: uploaded again where next drawn.
++    for (const auto& [addr, size] : icons) {
++        InvalidateMemory(addr, size);
++    }
++}
++
+ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
+     std::scoped_lock lock{mutex};
+     ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
+@@ -374,6 +713,7 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
              return;
          }
          // Ensure image is reuploaded when accessed again.
@@ -7276,7 +7468,7 @@ index 98ccdd1..0e2acad 100644
          image.flags |= ImageFlagBits::GpuDirty;
      });
  }
-@@ -780,6 +1075,18 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+@@ -780,6 +1120,18 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
      return image_id;
  }
  
@@ -7295,7 +7487,7 @@ index 98ccdd1..0e2acad 100644
  ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
      ImageIds image_ids;
      ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
-@@ -915,12 +1222,14 @@ void TextureCache::RefreshImage(Image& image) {
+@@ -915,12 +1267,14 @@ void TextureCache::RefreshImage(Image& image) {
  
      RENDERER_TRACE;
      TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
@@ -7310,7 +7502,7 @@ index 98ccdd1..0e2acad 100644
              return;
          }
          image.hash = hash;
-@@ -930,6 +1239,14 @@ void TextureCache::RefreshImage(Image& image) {
+@@ -930,6 +1284,14 @@ void TextureCache::RefreshImage(Image& image) {
      const u32 num_mips = image.info.resources.levels;
      const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
      const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
@@ -7325,7 +7517,7 @@ index 98ccdd1..0e2acad 100644
  
      BbStats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
      boost::container::small_vector<vk::BufferImageCopy, 14> image_copies;
-@@ -948,7 +1265,11 @@ void TextureCache::RefreshImage(Image& image) {
+@@ -948,7 +1310,11 @@ void TextureCache::RefreshImage(Image& image) {
          // contents with stale guest memory (a 1x1 exposure texture computed once: the
          // character creation preview went black after one frame).
          const u8* mip_addr = std::bit_cast<u8*>(image.info.guest_address) + mip_offset;
@@ -7338,7 +7530,7 @@ index 98ccdd1..0e2acad 100644
          if (is_gpu_modified && !is_gpu_dirty && image.mip_hashes[m] == mip_hash) {
              continue;
          }
-@@ -971,26 +1292,41 @@ void TextureCache::RefreshImage(Image& image) {
+@@ -971,26 +1337,49 @@ void TextureCache::RefreshImage(Image& image) {
          });
      }
  
@@ -7358,9 +7550,19 @@ index 98ccdd1..0e2acad 100644
  
      scheduler.EndRendering();
  
+-    const auto [in_buffer, in_offset] =
+-        buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
 +    BbSections::Scope obtain_scope{BbSections::RefreshObtain};
-     const auto [in_buffer, in_offset] =
-         buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
++    std::pair<const Buffer*, u64> source;
++    // bbport: the game's button icons, as the keys they are bound to (engine/key_prompts.h).
++    std::vector<u8> keycaps;
++    if (KeyPromptData(image, keycaps)) {
++        auto& stream = buffer_cache.GetStreamBuffer();
++        source = {&stream, stream.Copy(keycaps.data(), keycaps.size(), 256)};
++    } else {
++        source = buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
++    }
++    const auto [in_buffer, in_offset] = source;
 +    obtain_scope.End();
 +    BbSections::Scope detile_scope{BbSections::RefreshDetile};
      const auto [buffer, offset] = tile_manager.DetileImage(in_buffer, in_offset, image.info);
@@ -7381,7 +7583,7 @@ index 98ccdd1..0e2acad 100644
      // Compare and plain uses of one S# need separate samplers; so do extra LOD biases.
      const u64 hash = HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
                                   u64(std::bit_cast<u32>(extra_lod_bias)));
-@@ -1003,6 +1339,9 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
+@@ -1003,6 +1392,9 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
      } else {
          sampler_lru_cache.Touch(it->second.lru_id, gc_tick);
      }
@@ -7391,7 +7593,7 @@ index 98ccdd1..0e2acad 100644
  
      return it->second.Handle();
  }
-@@ -1051,6 +1390,16 @@ void TextureCache::UnregisterImage(ImageId image_id) {
+@@ -1051,6 +1443,16 @@ void TextureCache::UnregisterImage(ImageId image_id) {
      });
  }
  
@@ -7408,7 +7610,7 @@ index 98ccdd1..0e2acad 100644
  void TextureCache::TrackImage(ImageId image_id) {
      auto& image = slot_images[image_id];
      if (!(image.flags & ImageFlagBits::Registered)) {
-@@ -1066,7 +1415,7 @@ void TextureCache::TrackImage(ImageId image_id) {
+@@ -1066,7 +1468,7 @@ void TextureCache::TrackImage(ImageId image_id) {
          // Re-track the whole image
          image.track_addr = image_begin;
          image.track_addr_end = image_end;
@@ -7417,7 +7619,7 @@ index 98ccdd1..0e2acad 100644
      } else {
          if (image_begin < image.track_addr) {
              TrackImageHead(image_id);
-@@ -1089,7 +1438,7 @@ void TextureCache::TrackImageHead(ImageId image_id) {
+@@ -1089,7 +1491,7 @@ void TextureCache::TrackImageHead(ImageId image_id) {
      ASSERT(image.track_addr != 0 && image_begin < image.track_addr);
      const auto size = image.track_addr - image_begin;
      image.track_addr = image_begin;
@@ -7426,7 +7628,7 @@ index 98ccdd1..0e2acad 100644
  }
  
  void TextureCache::TrackImageTail(ImageId image_id) {
-@@ -1105,11 +1454,12 @@ void TextureCache::TrackImageTail(ImageId image_id) {
+@@ -1105,11 +1507,12 @@ void TextureCache::TrackImageTail(ImageId image_id) {
      const auto addr = image.track_addr_end;
      const auto size = image_end - image.track_addr_end;
      image.track_addr_end = image_end;
@@ -7440,7 +7642,7 @@ index 98ccdd1..0e2acad 100644
      if (!image.IsTracked()) {
          return;
      }
-@@ -1118,12 +1468,13 @@ void TextureCache::UntrackImage(ImageId image_id) {
+@@ -1118,12 +1521,13 @@ void TextureCache::UntrackImage(ImageId image_id) {
      image.track_addr = 0;
      image.track_addr_end = 0;
      if (size != 0) {
@@ -7455,7 +7657,7 @@ index 98ccdd1..0e2acad 100644
      const auto image_begin = image.info.guest_address;
      if (!image.IsTracked() || image_begin < image.track_addr) {
          return;
-@@ -1137,11 +1488,12 @@ void TextureCache::UntrackImageHead(ImageId image_id) {
+@@ -1137,11 +1541,12 @@ void TextureCache::UntrackImageHead(ImageId image_id) {
          // Cehck its hash later.
          MarkAsMaybeDirty(image_id, image);
      }
@@ -7469,7 +7671,7 @@ index 98ccdd1..0e2acad 100644
      const auto image_end = image.info.guest_address + image.info.guest_size;
      if (!image.IsTracked() || image.track_addr_end < image_end) {
          return;
-@@ -1156,10 +1508,13 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
+@@ -1156,10 +1561,13 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
          // Cehck its hash later.
          MarkAsMaybeDirty(image_id, image);
      }
@@ -7484,7 +7686,7 @@ index 98ccdd1..0e2acad 100644
      if (instance.CanReportMemoryUsage()) {
          total_used_memory = instance.GetDeviceMemoryUsage();
          // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
-@@ -1179,6 +1534,16 @@ void TextureCache::GarbageCollectImages() {
+@@ -1179,6 +1587,16 @@ void TextureCache::GarbageCollectImages() {
                  pressure_gc_memory = budget / 100 * 85;
                  critical_gc_memory = budget / 100 * 95;
              }
@@ -7501,7 +7703,7 @@ index 98ccdd1..0e2acad 100644
          }
      }
      BbStats::gc_used_bytes.store(total_used_memory, std::memory_order_relaxed);
-@@ -1188,9 +1553,6 @@ void TextureCache::GarbageCollectImages() {
+@@ -1188,9 +1606,6 @@ void TextureCache::GarbageCollectImages() {
      // discrete GPU it stays over the trigger, where an age of 16 ticks (~3 frames) evicted every
      // texture briefly off screen and uploaded it again. Below the pressure mark an image goes
      // once unused for BB_GC_IDLE_SECONDS (20): the textures of an area left behind.
@@ -7511,7 +7713,7 @@ index 98ccdd1..0e2acad 100644
      if (second != gc_second) {
          gc_second = second;
          BbStats::coarse_second.store(u32(second), std::memory_order_relaxed);
-@@ -1216,6 +1578,29 @@ void TextureCache::GarbageCollectImages() {
+@@ -1216,6 +1631,29 @@ void TextureCache::GarbageCollectImages() {
      u64 below_tick = 0;
      size_t num_deletions = 0;
      u32 visited = 0;
@@ -7541,7 +7743,7 @@ index 98ccdd1..0e2acad 100644
  
      const auto configure = [&](bool allow_aggressive) {
          pressured = total_used_memory >= pressure_gc_memory;
-@@ -1224,6 +1609,9 @@ void TextureCache::GarbageCollectImages() {
+@@ -1224,6 +1662,9 @@ void TextureCache::GarbageCollectImages() {
          below_tick = gc_tick - ticks_to_destroy;
          if (!pressured && !aggresive) {
              below_tick = std::min(below_tick, idle_tick);
@@ -7551,7 +7753,7 @@ index 98ccdd1..0e2acad 100644
          }
          num_deletions = aggresive ? 40 : pressured ? 20 : 10;
          visited = 0;
-@@ -1237,16 +1625,47 @@ void TextureCache::GarbageCollectImages() {
+@@ -1237,16 +1678,47 @@ void TextureCache::GarbageCollectImages() {
          const bool download = image.SafeToDownload();
          const bool tiled = image.info.IsTiled();
          // bbport: images that cannot go now (GPU-written: their contents exist only here, and
@@ -7604,7 +7806,7 @@ index 98ccdd1..0e2acad 100644
              // bbport: synchronously, while the image still protects its pages. A deferred
              // write-back landed after FreeImage had unprotected them, over whatever the game
              // had meanwhile stored there (e.g. its heap after unloading an area).
-@@ -1279,17 +1698,20 @@ void TextureCache::GarbageCollectImages() {
+@@ -1279,17 +1751,20 @@ void TextureCache::GarbageCollectImages() {
          lru_cache.ForEachItemBelow(below_tick, clean_up);
      }
      // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
@@ -7629,7 +7831,7 @@ index 98ccdd1..0e2acad 100644
          }
      }
  }
-@@ -1320,6 +1742,7 @@ void TextureCache::GarbageCollectSamplers() {
+@@ -1320,6 +1795,7 @@ void TextureCache::GarbageCollectSamplers() {
          const size_t lru_id = samplers.at(hash).lru_id;
          samplers.erase(hash);
          sampler_lru_cache.Free(lru_id);
@@ -7637,7 +7839,7 @@ index 98ccdd1..0e2acad 100644
          return false;
      };
  
-@@ -1338,6 +1761,10 @@ void TextureCache::RunGarbageCollector() {
+@@ -1338,6 +1814,10 @@ void TextureCache::RunGarbageCollector() {
      SCOPE_EXIT {
          ++gc_tick;
      };
@@ -7648,7 +7850,7 @@ index 98ccdd1..0e2acad 100644
  
      GarbageCollectImages();
      GarbageCollectSamplers();
-@@ -1375,6 +1802,16 @@ void TextureCache::DeleteImage(ImageId image_id) {
+@@ -1375,6 +1855,16 @@ void TextureCache::DeleteImage(ImageId image_id) {
          }
      }
  
@@ -7665,7 +7867,7 @@ index 98ccdd1..0e2acad 100644
      // Reclaim image and any image views it references.
      scheduler.DeferOperation([this, image_id] {
          Image& image = slot_images[image_id];
-@@ -1387,4 +1824,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
+@@ -1387,4 +1877,14 @@ void TextureCache::DeleteImage(ImageId image_id) {
      });
  }
  
@@ -7681,7 +7883,7 @@ index 98ccdd1..0e2acad 100644
 +
  } // namespace VideoCore
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.h b/gpu/shadps4/video_core/texture_cache/texture_cache.h
-index 2e4c529..440f29a 100644
+index 2e4c529..31541a8 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.h
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.h
 @@ -13,6 +13,7 @@
@@ -7749,10 +7951,14 @@ index 2e4c529..440f29a 100644
      TileManager& GetTileManager() noexcept {
          return tile_manager;
      }
-@@ -111,6 +148,12 @@ public:
+@@ -111,6 +148,16 @@ public:
      /// Invalidates any image in the logical page range.
      void InvalidateMemory(VAddr addr, size_t size);
  
++    /// bbport: uploads the game's button icons again when what they show changed (keyboard and
++    /// mouse prompts, engine/key_prompts.h). Once a frame, without the lock.
++    void UpdateKeyPrompts();
++
 +    /// bbport: whether a tracked image protects a page of the range; without the lock, from any
 +    /// thread (Rasterizer::OnWriteFault: a write fault elsewhere leaves this cache alone).
 +    [[nodiscard]] bool WatchesPages(VAddr addr, size_t size) const noexcept {
@@ -7762,7 +7968,7 @@ index 2e4c529..440f29a 100644
      /// Marks an image as dirty if it exists at the provided address.
      void InvalidateMemoryFromGPU(VAddr address, size_t max_size);
  
-@@ -217,7 +260,24 @@ public:
+@@ -217,7 +264,24 @@ public:
      /// extra_lod_bias: bbport, added to the S#'s bias (reduced scene rendering).
      [[nodiscard]] vk::Sampler GetSampler(const AmdGpu::Sampler& sampler,
                                           AmdGpu::BorderColorBuffer border_color_base,
@@ -7788,7 +7994,7 @@ index 2e4c529..440f29a 100644
  
      /// Retrieves the image with the specified id.
      Image* TryGetImage(ImageId id, u64 uid) {
-@@ -365,6 +425,12 @@ private:
+@@ -365,6 +429,12 @@ private:
      /// Copies image memory back to CPU.
      void DownloadImageMemory(ImageId image_id, bool sync = false);
  
@@ -7801,7 +8007,7 @@ index 2e4c529..440f29a 100644
      /// Thread function for copying downloaded images out to CPU memory.
      void DownloadedImagesThread(const std::stop_token& token);
  
-@@ -387,12 +453,25 @@ private:
+@@ -387,12 +457,29 @@ private:
      void UntrackImageHead(ImageId image_id);
      void UntrackImageTail(ImageId image_id);
  
@@ -7813,6 +8019,10 @@ index 2e4c529..440f29a 100644
      void MarkAsMaybeDirty(ImageId image_id, Image& image);
      static u64 MaybeDirtyHash(const Image& image);
  
++    /// bbport: for an image with the game's button icons, its data with keycaps over them in
++    /// `data`; false when there is none to draw (engine/key_prompts.h).
++    bool KeyPromptData(const Image& image, std::vector<u8>& data);
++
      /// Removes the image and any views/surface metas that reference it.
      void DeleteImage(ImageId image_id);
  
@@ -7827,7 +8037,7 @@ index 2e4c529..440f29a 100644
      /// Touch the image in the LRU cache.
      void TouchImage(const Image& image);
  
-@@ -420,6 +499,9 @@ private:
+@@ -420,6 +507,9 @@ private:
      std::unordered_set<ImageId> download_images;
      u64 total_used_memory = 0;
      u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
@@ -7837,7 +8047,7 @@ index 2e4c529..440f29a 100644
      std::chrono::steady_clock::time_point gc_report_time{};
      /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
      std::array<u64, 64> gc_tick_at_second{};
-@@ -427,16 +509,37 @@ private:
+@@ -427,16 +517,37 @@ private:
      u64 trigger_gc_memory = 0;
      u64 pressure_gc_memory = 0;
      u64 critical_gc_memory = 0;
@@ -7875,6 +8085,16 @@ index 2e4c529..440f29a 100644
      // bbport: FindImage results for unchanged image registrations (guarded by `mutex`).
      struct FindImageCacheEntry {
          VAddr address = 0;
+@@ -457,6 +568,9 @@ private:
+     std::array<FindImageCacheEntry, 1024> find_image_cache{};
+     std::atomic<u64> registry_generation{0};
+     std::mutex samplers_mutex;
++    /// bbport: where the game's button icons are (KeyPromptData), for UpdateKeyPrompts.
++    std::mutex key_icons_mutex;
++    std::vector<std::pair<VAddr, u32>> key_icons;
+     std::mutex download_images_mutex;
+     std::atomic<bool> downloads_queued{false}; ///< download_images may be non-empty (checked without the lock)
+     struct MetaDataInfo {
 diff --git a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp b/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
 index da02543..8e9d6bb 100644
 --- a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
@@ -8719,7 +8939,7 @@ index 2a1ad78..cd531da 100644
      rusage usage{};
      if (getrusage(thread ? RUSAGE_THREAD : RUSAGE_SELF, &usage) != 0) {
 diff --git a/gpu/shim/bbport_sections.h b/gpu/shim/bbport_sections.h
-index f88cc52..1ee0ee8 100644
+index f88cc52..3acef06 100644
 --- a/gpu/shim/bbport_sections.h
 +++ b/gpu/shim/bbport_sections.h
 @@ -3,6 +3,7 @@
@@ -8730,7 +8950,7 @@ index f88cc52..1ee0ee8 100644
  #include <array>
  #include <atomic>
  #include <cstdint>
-@@ -34,6 +35,20 @@ enum Id : std::uint32_t {
+@@ -34,6 +35,25 @@ enum Id : std::uint32_t {
      EnsureResident,
      ObtainStream,  ///< ObtainBuffer's copy of a small read-only buffer into the stream buffer
      ObtainVram,    ///< ObtainBuffer's VRAM path (SynchronizeMemory)
@@ -8748,10 +8968,15 @@ index f88cc52..1ee0ee8 100644
 +    RefreshUpload, ///< RefreshImage: UploadImage (recording the copy)
 +    Upscaler,      ///< TemporalUpscaler::Run: the upscaler's passes
 +    UpscalerEval,  ///< its FSR or DLSS call
++    HleBatch,      ///< copy shader HLE: reading the ranges, batching and grouping them
++    HleObtain,     ///< copy shader HLE: ObtainBuffer for the batches' sources and destinations
++    HleCopy,       ///< copy shader HLE: recording the copies (MultiCopy or CopyBuffer)
++    VramTrack,     ///< SynchronizeMemory: the memory tracker's walk over the range (with uploads)
++    VramUpload,    ///< SynchronizeMemory: staging and recording the uploads it found
      Count,
  };
  inline constexpr const char* Names[Count] = {
-@@ -41,29 +56,94 @@ inline constexpr const char* Names[Count] = {
+@@ -41,29 +61,94 @@ inline constexpr const char* Names[Count] = {
      "buffers",      "textures",    "begin render",  "vertex",       "index",
      "emit vertex",  "dynamic",     "dispatch",      "HLE shader",   "ObtainBuffer",
      "flush",        "motion",      "descriptors",   "kick",         "preupload",
@@ -8759,7 +8984,7 @@ index f88cc52..1ee0ee8 100644
 +    "EnsureResident", "stream copy", "VRAM path", "tex set", "tex set check", "tex set apply",
 +    "tex full", "samplers", "VRAM image sync", "VRAM written", "tex full empty",
 +    "refresh hash", "refresh obtain", "refresh detile", "refresh upload", "upscaler",
-+    "upscaler eval",
++    "upscaler eval", "HLE batch", "HLE obtain", "HLE copy", "VRAM track", "VRAM upload",
  };
  inline std::array<std::atomic<std::uint64_t>, Count> cycles{};
  
@@ -8856,7 +9081,7 @@ index f88cc52..1ee0ee8 100644
  } // namespace BbSections
  
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..93a25f8 100644
+index cf4fbd8..7d80971 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -8946,7 +9171,26 @@ index cf4fbd8..93a25f8 100644
      } else if (key == "menu_pos") {
          float x = -1.0f, y = -1.0f;
          if (std::sscanf(value.c_str(), "%f,%f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f &&
-@@ -109,20 +162,72 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -91,6 +144,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+         v.mouse_invert_y=i!=0;
+     } else if (key == "mouse_auto_rotation") {
+         v.mouse_auto_rotation=i!=0;
++    } else if (key == "button_prompts") {
++        int mode = -1;
++        for (int m = 0; m < PromptsCount; ++m) {
++            if (value == ButtonPromptsNames[m]) {
++                mode = m;
++            }
++        }
++        if (mode < 0) {
++            std::printf("Settings: unknown button_prompts '%s' (expected auto, keyboard or controller); auto\n",
++                        value.c_str());
++        }
++        v.button_prompts = mode < 0 ? PromptsAuto : mode;
+     } else if (key == "mouse_sensitivity") {
+         v.mouse_sensitivity=std::clamp(i,0,10);
+     } else if (key == "camera_controls") {
+@@ -109,20 +174,72 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.graphics_controls=i!=0;
      } else if (key == "graphics_vignette") {
          v.graphics_vignette=i!=0;
@@ -9023,7 +9267,7 @@ index cf4fbd8..93a25f8 100644
      } else if (key == "output_res") {
          for (int r = 0; r < OutputCount; ++r) {
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
-@@ -138,6 +243,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -138,6 +255,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -9051,7 +9295,7 @@ index cf4fbd8..93a25f8 100644
  } // namespace
  
  Values& Get() {
-@@ -146,7 +272,11 @@ Values& Get() {
+@@ -146,7 +284,11 @@ Values& Get() {
  }
  
  const char* MenuText(const char* english, const char* russian) {
@@ -9064,7 +9308,7 @@ index cf4fbd8..93a25f8 100644
  }
  
  void Load() {
-@@ -166,9 +296,7 @@ void Load() {
+@@ -166,9 +308,7 @@ void Load() {
                  }
              }
          }
@@ -9075,7 +9319,7 @@ index cf4fbd8..93a25f8 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -196,6 +324,9 @@ void Load() {
+@@ -196,6 +336,9 @@ void Load() {
          {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
          {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
          {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
@@ -9085,7 +9329,7 @@ index cf4fbd8..93a25f8 100644
      };
      for (const auto& [env, key] : env_keys) {
          if (const char* value = std::getenv(env)) {
-@@ -211,6 +342,7 @@ void Load() {
+@@ -211,6 +354,7 @@ void Load() {
      v.startup_model_lod = v.model_lod;
      v.startup_output_res = v.output_res;
      v.startup_live_resolution = v.live_resolution;
@@ -9093,7 +9337,7 @@ index cf4fbd8..93a25f8 100644
  }
  
  void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
-@@ -264,7 +396,7 @@ void Save() {
+@@ -264,7 +408,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -9102,7 +9346,7 @@ index cf4fbd8..93a25f8 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -277,6 +409,7 @@ void Save() {
+@@ -277,6 +421,7 @@ void Save() {
      put("reactive_max", fixed(v.reactive_max, 2));
      put("debug_view", std::to_string(v.debug_view.load()));
      put("show_fps", flag(v.show_fps));
@@ -9110,7 +9354,7 @@ index cf4fbd8..93a25f8 100644
      put("fsr4_auto_exposure", flag(v.fsr4_auto_exposure));
      put("fsr4_invert_jitter", flag(v.fsr4_invert_jitter));
      // Read by patches.py at start.
-@@ -284,12 +417,23 @@ void Save() {
+@@ -284,12 +429,23 @@ void Save() {
          put(Effects[e].key, flag(v.effects[e]));
      }
      put("fullscreen", flag(v.fullscreen));
@@ -9134,7 +9378,14 @@ index cf4fbd8..93a25f8 100644
      put("camera_controls", flag(v.camera_controls));
      put("widescreen",flag(v.widescreen));
      put("pc_controls",flag(v.pc_controls));
-@@ -305,6 +449,15 @@ void Save() {
+@@ -299,12 +455,22 @@ void Save() {
+     put("mouse_invert_y",flag(v.mouse_invert_y));
+     put("mouse_auto_rotation",flag(v.mouse_auto_rotation));
+     put("mouse_sensitivity",std::to_string(v.mouse_sensitivity.load()));
++    put("button_prompts", ButtonPromptsNames[std::clamp(v.button_prompts.load(), 0, PromptsCount - 1)]);
+     put("change_appearance", flag(v.change_appearance));
+     put("rebirth", flag(v.rebirth));
+     put("camera_fov_scale", fixed(v.camera_fov_scale, 2));
      put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
      put("camera_height_scale", fixed(v.camera_height_scale, 2));
      put("model_lod", std::to_string(v.model_lod.load()));
@@ -9151,7 +9402,7 @@ index cf4fbd8..93a25f8 100644
                            std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..e8a3074 100644
+index c0e8a94..6f7f580 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -9188,7 +9439,7 @@ index c0e8a94..e8a3074 100644
      {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
      {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
      {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
-@@ -50,6 +59,28 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
+@@ -50,6 +59,34 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
  inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
  inline constexpr int OutputCount = 10;
  inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
@@ -9214,10 +9465,16 @@ index c0e8a94..e8a3074 100644
 +enum HdrMode : int { HdrModeNative = 0, HdrModeExpand = 1, HdrModeCount };
 +inline constexpr const char* HdrModeNames[] = {"native", "expand"};
 +static_assert(sizeof(HdrModeNames) / sizeof(HdrModeNames[0]) == HdrModeCount);
++
++/// button_prompts in bbport.ini: the game's button icons drawn as the bound keys while the keyboard
++/// or mouse is in use (auto), always (keyboard), or never (controller). engine/key_prompts.h.
++enum ButtonPrompts : int { PromptsAuto = 0, PromptsKeyboard = 1, PromptsController = 2, PromptsCount };
++inline constexpr const char* ButtonPromptsNames[] = {"auto", "keyboard", "controller"};
++static_assert(sizeof(ButtonPromptsNames) / sizeof(ButtonPromptsNames[0]) == PromptsCount);
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -65,6 +96,8 @@ struct Values {
+@@ -65,6 +102,8 @@ struct Values {
      std::atomic<float> reactive_max{0.9f};
      std::atomic<int> debug_view{DebugNone};
      std::atomic<bool> show_fps{false};
@@ -9226,7 +9483,11 @@ index c0e8a94..e8a3074 100644
      /// The settings menu's position (fraction of the screen), -1 until it is moved.
      std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
      // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
-@@ -80,11 +113,35 @@ struct Values {
+@@ -77,14 +116,39 @@ struct Values {
+     std::atomic<bool> widescreen{true},pc_controls{true},mouse_camera{true},mouse_menu{true};
+     std::atomic<bool> mouse_invert_x{false},mouse_invert_y{false},mouse_auto_rotation{false};
+     std::atomic<int> mouse_sensitivity{5};
++    std::atomic<int> button_prompts{PromptsAuto}; ///< ButtonPrompts; live
      std::atomic<bool> change_appearance{false}, rebirth{false}; // next launch, engine features
      std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
      std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
@@ -9262,7 +9523,7 @@ index c0e8a94..e8a3074 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +157,12 @@ struct Values {
+@@ -100,10 +164,12 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
@@ -9731,7 +9992,7 @@ index c1e5ac1..67c8822 100644
  }
  }
 diff --git a/gpu/shim/engine/option_menu.cpp b/gpu/shim/engine/option_menu.cpp
-index cf652fe..fc9c681 100644
+index cf652fe..e088e04 100644
 --- a/gpu/shim/engine/option_menu.cpp
 +++ b/gpu/shim/engine/option_menu.cpp
 @@ -606,8 +606,14 @@ Slider camera[] = {
@@ -9801,7 +10062,7 @@ index cf652fe..fc9c681 100644
  }
  GUEST_ABI std::int64_t OpenGraphics(void* root,void* params) {
      return open_named(root,params,"PCGraphics",reinterpret_cast<void*>(&GraphicsHandler),4);
-@@ -687,6 +711,13 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
+@@ -687,9 +711,19 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
      GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenEffects));
      hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;
  }
@@ -9815,7 +10076,24 @@ index cf652fe..fc9c681 100644
  
  StartupToggle controls[]={{nullptr,118000},{nullptr,118002},{nullptr,118003},{nullptr,116002},{nullptr,118005}};
  std::uint8_t sensitivity=5,last_sensitivity=5;bool controls_seeded=false;
-@@ -712,6 +743,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
++// Button Prompts (engine/key_prompts.h): BbSettings::ButtonPrompts.
++std::int32_t prompts=0,last_prompts=0;
++const Choice prompt_choices[]={{BbSettings::PromptsAuto,118010},{BbSettings::PromptsKeyboard,118011},{BbSettings::PromptsController,118012}};
+ GUEST_ABI void ControlsHandler(void* dialog,void*) {
+     alignas(16) std::uint8_t scratch[0x100]{};hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
+     auto& s=BbSettings::Get();sensitivity=last_sensitivity=s.mouse_sensitivity;
+@@ -697,7 +731,9 @@ GUEST_ABI void ControlsHandler(void* dialog,void*) {
+     add_toggle_row(dialog,&controls[0].value,118000,1);
+     add_slider_row(dialog,&sensitivity,118001,5);
+     for(int i=1;i<5;i++)add_toggle_row(dialog,&controls[i].value,controls[i].id,i==3?1:0);
+-    controls_seeded=true;log_rows("PCControls",dialog,6,6);
++    prompts=last_prompts=s.button_prompts;
++    add_list_row(dialog,&prompts,118006,prompt_choices,BbSettings::PromptsCount,BbSettings::PromptsAuto);
++    controls_seeded=true;log_rows("PCControls",dialog,7,7);
+ }
+ GUEST_ABI std::int64_t OpenControls(void* root,void* params) {return open_named(root,params,"PCControls",reinterpret_cast<void*>(&ControlsHandler),-1);}
+ GUEST_ABI std::int64_t OpenKeys(void* root,void* params) {return open_named(root,params,"PCKeys",reinterpret_cast<void*>(&pc_keys_handler),-2);}
+@@ -712,6 +748,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
          { Captions c(110010);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenEffectsRow));
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
@@ -9824,7 +10102,7 @@ index cf652fe..fc9c681 100644
      }
      if(input_page) {
          {Captions c(110008);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenControlsRow));hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag);}
-@@ -720,7 +753,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -720,7 +758,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
      if (camera_page) { Captions c(110011);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenCameraRow));
        hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
      hle_call_guest<std::int64_t>(guest_fn(kSystemFinalize),out,builder,arg3);
@@ -9833,7 +10111,7 @@ index cf652fe..fc9c681 100644
      return out;
  }
  } // namespace
-@@ -783,7 +816,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -783,7 +821,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
      graphics_sliders[0].setting=&settings.graphics_ao_strength;graphics_sliders[1].setting=&settings.graphics_shadow_scale;
      effect_toggles[0].setting=&settings.effects[2];effect_toggles[1].setting=&settings.effects[1];
      effect_toggles[2].setting=&settings.effects[0];effect_toggles[3].setting=&settings.graphics_vignette;
@@ -9845,7 +10123,7 @@ index cf652fe..fc9c681 100644
      enhancements[0].setting=&settings.change_appearance;
      enhancements[1].setting=&settings.rebirth;
      enhancements[2].setting=&settings.camera_controls;
-@@ -797,7 +833,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -797,7 +838,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
      std::memcpy(p,&target,8); p+=8; *p++=0x41; *p++=0xff; *p=0xe3;
      const std::int32_t to_pad=pad-(call+5); std::memcpy(image+call+1,&to_pad,4);
      g_installed=true;
@@ -9854,7 +10132,7 @@ index cf652fe..fc9c681 100644
      return true;
  }
  bool ClickDecides(std::uint8_t* list, int index) {
-@@ -850,17 +886,29 @@ void Tick() {
+@@ -850,17 +891,30 @@ void Tick() {
          changed=true;
      }
      auto push_sliders=[&](auto& rows,bool active) {
@@ -9882,6 +10160,7 @@ index cf652fe..fc9c681 100644
      push_toggles(controls,controls_seeded);
      if(controls_seeded && sensitivity!=last_sensitivity){last_sensitivity=std::min<std::uint8_t>(sensitivity,10);BbSettings::Get().mouse_sensitivity=last_sensitivity;changed=true;}
 -    push_toggles(graphics_toggles,graphics_seeded);push_toggles(effect_toggles,effects_seeded);
++    if(controls_seeded && prompts!=last_prompts){last_prompts=std::clamp(prompts,0,BbSettings::PromptsCount-1);BbSettings::Get().button_prompts=last_prompts;changed=true;}
 +    picture|=push_toggles(graphics_toggles,graphics_seeded);picture|=push_toggles(effect_toggles,effects_seeded);
 +    if (picture && !BbSettings::Get().graphics_controls) {
 +        BbSettings::Get().graphics_controls=true;
@@ -10072,7 +10351,7 @@ index fdbf8c4..6e5d795 100644
 +    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
 diff --git a/scripts/patches.py b/scripts/patches.py
-index da1e52e..a6216b1 100644
+index da1e52e..d27d290 100644
 --- a/scripts/patches.py
 +++ b/scripts/patches.py
 @@ -10,6 +10,7 @@ import os
@@ -10185,7 +10464,44 @@ index da1e52e..a6216b1 100644
  # Third-party patch files (shadPS4/GoldHEN XML) in the data directory's patches/ folder.
  BLOODBORNE_IDS={'CUSA00207','CUSA00208','CUSA00900','CUSA01363','CUSA03173','CUSA03023'}
  
-@@ -273,7 +350,12 @@ def main():
+@@ -237,6 +314,26 @@ def external_selection(found, config):
+             if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
+ 
+ 
++# The game's region function (image 0x1fb9190..0x1fb91e3). "Unlock Game Region" makes it return
++# region 5 for that region's language list, and the game has no server for region 5 (its ss.info
++# URL is empty): Play online fails with "Failure to acquire information from the Bloodborne
++# server". A patch that writes into it is left out while online is on, whatever its name or file.
++REGION_FUNCTION=(0x1fb9190,0x1fb91e3)
++
++
++def breaks_online(writes):
++    """Whether online is on and these writes change the game's region, unless the player chose
++    to keep such a patch (the launcher asks at Play: BB_REGION_PATCH_ONLINE=keep)."""
++    start,end=REGION_FUNCTION
++    return (os.environ.get('BB_ONLINE')=='1' and os.environ.get('BB_REGION_PATCH_ONLINE')!='keep' and
++            any(offset<end and start<offset+len(data) for offset,data in writes))
++
++
++def skip_for_online(key):
++    print(f'Patches: skipped {key} while online is on: it moves the game to a region with no Bloodborne '
++          'server (Play online would fail); it applies again with online off',file=sys.stderr)
++
++
+ def compile_external(selected, segments):
+     """Writes of the selected external patches; a patch with unsupported lines is skipped whole."""
+     writes=[]
+@@ -252,6 +349,9 @@ def compile_external(selected, segments):
+         except ValueError as error:
+             print(f'Patches: skipped {key}: {error}',file=sys.stderr)
+             continue
++        if breaks_online(ours):
++            skip_for_online(key)
++            continue
+         writes+=ours
+         print(f'Patches: external {key} ({len(ours)} writes)')
+     return writes
+@@ -273,7 +373,12 @@ def main():
      p.add_argument('--output-res',default='',help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080)')
      p.add_argument('--print-scaled',action='store_true',
                     help='print "RENDER OUTPUT" (WxH) when bbport.ini selects an output other than 1080p')
@@ -10198,7 +10514,7 @@ index da1e52e..a6216b1 100644
      if a.print_scaled:
          sizes=scaled_sizes(read_settings(a.settings))
          if sizes: print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]}')
-@@ -292,7 +374,9 @@ def main():
+@@ -292,7 +397,12 @@ def main():
      if intel_tonemap_fix() and INTEL_TONEMAP not in names:
          names.append(INTEL_TONEMAP)
      validate_patch_requirements(names,a.game_dir)
@@ -10206,10 +10522,13 @@ index da1e52e..a6216b1 100644
 +    elf=(a.out/'eboot.elf').read_bytes()
 +    segments=eboot_segments(elf)
 +    names=checked_patches(a.xml,names,a.app_version,segments,elf,FPS_PRESETS[a.fps])
++    for name in [n for n in names if breaks_online(compile_patches(a.xml,[n],a.app_version,segments))]:
++        skip_for_online(name)
++        names.remove(name)
      writes=compile_patches(a.xml,names,a.app_version,segments)
      size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
      # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
-@@ -302,7 +386,7 @@ def main():
+@@ -302,7 +412,7 @@ def main():
      if size:
          writes+=resolution_writes(a.xml,size,a.app_version,segments,ui)
          if size[0]*size[1]>OUTPUT_SIZE[0]*OUTPUT_SIZE[1]:
@@ -10218,7 +10537,7 @@ index da1e52e..a6216b1 100644
              writes+=compile_patches(a.xml,[heap],a.app_version,segments)
              names.append(heap)
          print(f'Patches: scene {size[0]}x{size[1]}; UI {ui[0]}x{ui[1]}')
-@@ -310,6 +394,12 @@ def main():
+@@ -310,6 +420,12 @@ def main():
          # After the built-in ones: an external patch of the same bytes wins.
          writes+=compile_external(external_selection(external_patches(a.patches_dir,a.app_version,a.xml),
                                                      a.patches_config),segments)
@@ -12058,7 +12377,7 @@ index 49eb6c3..494466c 100644
  if __name__ == '__main__':
      unittest.main()
 diff --git a/tools/engine/menu_assets.cpp b/tools/engine/menu_assets.cpp
-index d51b554..60e312c 100644
+index d51b554..b5f92c3 100644
 --- a/tools/engine/menu_assets.cpp
 +++ b/tools/engine/menu_assets.cpp
 @@ -31,7 +31,7 @@ using Bytes = std::vector<std::uint8_t>;
@@ -12084,8 +12403,9 @@ index d51b554..60e312c 100644
      };
      section("PCSetting", 116020, 383, 6, 0, {});
 -    section("PCGraphics", 117020, 384, 5, 0, {"Item_5_0"});
+-    section("PCControls", 118020, 385, 6, 0, {});
 +    section("PCGraphics", 117020, 384, 6, 0, {});
-     section("PCControls", 118020, 385, 6, 0, {});
++    section("PCControls", 118020, 385, 7, 1, {});
      section("PCKeys", 119020, 386, std::nullopt, 2, {});
 -    section("PCEffects", 120020, 387, 6, 0, {});
 +    section("PCEffects", 120020, 387, 5, 0, {"Item_5_0"});
@@ -12097,7 +12417,7 @@ index d51b554..60e312c 100644
  }
  
 diff --git a/tools/engine/pc_option_messages.tsv b/tools/engine/pc_option_messages.tsv
-index 2199381..5b25308 100644
+index 2199381..e6e98c7 100644
 --- a/tools/engine/pc_option_messages.tsv
 +++ b/tools/engine/pc_option_messages.tsv
 @@ -7,7 +7,7 @@
@@ -12109,7 +12429,14 @@ index 2199381..5b25308 100644
  # that open them. All are unused in the shipped menu.msgbnd. (Motion blur,
  # depth of field and chromatic aberration moved to PC Effects with their
  # 117000 ids.)
-@@ -33,6 +33,7 @@
+@@ -27,12 +27,13 @@
+ # id	menu text (group 0xc8)	line help (group 0xc9)
+ 110006	PC Settings	Options added by the PC port.
+ 110007	PC Graphics	Graphics options added by the PC port.
+-110008	PC Controls	The mouse: camera, sensitivity and the pointer.
++110008	PC Controls	The mouse: camera, sensitivity and the pointer; button prompts.
+ 110009	Key Bindings	Keyboard and mouse bindings.
+ 110010	PC Effects	Post-processing: blur, bloom, vignette and lens effects.
  110011	PC Camera	The follow camera: field of view, distance and height.
  110012	Steam Deck	Frame rate and model detail for the Steam Deck.
  110013	PC Enhancements	Enable the mirror, rebirth and PC Camera controls. Each needs a restart.
@@ -12131,7 +12458,7 @@ index 2199381..5b25308 100644
  121020	PC Camera	
  121000	Camera Distance	How far behind the character the camera sits. 5 is the game's own.
  121001	Camera Height	How high above the character the camera looks. 5 is the game's own.
-@@ -120,9 +126,9 @@
+@@ -120,9 +126,13 @@
  14000336	Undo Rebirth	
  
  118005	Camera Auto Rotation	Allow the camera to turn automatically while using the mouse.
@@ -12141,6 +12468,10 @@ index 2199381..5b25308 100644
 -117043	3840x1080
 -117044	5120x1440
 -117045	5120x2160
++118006	Button Prompts	The button icons in menus and prompts. Automatic shows keys while the keyboard or mouse is in use.
++118010	Automatic	
++118011	Keyboard	
++118012	Controller	
 +117040	2560x1080 (21:9)
 +117041	3440x1440 (21:9)
 +117042	3840x1600 (24:10)
@@ -16252,10 +16583,10 @@ index 0000000..693ca50
 +} // namespace BbSettings
 diff --git a/gpu/shim/bbport_sampler.cpp b/gpu/shim/bbport_sampler.cpp
 new file mode 100644
-index 0000000..9dd1bcd
+index 0000000..a32fa8f
 --- /dev/null
 +++ b/gpu/shim/bbport_sampler.cpp
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,262 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: BB_SAMPLE_THREADS=<names> - where those threads run, for loading-time work (Windows; the
 +// Linux runtime has BB_SAMPLE_THREAD in runtime_kernel.c). Names are comma-separated prefixes of
@@ -16305,7 +16636,7 @@ index 0000000..9dd1bcd
 +    std::vector<std::string> names;
 +    const char* env = std::getenv("BB_SAMPLE_THREADS");
 +    std::string list = env ? env : "";
-+    if (list == "load") list = "main,GXRenderThread,Core.Res.,shadPS4:GpuCommandProcessor,bb:VkRecorder";
++    if (list == "load") list = "main,GXRenderThread,Core.Res.,shadPS4:GpuCommandProcessor,bb:DrawRec,bb:VkRecorder";
 +    size_t start = 0;
 +    for (;;) {
 +        const size_t comma = list.find(',', start);
@@ -16363,6 +16694,21 @@ index 0000000..9dd1bcd
 +    }
 +}
 +
++/// bbport: the engine's own code range: a sample in a system DLL (a wait, a protection change)
++/// on an engine thread is kept with the first return address into it, the engine function that
++/// called the system (marked with kHostCaller).
++constexpr unsigned long long kHostCaller = 1ull << 63;
++std::pair<unsigned long long, unsigned long long> EngineCode() {
++    static const auto range = [] {
++        const auto base = reinterpret_cast<unsigned long long>(GetModuleHandleW(nullptr));
++        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
++        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
++        const unsigned long long start = base + nt->OptionalHeader.BaseOfCode;
++        return std::pair{start, start + nt->OptionalHeader.SizeOfCode};
++    }();
++    return range;
++}
++
 +bool Sample(Target& t, Site* site) {
 +    if (SuspendThread(t.handle) == static_cast<DWORD>(-1)) return false;
 +    CONTEXT context{};
@@ -16378,6 +16724,15 @@ index 0000000..9dd1bcd
 +                    if (value >= kGuestLo && value < kGuestHi) {
 +                        caller = value - kGuestLo;
 +                        break;
++                    }
++                }
++                const auto [code, code_end] = EngineCode();
++                if (!caller && (rip < code || rip >= code_end)) {
++                    for (const auto value : stack) {
++                        if (value >= code && value < code_end) {
++                            caller = value | kHostCaller;
++                            break;
++                        }
 +                    }
 +                }
 +            }
@@ -16403,6 +16758,12 @@ index 0000000..9dd1bcd
 +}
 +
 +void Report(std::map<DWORD, Target>& targets) {
++    // BB_SAMPLE_TOP=N: the N hottest sites instead of 8 (a flat profile, e.g. the draw recording
++    // thread, symbolized afterwards from the executable's debug info).
++    static const size_t top = [] {
++        const char* env = std::getenv("BB_SAMPLE_TOP");
++        return env ? std::max<size_t>(1, std::strtoull(env, nullptr, 10)) : size_t{8};
++    }();
 +    for (auto& [id, t] : targets) {
 +        if (!t.samples) continue;
 +        std::map<std::string, unsigned long long> modules;
@@ -16419,13 +16780,18 @@ index 0000000..9dd1bcd
 +        for (size_t i = 0; i < mods.size() && i < 5; ++i)
 +            std::printf(", %s %.0f%%", mods[i].first.c_str(), 100.0 * mods[i].second / t.samples);
 +        std::printf("; hottest:");
-+        for (size_t i = 0; i < hot.size() && i < 8; ++i) {
++        for (size_t i = 0; i < hot.size() && i < top; ++i) {
 +            const auto& [site, count] = hot[i];
++            const double share = 100.0 * count / t.samples;
++            const int digits = top > 8 ? 2 : 0; // long lists are mostly well under 1%
 +            if (site.second == ~0ull)
-+                std::printf(" +%#llx %.0f%%", site.first, 100.0 * count / t.samples);
++                std::printf(" +%#llx %.*f%%", site.first, digits, share);
++            else if (site.second & kHostCaller)
++                std::printf(" %s (from %s) %.*f%%", Module(site.first, true).c_str(),
++                            Module(site.second & ~kHostCaller, true).c_str(), digits, share);
 +            else
-+                std::printf(" %s (from +%#llx) %.0f%%", Module(site.first, true).c_str(), site.second,
-+                            100.0 * count / t.samples);
++                std::printf(" %s (from +%#llx) %.*f%%", Module(site.first, true).c_str(), site.second,
++                            digits, share);
 +        }
 +        std::printf("\n");
 +        t.samples = 0;
@@ -17572,6 +17938,1200 @@ index 0000000..1c7cb8b
 +void AddEchoes(int amount);
 +void AddInsight(int amount);
 +} // namespace BbEngine::Cheats
+diff --git a/gpu/shim/engine/key_prompts.cpp b/gpu/shim/engine/key_prompts.cpp
+new file mode 100644
+index 0000000..9ffe046
+--- /dev/null
++++ b/gpu/shim/engine/key_prompts.cpp
+@@ -0,0 +1,360 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "engine/key_prompts.h"
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstring>
++#include <initializer_list>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <unordered_map>
++#include <utility>
++#include <vector>
++
++#include <SDL3/SDL.h>
++
++#include "bbport_settings.h"
++#include "engine/keycap_art.h"
++#include "input/bindings.h"
++#include "input/compat.h"
++
++namespace KeyPrompts {
++namespace {
++
++static_assert(kIconBytes == Keycap::kBytes);
++
++// The game's icons, as on the US disc: FNV-1a 64 of each one's 0x400 bytes. The names follow the
++// Japanese convention: KG_OK draws Circle and KG_Cancel Cross.
++enum Icon : int {
++    kCross, kL1, kL2, kL3, kLeftStick, kDpadDown, kDpadLeftRight, kDpadUp, kDpadUpDown, kDpad,
++    kCircle, kR1, kR2, kR3, kRightStick, kSquare, kTriangle, kOptions, kTouchLeft, kTouchRight,
++    kIconCount,
++};
++constexpr std::uint64_t kHashes[kIconCount] = {
++    0x2310f7c71b939e0bull,  // KG_Cancel
++    0xdf0f0104031e5f67ull,  // KG_L1
++    0xfadfdba7de6c76b0ull,  // KG_L2
++    0xd210779fe3f51673ull,  // KG_L3
++    0xcc75c8c3bfbf5b35ull,  // KG_LS
++    0xce0de7ced6567e92ull,  // KG_L_D
++    0x294394b7ad99f129ull,  // KG_L_LR
++    0xaa338448add2c9f0ull,  // KG_L_U
++    0xad221c010b1f4101ull,  // KG_L_UD
++    0x57d112cbe3da49b1ull,  // KG_L_UDLR
++    0xed95e3b0221d51d1ull,  // KG_OK
++    0x665da1b194608b8aull,  // KG_R1
++    0x73f2b5572f49f886ull,  // KG_R2
++    0xe0848ecdcdd5582dull,  // KG_R3
++    0x03b41e07b779abf7ull,  // KG_RS
++    0x51f55dd737e72648ull,  // KG_R_L
++    0xeb8fef4557aea451ull,  // KG_R_U
++    0xadd716f21d77cfdfull,  // KG_Start
++    0xce3869fe20faa939ull,  // KG_TP_L
++    0x9376eea6c514d1fbull,  // KG_TP_R
++};
++
++constexpr std::uint32_t kPadCross = 0x4000, kPadCircle = 0x2000;
++
++std::uint64_t Fnv(const void* data, std::size_t size) {
++    std::uint64_t h = 0xcbf29ce484222325ull;
++    for (std::size_t i = 0; i < size; ++i) {
++        h = (h ^ static_cast<const std::uint8_t*>(data)[i]) * 0x100000001b3ull;
++    }
++    return h;
++}
++
++struct State {
++    bool keys = false;          // keycaps shown
++    bool menu = false;          // a menu owns the screen (menu_pointer_in_menu)
++    std::uint32_t confirm = 0;  // the pad button that confirms there
++    bool mouse_camera = false;
++    std::uint64_t serial = 0;   // host_bindings_serial
++    bool operator==(const State&) const = default;
++};
++
++State Current() {
++    State s;
++    const auto& settings = BbSettings::Get();
++    const int mode = settings.button_prompts.load(std::memory_order_relaxed);
++    s.keys = settings.pc_controls && (mode == BbSettings::PromptsKeyboard ||
++                                      (mode == BbSettings::PromptsAuto &&
++                                       host_input_device() == InputDevice::KeyboardMouse));
++    if (s.keys) {
++        s.menu = menu_pointer_in_menu();
++        s.confirm = menu_confirm_button();
++        s.mouse_camera = settings.mouse_camera;
++        s.serial = host_bindings_serial();
++    }
++    return s;
++}
++
++// What a cap says for a key: short, since it is at most five letters on a 32-pixel icon.
++std::string KeyLabel(int scancode) {
++    const char* name = SDL_GetScancodeName(static_cast<SDL_Scancode>(scancode));
++    if (!name || !*name) {
++        return "?";
++    }
++    static constexpr std::pair<std::string_view, const char*> kShort[] = {
++        {"Left Shift", "Shift"}, {"Right Shift", "Shift"}, {"Left Ctrl", "Ctrl"}, {"Right Ctrl", "Ctrl"},
++        {"Left Alt", "Alt"},     {"Right Alt", "Alt"},     {"Left GUI", "Win"},   {"Right GUI", "Win"},
++        {"Return", "Enter"},     {"Keypad Enter", "Enter"}, {"Escape", "Esc"},    {"Backspace", "Bksp"},
++        {"CapsLock", "Caps"},    {"Delete", "Del"},        {"Insert", "Ins"},     {"PageUp", "PgUp"},
++        {"PageDown", "PgDn"},    {"PrintScreen", "PrtSc"}, {"ScrollLock", "ScrLk"}, {"Numlock", "NumLk"},
++        {"`", "~"},  // a lone backtick is a speck
++    };
++    for (const auto& [from, to] : kShort) {
++        if (from == name) {
++            return to;
++        }
++    }
++    std::string label = name;
++    if (label.rfind("Keypad ", 0) == 0) {
++        label = "Num" + label.substr(7);
++    }
++    return label.size() > 5 ? label.substr(0, 5) : label;
++}
++
++// One cap of several.
++std::string ActionLabel(int action) {
++    if (const int key = host_binding_key(action)) {
++        return KeyLabel(key);
++    }
++    static constexpr const char* kMouse[] = {"-", "LMB", "RMB", "MMB", "M4", "M5", "WhUp", "WhDn"};
++    const int m = host_binding_mouse(action);
++    return kMouse[m >= 0 && m <= 7 ? m : 0];
++}
++
++// The key bound to an action, else its mouse button; nothing when it has neither (the game's
++// own icon stays).
++std::optional<Keycap::Spec> ActionSpec(int action) {
++    using Keycap::Spec;
++    if (const int key = host_binding_key(action)) {
++        return Spec{Spec::Key, {KeyLabel(key)}};
++    }
++    const int m = host_binding_mouse(action);
++    if (m == 4 || m == 5) {
++        return Spec{Spec::Key, {m == 4 ? "M4" : "M5"}};
++    }
++    if (m >= 1 && m <= 7) {
++        return Spec{Spec::Mouse, {}, m};
++    }
++    return std::nullopt;
++}
++
++Keycap::Spec Caps(std::initializer_list<int> actions) {
++    Keycap::Spec spec{Keycap::Spec::Keys, {}};
++    for (const int action : actions) {
++        spec.labels.push_back(ActionLabel(action));
++    }
++    return spec;
++}
++
++std::optional<Keycap::Spec> IconSpec(int icon, const State& s) {
++    using Keycap::Spec;
++    // In a menu the face buttons that confirm and go back are Menu Confirm's and Menu Back's
++    // keys, and the d-pad is the arrow keys (input.cpp).
++    if (s.menu) {
++        switch (icon) {
++        case kCross: return ActionSpec(s.confirm == kPadCross ? kBindConfirm : kBindBack);
++        case kCircle: return ActionSpec(s.confirm == kPadCircle ? kBindConfirm : kBindBack);
++        case kDpadUp: return Spec{Spec::Key, {"Up"}};
++        case kDpadDown: return Spec{Spec::Key, {"Down"}};
++        case kDpadLeftRight: return Spec{Spec::Keys, {"Left", "Right"}};
++        case kDpadUpDown: return Spec{Spec::Keys, {"Up", "Down"}};
++        case kDpad: return Spec{Spec::Keys, {"Up", "Left", "Down", "Right"}};
++        default: break;
++        }
++    }
++    switch (icon) {
++    case kCross: return ActionSpec(kBindInteract);
++    case kCircle: return ActionSpec(kBindRoll);
++    case kTriangle: return ActionSpec(kBindBloodVial);
++    case kSquare: return ActionSpec(kBindUseItem);
++    case kR1: return ActionSpec(kBindAttack);
++    case kR2: return ActionSpec(kBindStrong);
++    case kL1: return ActionSpec(kBindTransform);
++    case kL2: return ActionSpec(kBindFirearm);
++    case kR3: return ActionSpec(kBindLockOn);
++    case kL3: return ActionSpec(kBindL3);
++    case kOptions: return ActionSpec(kBindMenu);
++    case kTouchLeft: return ActionSpec(kBindGestures);
++    case kTouchRight: return ActionSpec(kBindEffects);
++    case kDpadUp: return ActionSpec(kBindDpadUp);
++    case kDpadDown: return ActionSpec(kBindSwitchItem);
++    case kDpadLeftRight: return Caps({kBindSwitchLeft, kBindSwitchRight});
++    case kDpadUpDown: return Caps({kBindDpadUp, kBindSwitchItem});
++    case kDpad: return Caps({kBindDpadUp, kBindSwitchLeft, kBindSwitchItem, kBindSwitchRight});
++    case kLeftStick: return Caps({kBindMoveF, kBindMoveL, kBindMoveB, kBindMoveR});
++    case kRightStick:
++        if (s.mouse_camera) {
++            return Spec{Spec::Mouse, {}, 0};
++        }
++        return Caps({kBindLookU, kBindLookL, kBindLookD, kBindLookR});
++    default: return std::nullopt;
++    }
++}
++
++std::mutex g_mutex;
++State g_state;
++bool g_have_state = false;
++std::atomic<bool> g_logged{false};
++// Drawn keycaps by what they are for and Spec::Id(), kept for the session (a few dozen at most).
++// Never destroyed, so no late upload outlives it.
++auto& g_drawn = *new std::unordered_map<std::string, std::vector<std::uint8_t>>;
++
++// The HUD sheet (MENU_Common_00091, 1024x512 BC7, one mip, PS4 thin tiled): its Circle, Cross
++// and L3, 26 pixels each with transparent blocks between them. Each is redrawn over its own
++// 7x8 blocks; the sheet is recognised by those blocks alone (FNV-1a 64 of them in this order),
++// so a mod's changes elsewhere on it stay.
++constexpr int kHud = kIconCount;
++constexpr std::uint64_t kHudHash = 0x08d886c6323fa447ull;
++constexpr std::uint32_t kHudWidth = 1024, kHudHeight = 512;
++constexpr int kHudBlockY = 30, kHudBlocksX = 7, kHudBlocksY = 8;  // y 120..151
++constexpr struct {
++    Icon icon;
++    int block_x;  // the first block column
++    int left;     // the button's left edge in it
++} kHudButtons[] = {{kCircle, 165, 1}, {kCross, 173, 2}, {kL3, 181, 2}};
++constexpr int kHudTop = 3;  // the buttons' top edge in the first block row
++
++// Where block (bx, by) of the sheet is: tiles of 8x8 blocks, a row of them after another, each
++// in Morton order (x in the even bits).
++std::size_t HudBlock(int bx, int by) {
++    const int tile = (by >> 3) * int(kHudWidth / 32) + (bx >> 3);
++    int morton = 0;
++    for (int k = 0; k < 3; ++k) {
++        morton |= ((bx >> k) & 1) << (2 * k) | ((by >> k) & 1) << (2 * k + 1);
++    }
++    return std::size_t(tile * 64 + morton) * 16;
++}
++
++std::uint64_t HudHash(const std::uint8_t* data) {
++    std::uint64_t h = 0xcbf29ce484222325ull;
++    for (const auto& button : kHudButtons) {
++        for (int by = kHudBlockY; by < kHudBlockY + kHudBlocksY; ++by) {
++            for (int bx = button.block_x; bx < button.block_x + kHudBlocksX; ++bx) {
++                const std::uint8_t* b = data + HudBlock(bx, by);
++                for (int i = 0; i < 16; ++i) {
++                    h = (h ^ b[i]) * 0x100000001b3ull;
++                }
++            }
++        }
++    }
++    return h;
++}
++
++// With g_mutex held. A KG_* icon (kIconBytes, tiled) or a HUD button's blocks (row by row).
++const std::vector<std::uint8_t>& Drawn(const Keycap::Spec& spec, int hud_left) {
++    const std::string id = (hud_left < 0 ? std::string("kg|") : "hud" + std::to_string(hud_left) + '|') + spec.Id();
++    auto it = g_drawn.find(id);
++    if (it != g_drawn.end()) {
++        return it->second;
++    }
++    std::vector<std::uint8_t> out;
++    if (hud_left < 0) {
++        std::uint8_t rgba[Keycap::kSize * Keycap::kSize * 4];
++        Keycap::Draw(spec, rgba);
++        out.resize(kIconBytes);
++        Keycap::Encode(rgba, out.data());
++    } else {
++        constexpr int size = 26, w = kHudBlocksX * 4, h = kHudBlocksY * 4;
++        std::uint8_t cap[size * size * 4];
++        Keycap::Draw(spec, cap, size);
++        std::vector<std::uint8_t> region(std::size_t(w) * h * 4, 0);
++        for (int y = 0; y < size; ++y) {
++            std::memcpy(&region[(std::size_t(y + kHudTop) * w + hud_left) * 4], &cap[y * size * 4], size * 4);
++        }
++        out.resize(std::size_t(kHudBlocksX) * kHudBlocksY * 16);
++        Keycap::EncodeBlocks(region.data(), w, h, out.data());
++    }
++    return g_drawn.emplace(id, std::move(out)).first->second;
++}
++
++void LogFound() {
++    if (!g_logged.exchange(true)) {
++        host_log("button prompts: the game's button icons found; keys and mouse buttons while the "
++                 "keyboard or mouse is in use (button_prompts = %s)",
++                 BbSettings::ButtonPromptsNames[std::clamp(BbSettings::Get().button_prompts.load(), 0,
++                                                           BbSettings::PromptsCount - 1)]);
++    }
++}
++
++} // namespace
++
++int Identify(const void* data, std::size_t size, std::uint32_t width, std::uint32_t height) {
++    if (!data) {
++        return -1;
++    }
++    if (size == kIconBytes && width == 32 && height == 32) {
++        const std::uint64_t hash = Fnv(data, size);
++        for (int icon = 0; icon < kIconCount; ++icon) {
++            if (kHashes[icon] == hash) {
++                LogFound();
++                return icon;
++            }
++        }
++    } else if (size == kHudBytes && width == kHudWidth && height == kHudHeight &&
++               HudHash(static_cast<const std::uint8_t*>(data)) == kHudHash) {
++        LogFound();
++        return kHud;
++    }
++    return -1;
++}
++
++bool Draw(int texture, std::uint8_t* data, std::size_t size) {
++    if (texture < 0 || texture > kHud || size != (texture == kHud ? kHudBytes : kIconBytes)) {
++        return false;
++    }
++    std::scoped_lock lock{g_mutex};
++    if (!g_have_state) {
++        g_state = Current();
++        g_have_state = true;
++    }
++    if (!g_state.keys) {
++        return false;
++    }
++    if (texture != kHud) {
++        const auto spec = IconSpec(texture, g_state);
++        if (!spec) {
++            return false;
++        }
++        std::memcpy(data, Drawn(*spec, -1).data(), kIconBytes);
++        return true;
++    }
++    bool drawn = false;
++    for (const auto& button : kHudButtons) {
++        const auto spec = IconSpec(button.icon, g_state);
++        if (!spec) {
++            continue;
++        }
++        const std::uint8_t* blocks = Drawn(*spec, button.left).data();
++        for (int by = 0; by < kHudBlocksY; ++by) {
++            for (int bx = 0; bx < kHudBlocksX; ++bx) {
++                std::memcpy(data + HudBlock(button.block_x + bx, kHudBlockY + by), blocks, 16);
++                blocks += 16;
++            }
++        }
++        drawn = true;
++    }
++    return drawn;
++}
++
++bool Changed() {
++    const State now = Current();
++    std::scoped_lock lock{g_mutex};
++    if (!g_have_state) {
++        g_state = now;
++        g_have_state = true;
++        return false;
++    }
++    if (now == g_state) {
++        return false;
++    }
++    g_state = now;
++    return true;
++}
++
++} // namespace KeyPrompts
+diff --git a/gpu/shim/engine/key_prompts.h b/gpu/shim/engine/key_prompts.h
+new file mode 100644
+index 0000000..be58525
+--- /dev/null
++++ b/gpu/shim/engine/key_prompts.h
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++// Button prompts for the keyboard and mouse. The game draws its button prompts from two places in
++// menu/common.tpf: 20 icons of their own (KG_*: 32x32 BC7 textures - the key guides, the
++// tutorial notes, the menus) and three 26-pixel buttons on a HUD sheet (MENU_Common_00091:
++// Circle, Cross and L3 - the world prompts such as "Examine" and the dialog boxes). While the
++// keyboard or mouse is in use the texture cache uploads keycaps over them (engine/keycap_art.h):
++// the key, or the mouse button, bound to what that pad button does there - in a menu, Menu
++// Confirm and Menu Back for the face buttons that confirm and go back. The pad, or
++// button_prompts = controller, brings the game's own icons back; nothing in the game's memory
++// changes.
++
++#include <cstddef>
++#include <cstdint>
++
++namespace KeyPrompts {
++
++constexpr std::size_t kIconBytes = 0x400, kHudBytes = 0x80000;
++
++/// Which of the game's textures with button icons this is, or -1.
++int Identify(const void* data, std::size_t size, std::uint32_t width, std::uint32_t height);
++
++/// Draws the keycaps over `data`, a copy of that texture's data about to be uploaded (the game's
++/// format and tiling). False, and `data` unchanged, while the game's own icons show.
++bool Draw(int texture, std::uint8_t* data, std::size_t size);
++
++/// Once a frame (Rasterizer::OnSubmit): whether what the icons show changed since the last call
++/// (the device in use, a menu opened or closed, a binding, the setting), so that the texture
++/// cache uploads them again.
++bool Changed();
++
++} // namespace KeyPrompts
+diff --git a/gpu/shim/engine/keycap_art.cpp b/gpu/shim/engine/keycap_art.cpp
+new file mode 100644
+index 0000000..1d2016f
+--- /dev/null
++++ b/gpu/shim/engine/keycap_art.cpp
+@@ -0,0 +1,733 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "engine/keycap_art.h"
++
++#include <algorithm>
++#include <array>
++#include <climits>
++#include <cmath>
++#include <cstring>
++
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wunused-function"
++#define STBTT_STATIC
++#define STB_TRUETYPE_IMPLEMENTATION
++#include "imstb_truetype.h"
++#pragma GCC diagnostic pop
++
++// Roboto Medium (third_party/imgui/misc/fonts, Apache License 2.0), embedded as the overlay embeds
++// its font (bbport_overlay.cpp).
++#ifdef _WIN32
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wpedantic"
++alignas(16) static const unsigned char bb_keycap_font[] = {
++#embed BB_KEYCAP_FONT_PATH
++};
++#pragma GCC diagnostic pop
++#else
++asm(".section .rodata\n"
++    ".balign 16\n"
++    ".hidden bb_keycap_font\n"
++    ".global bb_keycap_font\n"
++    "bb_keycap_font:\n"
++    ".incbin \"" BB_KEYCAP_FONT_PATH "\"\n"
++    ".previous\n");
++extern "C" const unsigned char bb_keycap_font[];
++#endif
++
++namespace Keycap {
++
++std::string Spec::Id() const {
++    std::string id(1, char('0' + kind));
++    for (const auto& label : labels) {
++        id += '|';
++        id += label;
++    }
++    return id + '|' + std::to_string(button);
++}
++
++namespace {
++
++// Drawn at 4x4 samples a pixel; a sample is in or out of a shape, or covered by a glyph as
++// stb_truetype rasterizes it.
++constexpr int S = 4;
++
++struct Color {
++    float r, g, b, a;
++};
++constexpr Color Rgb(std::uint32_t rgb, float a = 1.0f) {
++    return {float((rgb >> 16) & 0xff) / 255.0f, float((rgb >> 8) & 0xff) / 255.0f,
++            float(rgb & 0xff) / 255.0f, a};
++}
++// From KG_R1: the face, the rims (light along the top, dark along the bottom and the right),
++// the line under the top rim, the shadow under the cap, the lettering.
++constexpr Color kFace = Rgb(0x2f2f2f), kRimTop = Rgb(0x7a7a7a), kRimSide = Rgb(0x4a4a4a),
++                kRimDark = Rgb(0x1e1e1e), kUnderRim = Rgb(0x262626), kShadow = Rgb(0, 0.42f),
++                kInk = Rgb(0xc3a171), kOutline = Rgb(0x8a8a8a);
++
++// Shapes are laid out on 32 units; a canvas shows them at its own size, `scale` pixels a unit
++// from (ox, oy) - the game's 26-pixel HUD buttons show a window around the square cap.
++struct Canvas {
++    int size, n;  // pixels, samples
++    float scale, ox, oy;
++    std::vector<float> px;  // premultiplied
++
++    Canvas(int size_, float scale_, float ox_, float oy_)
++        : size(size_), n(size_ * S), scale(scale_), ox(ox_), oy(oy_), px(std::size_t(n) * n * 4, 0.0f) {}
++
++    void Blend(int x, int y, Color c, float coverage) {
++        const float a = c.a * std::min(coverage, 1.0f);
++        if (a <= 0.0f) {
++            return;
++        }
++        float* p = &px[(std::size_t(y) * n + x) * 4];
++        p[0] = c.r * a + p[0] * (1.0f - a);
++        p[1] = c.g * a + p[1] * (1.0f - a);
++        p[2] = c.b * a + p[2] * (1.0f - a);
++        p[3] = a + p[3] * (1.0f - a);
++    }
++};
++
++// Samples per unit: how sharp shape edges are (Paint sets it for its canvas).
++thread_local float t_samples = S;
++
++// `coverage(x, y)` at each sample, in units.
++template <class Coverage>
++void Paint(Canvas& c, Color color, Coverage coverage) {
++    t_samples = S * c.scale;
++    for (int y = 0; y < c.n; ++y) {
++        for (int x = 0; x < c.n; ++x) {
++            const float cover = coverage(((float(x) + 0.5f) / S - c.ox) / c.scale,
++                                         ((float(y) + 0.5f) / S - c.oy) / c.scale);
++            if (cover > 0.0f) {
++                c.Blend(x, y, color, cover);
++            }
++        }
++    }
++}
++
++struct Box {
++    float x0, y0, x1, y1, r;  // r: the corners' radius
++};
++
++float Distance(const Box& b, float x, float y) {
++    const float hx = (b.x1 - b.x0) / 2 - b.r, hy = (b.y1 - b.y0) / 2 - b.r;
++    const float qx = std::abs(x - (b.x0 + b.x1) / 2) - hx, qy = std::abs(y - (b.y0 + b.y1) / 2) - hy;
++    return std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f)) + std::min(std::max(qx, qy), 0.0f) - b.r;
++}
++
++float Inside(const Box& b, float x, float y) {
++    return std::clamp(0.5f - Distance(b, x, y) * t_samples, 0.0f, 1.0f);
++}
++
++Box Inset(Box b, float left, float top, float right, float bottom) {
++    b.x0 += left;
++    b.y0 += top;
++    b.x1 -= right;
++    b.y1 -= bottom;
++    b.r = std::max(b.r - std::max(left, top), 0.5f);
++    return b;
++}
++
++Box Offset(Box b, float dx, float dy) {
++    b.x0 += dx;
++    b.x1 += dx;
++    b.y0 += dy;
++    b.y1 += dy;
++    return b;
++}
++
++void DrawCap(Canvas& c, const Box& cap) {
++    const Box shadow = Offset(Inset(cap, 0.3f, 0.0f, 0.3f, 0.0f), 0.0f, 1.1f);
++    Paint(c, kShadow, [&](float x, float y) { return Inside(shadow, x, y); });
++    Paint(c, kRimDark, [&](float x, float y) { return Inside(cap, x, y); });
++    const Box side = Inset(cap, 0.0f, 0.0f, 0.8f, 1.0f);
++    Paint(c, kRimSide, [&](float x, float y) { return Inside(side, x, y); });
++    Paint(c, kRimTop, [&](float x, float y) { return y < cap.y0 + 1.0f ? Inside(side, x, y) : 0.0f; });
++    const Box under = Inset(cap, 0.9f, 1.0f, 0.9f, 1.0f);
++    Paint(c, kUnderRim, [&](float x, float y) { return Inside(under, x, y); });
++    const Box face = Inset(cap, 0.9f, 1.8f, 0.9f, 1.0f);
++    Paint(c, kFace, [&](float x, float y) { return Inside(face, x, y); });
++}
++
++// An arrow `size` pixels long centred on (cx, cy): 0 up, 1 right, 2 down, 3 left.
++void DrawArrow(Canvas& c, float cx, float cy, float size, int dir, Color color) {
++    const float head = size * 0.5f, half_head = size * 0.45f, half_shaft = size * 0.14f;
++    Paint(c, color, [&](float x, float y) {
++        // u across the arrow, v from its tip (0) to its tail (size).
++        float u = x - cx, v = y - cy;
++        switch (dir) {
++        case 1: std::swap(u, v); v = -v; break;
++        case 2: v = -v; break;
++        case 3: std::swap(u, v); break;
++        default: break;
++        }
++        v += size / 2;
++        if (v < 0.0f || v > size) {
++            return 0.0f;
++        }
++        if (v <= head) {
++            return std::abs(u) <= half_head * v / head ? 1.0f : 0.0f;
++        }
++        return std::abs(u) <= half_shaft ? 1.0f : 0.0f;
++    });
++}
++
++int ArrowDir(const std::string& label) {
++    return label == "Up" ? 0 : label == "Right" ? 1 : label == "Down" ? 2 : label == "Left" ? 3 : -1;
++}
++
++std::vector<int> Utf8(const std::string& s) {
++    std::vector<int> out;
++    for (std::size_t i = 0; i < s.size();) {
++        const auto b = static_cast<unsigned char>(s[i]);
++        const int len = b < 0x80 ? 1 : b >> 5 == 6 ? 2 : b >> 4 == 14 ? 3 : b >> 3 == 30 ? 4 : 1;
++        int cp = len == 1 ? b : b & (0x7f >> len);
++        for (int k = 1; k < len && i + k < s.size(); ++k) {
++            cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3f);
++        }
++        out.push_back(cp);
++        i += len;
++    }
++    return out;
++}
++
++struct Font {
++    stbtt_fontinfo info{};
++    bool ok = false;
++    float cap_height = 1.0f;  // font units
++
++    Font() {
++        ok = stbtt_InitFont(&info, bb_keycap_font, stbtt_GetFontOffsetForIndex(bb_keycap_font, 0)) != 0;
++        int x0, y0, x1, y1;
++        if (ok && stbtt_GetCodepointBox(&info, 'H', &x0, &y0, &x1, &y1)) {
++            cap_height = float(y1);
++        }
++    }
++};
++
++const Font& GetFont() {
++    static const Font font;
++    return font;
++}
++
++// `text` centred on (cx, cy), its capitals `cap` pixels tall, smaller if it is wider than `width`.
++void DrawText(Canvas& c, const std::string& text, float cx, float cy, float width, float cap) {
++    const Font& font = GetFont();
++    const auto cps = Utf8(text);
++    if (!font.ok || cps.empty()) {
++        return;
++    }
++    // The ink's extent at the font's own scale.
++    float pen = 0.0f, left = 1e9f, right = -1e9f, top = -1e9f, bottom = 1e9f;
++    bool capitals = false;
++    std::vector<float> at(cps.size());
++    for (std::size_t i = 0; i < cps.size(); ++i) {
++        int advance, bearing, x0, y0, x1, y1;
++        stbtt_GetCodepointHMetrics(&font.info, cps[i], &advance, &bearing);
++        at[i] = pen;
++        if (stbtt_GetCodepointBox(&font.info, cps[i], &x0, &y0, &x1, &y1)) {
++            left = std::min(left, pen + float(x0));
++            right = std::max(right, pen + float(x1));
++            bottom = std::min(bottom, float(y0));
++            top = std::max(top, float(y1));
++        }
++        capitals |= (cps[i] >= 'A' && cps[i] <= 'Z') || (cps[i] >= '0' && cps[i] <= '9');
++        pen += float(advance);
++        if (i + 1 < cps.size()) {
++            pen += float(stbtt_GetCodepointKernAdvance(&font.info, cps[i], cps[i + 1]));
++        }
++    }
++    if (right <= left) {
++        return;
++    }
++    const float scale = std::min(cap / font.cap_height, width / (right - left));
++    // Capitals sit centred; text without any (punctuation) centres its own ink.
++    const float baseline = capitals ? cy + font.cap_height * scale / 2 : cy + (top + bottom) / 2 * scale;
++    const float origin = cx - (left + right) / 2 * scale;
++
++    const int n = c.n;
++    std::vector<float> ink(std::size_t(n) * n, 0.0f);
++    const float hs = scale * c.scale * S;
++    std::vector<unsigned char> glyph;
++    for (std::size_t i = 0; i < cps.size(); ++i) {
++        const float gx = (c.ox + (origin + at[i] * scale) * c.scale) * S;
++        const float gy = (c.oy + baseline * c.scale) * S;
++        const float fx = std::floor(gx), fy = std::floor(gy);
++        int x0, y0, x1, y1;
++        stbtt_GetCodepointBitmapBoxSubpixel(&font.info, cps[i], hs, hs, gx - fx, gy - fy, &x0, &y0, &x1, &y1);
++        const int w = x1 - x0, h = y1 - y0;
++        if (w <= 0 || h <= 0) {
++            continue;
++        }
++        glyph.assign(std::size_t(w) * h, 0);
++        stbtt_MakeCodepointBitmapSubpixel(&font.info, glyph.data(), w, h, w, hs, hs, gx - fx, gy - fy, cps[i]);
++        for (int y = 0; y < h; ++y) {
++            for (int x = 0; x < w; ++x) {
++                const int px = int(fx) + x0 + x, py = int(fy) + y0 + y;
++                if (px >= 0 && px < n && py >= 0 && py < n) {
++                    float& v = ink[std::size_t(py) * n + px];
++                    v = std::min(1.0f, v + float(glyph[y * w + x]) / 255.0f);
++                }
++            }
++        }
++    }
++    // A little heavier, as the game's lettering: each sample takes its left neighbour's ink.
++    for (int y = 0; y < n; ++y) {
++        float* row = &ink[std::size_t(y) * n];
++        for (int x = n - 1; x > 0; --x) {
++            row[x] = std::max(row[x], row[x - 1]);
++        }
++    }
++    for (int y = 0; y < n; ++y) {
++        for (int x = 0; x < n; ++x) {
++            c.Blend(x, y, kInk, ink[std::size_t(y) * n + x]);
++        }
++    }
++}
++
++// A cap with a label: an arrow or text.
++void DrawLabel(Canvas& c, const Box& cap, const std::string& label, float cap_px) {
++    DrawCap(c, cap);
++    const float cx = (cap.x0 + cap.x1) / 2, cy = (cap.y0 + cap.y1) / 2 + 0.3f;
++    if (const int dir = ArrowDir(label); dir >= 0) {
++        DrawArrow(c, cx, cy, cap_px * 1.05f, dir, kInk);
++        return;
++    }
++    const float w = cap.x1 - cap.x0;
++    DrawText(c, label, cx, cy, w - std::min(5.0f, w * 0.2f), cap_px);
++}
++
++void DrawMouse(Canvas& c, int button) {
++    const Box body{7.0f, 2.0f, 25.0f, 29.0f, 8.5f};
++    const Box shadow = Offset(body, 0.0f, 1.1f);
++    Paint(c, kShadow, [&](float x, float y) { return Inside(shadow, x, y); });
++    Paint(c, kOutline, [&](float x, float y) { return Inside(body, x, y); });
++    const Box face = Inset(body, 1.3f, 1.3f, 1.3f, 1.3f);
++    Paint(c, kFace, [&](float x, float y) { return Inside(face, x, y); });
++    const float cx = 16.0f, split = 13.0f;
++    if (button == 1 || button == 2) {
++        Paint(c, kInk, [&](float x, float y) {
++            const bool side = button == 1 ? x < cx - 0.6f : x > cx + 0.6f;
++            return side && y < split - 0.6f ? Inside(face, x, y) : 0.0f;
++        });
++    }
++    // The buttons' seams.
++    Paint(c, kOutline, [&](float x, float y) {
++        const bool seam = (std::abs(x - cx) <= 0.6f && y < split) || std::abs(y - split) <= 0.6f;
++        return seam ? Inside(face, x, y) : 0.0f;
++    });
++    const bool wheel = button == 3 || button == 6 || button == 7;
++    const Box wheel_box{cx - 2.0f, 4.5f, cx + 2.0f, 11.5f, 2.0f};
++    Paint(c, wheel ? kInk : kOutline, [&](float x, float y) { return Inside(wheel_box, x, y); });
++    if (button == 6 || button == 7) {
++        DrawArrow(c, 28.5f, 8.0f, 6.5f, button == 6 ? 0 : 2, kInk);
++    } else if (button == 0) {
++        // The camera: the mouse moved.
++        DrawArrow(c, 3.5f, 17.0f, 6.0f, 3, kInk);
++        DrawArrow(c, 28.5f, 17.0f, 6.0f, 1, kInk);
++    }
++}
++
++void Resolve(const Canvas& c, std::uint8_t* rgba) {
++    for (int y = 0; y < c.size; ++y) {
++        for (int x = 0; x < c.size; ++x) {
++            for (int ch = 0; ch < 4; ++ch) {
++                float sum = 0.0f;
++                for (int sy = 0; sy < S; ++sy) {
++                    for (int sx = 0; sx < S; ++sx) {
++                        sum += c.px[((std::size_t(y) * S + sy) * c.n + x * S + sx) * 4 + ch];
++                    }
++                }
++                const float v = std::clamp(sum / (S * S), 0.0f, 1.0f);
++                rgba[(y * c.size + x) * 4 + ch] = std::uint8_t(std::lround(v * 255.0f));
++            }
++        }
++    }
++}
++
++// BC7 modes 4, 5 and 6, the ones the game's icons use: one subset, colour and alpha either
++// on one line (6) or on two (4 and 5, rotation 0). Each is fitted along the block's principal
++// axis, then refined by least squares for the indices it got; the block keeps whichever mode
++// came closest.
++namespace bc7 {
++
++constexpr int kW2[4] = {0, 21, 43, 64};
++constexpr int kW3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
++constexpr int kW4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
++
++const int* Weights(int bits) {
++    return bits == 2 ? kW2 : bits == 3 ? kW3 : kW4;
++}
++int Interp(int a, int b, int w) {
++    return ((64 - w) * a + w * b + 32) >> 6;
++}
++int Expand(int v, int bits) {
++    v <<= 8 - bits;
++    return v | (v >> bits);
++}
++
++struct Block {
++    int px[16][4];
++};
++
++// Channels [c0, c1) on one line between two endpoints.
++struct LineSpec {
++    int c0, c1;
++    int index_bits;
++    int endpoint_bits;
++    bool pbits;  // mode 6: 7 bits and a bit shared by the endpoint's channels
++};
++
++struct Line {
++    int stored[2][4] = {};
++    int pbit[2] = {};
++    int value[2][4] = {};
++    int index[16] = {};
++    long long err = LLONG_MAX;
++};
++
++void Quantize(const LineSpec& s, const float e[4], int stored[4], int& pbit, int value[4]) {
++    if (s.pbits) {
++        float best = 1e30f;
++        for (int p = 0; p < 2; ++p) {
++            int st[4] = {}, val[4] = {};
++            float err = 0.0f;
++            for (int c = s.c0; c < s.c1; ++c) {
++                st[c] = std::clamp(int(std::lround((e[c] - float(p)) / 2.0f)), 0, 127);
++                val[c] = st[c] * 2 + p;
++                err += (float(val[c]) - e[c]) * (float(val[c]) - e[c]);
++            }
++            if (err < best) {
++                best = err;
++                pbit = p;
++                std::memcpy(stored, st, sizeof(st));
++                std::memcpy(value, val, sizeof(val));
++            }
++        }
++        return;
++    }
++    const int top = (1 << s.endpoint_bits) - 1;
++    for (int c = s.c0; c < s.c1; ++c) {
++        const int guess = std::clamp(int(std::lround(e[c] * float(top) / 255.0f)), 0, top);
++        int best_v = guess;
++        float best = 1e30f;
++        for (int v = std::max(guess - 1, 0); v <= std::min(guess + 1, top); ++v) {
++            const float d = std::abs(float(Expand(v, s.endpoint_bits)) - e[c]);
++            if (d < best) {
++                best = d;
++                best_v = v;
++            }
++        }
++        stored[c] = best_v;
++        value[c] = Expand(best_v, s.endpoint_bits);
++    }
++}
++
++void Assign(const LineSpec& s, const Block& b, Line& line) {
++    const int* w = Weights(s.index_bits);
++    const int n = 1 << s.index_bits;
++    line.err = 0;
++    for (int i = 0; i < 16; ++i) {
++        long long best = LLONG_MAX;
++        for (int k = 0; k < n; ++k) {
++            long long e = 0;
++            for (int c = s.c0; c < s.c1; ++c) {
++                const int d = Interp(line.value[0][c], line.value[1][c], w[k]) - b.px[i][c];
++                e += d * d;
++            }
++            if (e < best) {
++                best = e;
++                line.index[i] = k;
++            }
++        }
++        line.err += best;
++    }
++}
++
++Line Fit(const LineSpec& s, const Block& b) {
++    float mean[4] = {};
++    for (int i = 0; i < 16; ++i) {
++        for (int c = s.c0; c < s.c1; ++c) {
++            mean[c] += float(b.px[i][c]) / 16.0f;
++        }
++    }
++    float cov[4][4] = {};
++    for (int i = 0; i < 16; ++i) {
++        for (int c = s.c0; c < s.c1; ++c) {
++            for (int d = s.c0; d < s.c1; ++d) {
++                cov[c][d] += (float(b.px[i][c]) - mean[c]) * (float(b.px[i][d]) - mean[d]);
++            }
++        }
++    }
++    float axis[4] = {1.0f, 1.0f, 1.0f, 1.0f};
++    for (int it = 0; it < 12; ++it) {
++        float next[4] = {};
++        float len = 0.0f;
++        for (int c = s.c0; c < s.c1; ++c) {
++            for (int d = s.c0; d < s.c1; ++d) {
++                next[c] += cov[c][d] * axis[d];
++            }
++            len += next[c] * next[c];
++        }
++        if (len < 1e-12f) {
++            break;
++        }
++        len = std::sqrt(len);
++        for (int c = s.c0; c < s.c1; ++c) {
++            axis[c] = next[c] / len;
++        }
++    }
++    float lo = 1e30f, hi = -1e30f;
++    for (int i = 0; i < 16; ++i) {
++        float t = 0.0f;
++        for (int c = s.c0; c < s.c1; ++c) {
++            t += (float(b.px[i][c]) - mean[c]) * axis[c];
++        }
++        lo = std::min(lo, t);
++        hi = std::max(hi, t);
++    }
++    float e[2][4] = {};
++    for (int c = s.c0; c < s.c1; ++c) {
++        e[0][c] = std::clamp(mean[c] + axis[c] * lo, 0.0f, 255.0f);
++        e[1][c] = std::clamp(mean[c] + axis[c] * hi, 0.0f, 255.0f);
++    }
++
++    Line best;
++    const int* w = Weights(s.index_bits);
++    for (int iter = 0; iter < 6; ++iter) {
++        Line line;
++        Quantize(s, e[0], line.stored[0], line.pbit[0], line.value[0]);
++        Quantize(s, e[1], line.stored[1], line.pbit[1], line.value[1]);
++        Assign(s, b, line);
++        if (line.err < best.err) {
++            best = line;
++        }
++        if (best.err == 0) {
++            break;
++        }
++        float aa = 0.0f, ab = 0.0f, bb = 0.0f, d0[4] = {}, d1[4] = {};
++        for (int i = 0; i < 16; ++i) {
++            const float t = float(w[line.index[i]]) / 64.0f;
++            aa += (1.0f - t) * (1.0f - t);
++            ab += (1.0f - t) * t;
++            bb += t * t;
++            for (int c = s.c0; c < s.c1; ++c) {
++                d0[c] += (1.0f - t) * float(b.px[i][c]);
++                d1[c] += t * float(b.px[i][c]);
++            }
++        }
++        const float det = aa * bb - ab * ab;
++        if (std::abs(det) < 1e-6f) {
++            break;
++        }
++        for (int c = s.c0; c < s.c1; ++c) {
++            e[0][c] = std::clamp((bb * d0[c] - ab * d1[c]) / det, 0.0f, 255.0f);
++            e[1][c] = std::clamp((aa * d1[c] - ab * d0[c]) / det, 0.0f, 255.0f);
++        }
++    }
++    return best;
++}
++
++// The first index's top bit is not stored: it has to be 0.
++void Anchor(Line& line, int index_bits) {
++    const int n = 1 << index_bits;
++    if (line.index[0] < n / 2) {
++        return;
++    }
++    for (int k = 0; k < 4; ++k) {
++        std::swap(line.stored[0][k], line.stored[1][k]);
++        std::swap(line.value[0][k], line.value[1][k]);
++    }
++    std::swap(line.pbit[0], line.pbit[1]);
++    for (int& i : line.index) {
++        i = n - 1 - i;
++    }
++}
++
++struct Bits {
++    std::uint64_t w[2] = {};
++    int pos = 0;
++    void Put(std::uint32_t v, int n) {
++        for (int i = 0; i < n; ++i, ++pos) {
++            if ((v >> i) & 1) {
++                w[pos >> 6] |= 1ull << (pos & 63);
++            }
++        }
++    }
++};
++
++struct Encoded {
++    long long err = LLONG_MAX;
++    Bits bits;
++};
++
++Encoded Mode6(const Block& b) {
++    const LineSpec s{0, 4, 4, 7, true};
++    Line l = Fit(s, b);
++    Anchor(l, 4);
++    Encoded out;
++    out.err = l.err;
++    out.bits.Put(1u << 6, 7);
++    for (int c = 0; c < 4; ++c) {
++        for (int k = 0; k < 2; ++k) {
++            out.bits.Put(l.stored[k][c], 7);
++        }
++    }
++    out.bits.Put(l.pbit[0], 1);
++    out.bits.Put(l.pbit[1], 1);
++    for (int i = 0; i < 16; ++i) {
++        out.bits.Put(l.index[i], i == 0 ? 3 : 4);
++    }
++    return out;
++}
++
++Encoded Mode5(const Block& b) {
++    const LineSpec cs{0, 3, 2, 7, false}, as{3, 4, 2, 8, false};
++    Line lc = Fit(cs, b), la = Fit(as, b);
++    Anchor(lc, 2);
++    Anchor(la, 2);
++    Encoded out;
++    out.err = lc.err + la.err;
++    out.bits.Put(1u << 5, 6);
++    out.bits.Put(0, 2);  // rotation
++    for (int c = 0; c < 3; ++c) {
++        for (int k = 0; k < 2; ++k) {
++            out.bits.Put(lc.stored[k][c], 7);
++        }
++    }
++    for (int k = 0; k < 2; ++k) {
++        out.bits.Put(la.stored[k][3], 8);
++    }
++    for (int i = 0; i < 16; ++i) {
++        out.bits.Put(lc.index[i], i == 0 ? 1 : 2);
++    }
++    for (int i = 0; i < 16; ++i) {
++        out.bits.Put(la.index[i], i == 0 ? 1 : 2);
++    }
++    return out;
++}
++
++// index_mode 0: colour on the 2-bit indices, alpha on the 3-bit ones; 1 the other way round.
++Encoded Mode4(const Block& b, int index_mode) {
++    const int color_bits = index_mode ? 3 : 2, alpha_bits = index_mode ? 2 : 3;
++    const LineSpec cs{0, 3, color_bits, 5, false}, as{3, 4, alpha_bits, 6, false};
++    Line lc = Fit(cs, b), la = Fit(as, b);
++    Anchor(lc, color_bits);
++    Anchor(la, alpha_bits);
++    Encoded out;
++    out.err = lc.err + la.err;
++    out.bits.Put(1u << 4, 5);
++    out.bits.Put(0, 2);  // rotation
++    out.bits.Put(index_mode, 1);
++    for (int c = 0; c < 3; ++c) {
++        for (int k = 0; k < 2; ++k) {
++            out.bits.Put(lc.stored[k][c], 5);
++        }
++    }
++    for (int k = 0; k < 2; ++k) {
++        out.bits.Put(la.stored[k][3], 6);
++    }
++    const Line& two = index_mode ? la : lc;
++    const Line& three = index_mode ? lc : la;
++    for (int i = 0; i < 16; ++i) {
++        out.bits.Put(two.index[i], i == 0 ? 1 : 2);
++    }
++    for (int i = 0; i < 16; ++i) {
++        out.bits.Put(three.index[i], i == 0 ? 2 : 3);
++    }
++    return out;
++}
++
++void EncodeBlock(const Block& b, std::uint8_t out[16]) {
++    Encoded best = Mode6(b);
++    for (Encoded e : {Mode5(b), Mode4(b, 0), Mode4(b, 1)}) {
++        if (e.err < best.err) {
++            best = e;
++        }
++    }
++    std::memcpy(out, best.bits.w, 16);
++}
++
++} // namespace bc7
++
++} // namespace
++
++void Draw(const Spec& spec, std::uint8_t* rgba, int size) {
++    // A square cap fills a smaller button: the 27 units around it at that size. Other layouts
++    // scale down whole.
++    const std::string first = spec.labels.empty() ? std::string() : spec.labels[0];
++    const bool square = spec.kind == Spec::Key && (Utf8(first).size() <= 2 || ArrowDir(first) >= 0);
++    float scale = float(size) / kSize, origin = 0.0f;
++    if (size != kSize && square) {
++        scale = float(size) / 27.0f;
++        origin = -2.5f * scale;
++    }
++    Canvas c(size, scale, origin, origin);
++    switch (spec.kind) {
++    case Spec::Mouse:
++        DrawMouse(c, spec.button);
++        break;
++    case Spec::Keys:
++        if (spec.labels.size() >= 4) {
++            // An inverted T: up; left, down, right.
++            DrawLabel(c, {10.75f, 0.5f, 21.25f, 14.5f, 2.5f}, spec.labels[0], 7.5f);
++            DrawLabel(c, {0.0f, 16.0f, 10.5f, 30.0f, 2.5f}, spec.labels[1], 7.5f);
++            DrawLabel(c, {10.75f, 16.0f, 21.25f, 30.0f, 2.5f}, spec.labels[2], 7.5f);
++            DrawLabel(c, {21.5f, 16.0f, 32.0f, 30.0f, 2.5f}, spec.labels[3], 7.5f);
++        } else if (spec.labels.size() >= 2) {
++            DrawLabel(c, {0.0f, 6.0f, 15.5f, 26.0f, 3.0f}, spec.labels[0], 9.5f);
++            DrawLabel(c, {16.5f, 6.0f, 32.0f, 26.0f, 3.0f}, spec.labels[1], 9.5f);
++        }
++        break;
++    case Spec::Key:
++    default: {
++        const std::string label = spec.labels.empty() ? std::string() : spec.labels[0];
++        const std::size_t glyphs = Utf8(label).size();
++        if (glyphs <= 2 || ArrowDir(label) >= 0) {
++            DrawLabel(c, {3.0f, 2.5f, 29.0f, 28.0f, 4.5f}, label, glyphs <= 1 ? 13.0f : 11.0f);
++        } else {
++            // Long names on a wide cap, as KG_R1 is.
++            DrawLabel(c, {0.5f, 6.0f, 31.5f, 26.0f, 4.0f}, label, 10.0f);
++        }
++        break;
++    }
++    }
++    Resolve(c, rgba);
++}
++
++void EncodeBlocks(const std::uint8_t* rgba, int width, int height, std::uint8_t* out) {
++    for (int by = 0; by < height / 4; ++by) {
++        for (int bx = 0; bx < width / 4; ++bx) {
++            bc7::Block block;
++            for (int p = 0; p < 16; ++p) {
++                const int x = bx * 4 + p % 4, y = by * 4 + p / 4;
++                for (int ch = 0; ch < 4; ++ch) {
++                    block.px[p][ch] = rgba[(y * width + x) * 4 + ch];
++                }
++            }
++            bc7::EncodeBlock(block, out);
++            out += 16;
++        }
++    }
++}
++
++void Encode(const std::uint8_t rgba[kSize * kSize * 4], std::uint8_t out[kBytes]) {
++    // Block i of the tile is at x = i's even bits, y = its odd bits.
++    for (int i = 0; i < 64; ++i) {
++        int bx = 0, by = 0;
++        for (int k = 0; k < 3; ++k) {
++            bx |= ((i >> (2 * k)) & 1) << k;
++            by |= ((i >> (2 * k + 1)) & 1) << k;
++        }
++        bc7::Block block;
++        for (int p = 0; p < 16; ++p) {
++            const int x = bx * 4 + p % 4, y = by * 4 + p / 4;
++            for (int ch = 0; ch < 4; ++ch) {
++                block.px[p][ch] = rgba[(y * kSize + x) * 4 + ch];
++            }
++        }
++        bc7::EncodeBlock(block, out + i * 16);
++    }
++}
++
++} // namespace Keycap
+diff --git a/gpu/shim/engine/keycap_art.h b/gpu/shim/engine/keycap_art.h
+new file mode 100644
+index 0000000..46310e2
+--- /dev/null
++++ b/gpu/shim/engine/keycap_art.h
+@@ -0,0 +1,44 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++// Keyboard and mouse button icons in the style of the game's own (menu/common.tpf's KG_*: a dark
++// cap with a light top rim and a shadow under it, tan lettering), drawn here, 32x32, and stored
++// the way those are: BC7 in the PS4's thin tiling, one tile of 8x8 4x4-blocks in Morton order,
++// 0x400 bytes. engine/key_prompts.cpp shows them in place of the game's icons.
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace Keycap {
++
++constexpr int kSize = 32;
++constexpr std::size_t kBytes = 0x400;
++
++struct Spec {
++    enum Kind : std::uint8_t {
++        Key,    // one cap: labels[0]
++        Keys,   // two caps side by side, or four as an inverted T (up, left, down, right)
++        Mouse,  // the mouse, `button` lit
++    };
++    Kind kind = Key;
++    /// Cap texts, UTF-8. "Up", "Down", "Left" and "Right" are drawn as arrows.
++    std::vector<std::string> labels;
++    /// Mouse: 0 none (the mouse itself, for the camera), 1 left, 2 right, 3 middle, 6 and 7 the
++    /// wheel up and down.
++    int button = 0;
++
++    /// One string per distinct icon (the caches' key).
++    std::string Id() const;
++};
++
++/// RGBA8, `size` pixels square, row-major, the colour premultiplied by alpha as the game's icons
++/// are. 32 for the KG_* icons; the HUD's buttons are 26.
++void Draw(const Spec& spec, std::uint8_t* rgba, int size = kSize);
++/// BC7, PS4 thin tiled: kBytes.
++void Encode(const std::uint8_t rgba[kSize * kSize * 4], std::uint8_t out[kBytes]);
++/// BC7 blocks of a region (`width` and `height` multiples of 4), row by row, 16 bytes each.
++void EncodeBlocks(const std::uint8_t* rgba, int width, int height, std::uint8_t* out);
++
++} // namespace Keycap
 diff --git a/gpu/shim/engine/online_fixes.cpp b/gpu/shim/engine/online_fixes.cpp
 new file mode 100644
 index 0000000..af312b6

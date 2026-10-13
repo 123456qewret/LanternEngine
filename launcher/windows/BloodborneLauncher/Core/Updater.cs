@@ -26,7 +26,7 @@ namespace BloodborneLauncher.Core
         public static string ReleasesPage => $"https://github.com/{Repository}/releases";
 
         /// <summary>The engine build this launcher is made for (package.json "engine").</summary>
-        public const string EngineId = "bbhost-0.4.0-fps26";
+        public const string EngineId = "bbhost-0.4.0-fps27";
 
         private const string ExeName = "Bloodborne Launcher.exe";
         private const string PackageFile = "package.json";
@@ -35,9 +35,10 @@ namespace BloodborneLauncher.Core
         private static readonly string[] Kept = { "bbport.ini", "mods.json", "patches.json", "user", "mods", "logs", "network", "engine-assets" };
 
         public sealed record Release(Version Version, int Beta, string Tag, string Name, string Notes, string Page,
-            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize)
+            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize, DateTime Published = default)
         {
             public bool IsNewerThan(Version version, int beta) => Compare(Version, Beta, version, beta) > 0;
+            public bool IsCurrent => Compare(Version, Beta, Current, CurrentBeta) == 0;
         }
 
         public static Version Current
@@ -126,6 +127,34 @@ namespace BloodborneLauncher.Core
             return newest;
         }
 
+        /// <summary>Every published release, stable and beta, newest first (the version selector).</summary>
+        public static async Task<IReadOnlyList<Release>> AllAsync()
+        {
+            using var http = Client(TimeSpan.FromSeconds(15));
+            using var response = await http.GetAsync($"https://api.github.com/repos/{Repository}/releases?per_page=100");
+            response.EnsureSuccessStatusCode();
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var all = new List<Release>();
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                if (item.TryGetProperty("draft", out var draft) && draft.GetBoolean()) continue;
+                if (Parse(item) is { } release && (release.ZipUrl != null || release.ExeUrl != null))
+                    all.Add(release);
+            }
+            all.Sort((a, b) => Compare(b.Version, b.Beta, a.Version, a.Beta));
+            return all;
+        }
+
+        /// <summary>Whether switching to a chosen release replaces the whole package: its engine differs
+        /// from this one's, or it does not say which engine it has (older releases).</summary>
+        public static async Task<bool> SwitchNeedsPackageAsync(Release release)
+        {
+            if (OwnPackage == null || release.ZipUrl == null) return false;
+            if (release.ExeUrl == null) return true;
+            var remote = await RemoteEngineAsync(release);
+            return remote == null || remote != LocalEngine();
+        }
+
         private static Release? Parse(JsonElement root)
         {
             var tag = root.GetProperty("tag_name").GetString() ?? "";
@@ -150,7 +179,11 @@ namespace BloodborneLauncher.Core
             return new Release(version, betaNumber, tag,
                 root.TryGetProperty("name", out var n) && n.GetString() is { Length: > 0 } title ? title : tag,
                 root.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "",
-                root.GetProperty("html_url").GetString() ?? ReleasesPage, exe, zip, package, exeSize, zipSize);
+                root.GetProperty("html_url").GetString() ?? ReleasesPage, exe, zip, package, exeSize, zipSize,
+                root.TryGetProperty("published_at", out var p) && p.ValueKind == JsonValueKind.String &&
+                DateTime.TryParse(p.GetString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var when)
+                    ? when.ToLocalTime()
+                    : default);
         }
 
         /// <summary>Reads "v0.9.7", "0.9.7-beta.2" or "0.9.7-beta2+abc123"; <paramref name="beta"/> is 0 for a stable build.</summary>

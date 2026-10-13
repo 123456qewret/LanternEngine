@@ -129,6 +129,12 @@
             new("1500 nits", "1500"), new("2000 nits", "2000"), new("4000 nits", "4000"),
         };
 
+        /// <summary>button_prompts: the game's button icons as keys while the keyboard or mouse is in use, always, or never.</summary>
+        public static readonly Choice[] ButtonPrompts =
+        {
+            new("Automatic (default)", "auto"), new("Keyboard", "keyboard"), new("Controller", "controller"),
+        };
+
         public static readonly Choice[] HdrMode =
         {
             new("Native (default)", "native"), new("Expanded", "expand"),
