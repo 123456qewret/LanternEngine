@@ -1714,6 +1714,22 @@ index 5c0d041..2404d93 100644
      std::atomic<ShadNetState> m_state{ShadNetState::Ok};
  
      std::binary_semaphore m_sem_connected{0};
+diff --git a/gpu/shadps4/common/lru_cache.h b/gpu/shadps4/common/lru_cache.h
+index 4204fad..9062936 100644
+--- a/gpu/shadps4/common/lru_cache.h
++++ b/gpu/shadps4/common/lru_cache.h
+@@ -55,8 +55,10 @@ public:
+ 
+     template <typename Func>
+     void ForEachItemBelow(TickType tick, Func&& func) {
++        // bbport: invoke_result_t, not invoke_result (a struct, never bool): the callbacks'
++        // "stop" never stopped the walk, so every GC pass visited every old entry.
+         static constexpr bool RETURNS_BOOL =
+-            std::is_same_v<std::invoke_result<Func, ObjectType>, bool>;
++            std::is_same_v<std::invoke_result_t<Func, ObjectType>, bool>;
+         Item* iterator = first_item;
+         while (iterator) {
+             if (static_cast<s64>(tick) - static_cast<s64>(iterator->tick) < 0) {
 diff --git a/gpu/shadps4/common/slot_vector.h b/gpu/shadps4/common/slot_vector.h
 index 2f693fb..fe68939 100644
 --- a/gpu/shadps4/common/slot_vector.h
@@ -1894,7 +1910,7 @@ index a300d10..ae628fd 100644
      std::chrono::nanoseconds target_interval{};
      std::chrono::nanoseconds total_wait{};
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
-index 30de04f..c218e66 100644
+index 30de04f..f438980 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
 +++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
 @@ -2,6 +2,7 @@
@@ -2038,7 +2054,43 @@ index 30de04f..c218e66 100644
              VideoCore::PageManager::ReportFaultSites();
              if (const u64 notes = BbStats::cpu_write_notes.exchange(0)) {
                  std::printf("Write notices: %.0f/s, %.2f MB/s (libc copies over pages the GPU side "
-@@ -753,8 +859,18 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
+@@ -695,8 +801,19 @@ void VideoOutDriver::Flip(const Request& req) {
+         }
+     }
+ 
+-    // Update flip status.
+     auto* port = req.port;
++    // bbport: release the buffer this flip replaced before the game can learn of the flip (flip
++    // status, flip events), not after: the game renders into that buffer next and sets its label
++    // to 1 again, which a later reset here cleared (the flip IRQ then waited up to 20 ms for a
++    // label that never came, video_out.cpp). Frames are prepared at submission, so the buffer
++    // is no longer read here.
++    if (port->prev_index != -1) {
++        port->buffer_labels[port->prev_index] = 0;
++        port->SignalVoLabel();
++    }
++    port->prev_index = req.index;
++
++    // Update flip status.
+     {
+         std::unique_lock lock{port->port_mutex};
+         auto& flip_status = port->flip_status;
+@@ -722,14 +839,6 @@ void VideoOutDriver::Flip(const Request& req) {
+                                         (req.flip_arg << 16)));
+         }
+     }
+-
+-    // Reset prev flip label
+-    if (port->prev_index != -1) {
+-        port->buffer_labels[port->prev_index] = 0;
+-        port->SignalVoLabel();
+-    }
+-    // save to prev buf index
+-    port->prev_index = req.index;
+ }
+ 
+ void VideoOutDriver::DrawBlankFrame() {
+@@ -753,8 +862,18 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
      {
          std::unique_lock lock{port->port_mutex};
          if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -2059,7 +2111,7 @@ index 30de04f..c218e66 100644
          }
  
          if (is_eop) {
-@@ -813,8 +929,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -813,8 +932,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
                                            : std::chrono::nanoseconds(0);
      auto next_flip = std::chrono::steady_clock::now();
@@ -2071,7 +2123,7 @@ index 30de04f..c218e66 100644
  
      const auto receive_request = [this] -> Request {
          std::scoped_lock lk{mutex};
-@@ -831,6 +948,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -831,6 +951,137 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      // next vblank tick.
      const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
  
@@ -2209,7 +2261,7 @@ index 30de04f..c218e66 100644
      while (!token.stop_requested()) {
          timer.Start();
          const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
-@@ -864,29 +1112,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -864,29 +1115,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
              }
          }
  
@@ -2285,6 +2337,22 @@ index 1cf6d2a..43f2e98 100644
              const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
              ASSERT_MSG(result, "EOP flip submission failed");
          });
+diff --git a/gpu/shadps4/shader_recompiler/info.h b/gpu/shadps4/shader_recompiler/info.h
+index 204fa91..6176f4f 100644
+--- a/gpu/shadps4/shader_recompiler/info.h
++++ b/gpu/shadps4/shader_recompiler/info.h
+@@ -216,6 +216,11 @@ struct Info : InfoPersistent {
+             std::memcpy(&base, &ud[ptr_index], sizeof(base));
+             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+         }
++        // bbport: an unbound descriptor table (null pointer, seen while maps load) reads as an
++        // empty sharp, which the callers handle, instead of reading near address zero.
++        if (!base) {
++            return T{};
++        }
+         std::memcpy(&data, base + dword_offset, sizeof(T));
+         return data;
+     }
 diff --git a/gpu/shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp b/gpu/shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
 index 9175131..2715c6e 100644
 --- a/gpu/shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
@@ -23825,6 +23893,40 @@ index 0000000..2677d7e
 +3395220681
 +]
 +}
+diff --git a/scripts/mods.py b/scripts/mods.py
+index d6818eb..ceca08e 100644
+--- a/scripts/mods.py
++++ b/scripts/mods.py
+@@ -19,6 +19,10 @@ GAME_FOLDERS = {'action', 'chr', 'event', 'facegen', 'font', 'map', 'menu', 'mov
+                 'obj', 'other', 'param', 'paramdef', 'parts', 'remo', 'script', 'sfx', 'shader',
+                 'sound'}
+ 
++# Every retail serial (all run the same 1.09 game): mods wrap their files in any of them.
++SERIALS = ('CUSA00207', 'CUSA00208', 'CUSA00299', 'CUSA00900', 'CUSA01363', 'CUSA03014',
++           'CUSA03023', 'CUSA03173', 'CUSA03179')
++
+ 
+ def child(folder, name):
+     """`name` inside `folder`, matching an existing entry case-insensitively (mods made on
+@@ -33,13 +37,14 @@ def child(folder, name):
+ def content_root(folder):
+     """(root, prefix): where a mod's files are and the game path they go to, or None.
+ 
+-    Accepted layouts: <mod>/dvdroot_ps4, <mod>/app0/dvdroot_ps4, <mod>/CUSA03173/dvdroot_ps4,
+-    one wrapper folder around any of these (an archive extracted into a folder of its name), and
+-    the game's folders without dvdroot_ps4 (<mod>/chr, <mod>/parts, ...)."""
++    Accepted layouts: <mod>/dvdroot_ps4, <mod>/app0/dvdroot_ps4, <mod>/<serial>/dvdroot_ps4
++    (CUSA03173 or another retail serial), one wrapper folder around any of these (an archive
++    extracted into a folder of its name), and the game's folders without dvdroot_ps4 (<mod>/chr,
++    <mod>/parts, ...)."""
+     folder = Path(folder)
+     if not folder.is_dir():
+         return None
+-    for wrapper in ('', 'app0', 'CUSA03173'):
++    for wrapper in ('', 'app0') + SERIALS:
+         base = child(folder, wrapper) if wrapper else folder
+         dvdroot = child(base, 'dvdroot_ps4')
+         if dvdroot.is_dir():
 diff --git a/scripts/online.py b/scripts/online.py
 index fdbf8c4..6e5d795 100644
 --- a/scripts/online.py
@@ -23915,7 +24017,7 @@ index fdbf8c4..6e5d795 100644
 +    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
 diff --git a/scripts/patches.py b/scripts/patches.py
-index da1e52e..f21f526 100644
+index da1e52e..eaeb424 100644
 --- a/scripts/patches.py
 +++ b/scripts/patches.py
 @@ -10,6 +10,7 @@ import os
@@ -24028,7 +24130,7 @@ index da1e52e..f21f526 100644
          if w>0 and h>0: return (w,h)
      except ValueError:
          pass
-@@ -202,10 +267,101 @@ def compile_patches(xml, names, app_version, segments):
+@@ -202,8 +267,101 @@ def compile_patches(xml, names, app_version, segments):
      return writes
  
  
@@ -24116,21 +24218,22 @@ index da1e52e..f21f526 100644
 +
 +
  # Third-party patch files (shadPS4/GoldHEN XML) in the data directory's patches/ folder.
- BLOODBORNE_IDS={'CUSA00207','CUSA00208','CUSA00900','CUSA01363','CUSA03173','CUSA03023'}
- 
- 
+-BLOODBORNE_IDS={'CUSA00207','CUSA00208','CUSA00900','CUSA01363','CUSA03173','CUSA03023'}
++# Every retail serial: all run the same 1.09 game (the launcher's GameCheck.SupportedTitles).
++BLOODBORNE_IDS={'CUSA00207','CUSA00208','CUSA00299','CUSA00900','CUSA01363','CUSA03014',
++                'CUSA03023','CUSA03173','CUSA03179'}
++
++
 +def same_app_version(value, app_version):
 +    """'1.09' is '01.09' (patch files write either)."""
 +    try:
 +        return value is not None and [int(p) for p in value.strip().split('.')]==[int(p) for p in app_version.split('.')]
 +    except ValueError:
 +        return False
-+
-+
+ 
+ 
  def external_patches(directory, app_version='01.09', exclude=Path(__file__).resolve().parent.parent/'patches/Bloodborne.xml'):
-     """[(key, file, metadata)] of eboot patches for this version in directory/*.xml.
-     key is "<file name>/<patch name>" (the launcher's selection, patches.json)."""
-@@ -221,7 +377,7 @@ def external_patches(directory, app_version='01.09', exclude=Path(__file__).reso
+@@ -221,7 +379,7 @@ def external_patches(directory, app_version='01.09', exclude=Path(__file__).reso
          ids={e.text.strip() for e in root.iter('ID') if e.text}
          if ids and not ids&BLOODBORNE_IDS: continue
          for meta in root.iter('Metadata'):
@@ -24139,7 +24242,7 @@ index da1e52e..f21f526 100644
                  found.append((f'{path.name}/{meta.get("Name")}',path,meta))
      return found
  
-@@ -237,8 +393,43 @@ def external_selection(found, config):
+@@ -237,8 +395,43 @@ def external_selection(found, config):
              if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
  
  
@@ -24185,7 +24288,7 @@ index da1e52e..f21f526 100644
      writes=[]
      for key,_,meta in selected:
          try:
-@@ -252,6 +443,14 @@ def compile_external(selected, segments):
+@@ -252,6 +445,14 @@ def compile_external(selected, segments):
          except ValueError as error:
              print(f'Patches: skipped {key}: {error}',file=sys.stderr)
              continue
@@ -24200,7 +24303,7 @@ index da1e52e..f21f526 100644
          writes+=ours
          print(f'Patches: external {key} ({len(ours)} writes)')
      return writes
-@@ -262,7 +461,7 @@ def main():
+@@ -262,7 +463,7 @@ def main():
      p.add_argument('--patches-dir',type=Path,help='third-party patch XML files (shadPS4 format)')
      p.add_argument('--patches-config',type=Path,help='patches.json: enabled/disabled external patches')
      p.add_argument('--xml',type=Path,default=Path(__file__).resolve().parent.parent/'patches/Bloodborne.xml')
@@ -24209,7 +24312,7 @@ index da1e52e..f21f526 100644
      p.add_argument('--extra',default='',help='additional patch names, separated by ";"')
      p.add_argument('--app-version',default='01.09')
      p.add_argument('--out',type=Path,default=Path(__file__).resolve().parent.parent/'out')
-@@ -273,7 +472,12 @@ def main():
+@@ -273,7 +474,12 @@ def main():
      p.add_argument('--output-res',default='',help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080)')
      p.add_argument('--print-scaled',action='store_true',
                     help='print "RENDER OUTPUT" (WxH) when bbport.ini selects an output other than 1080p')
@@ -24222,7 +24325,7 @@ index da1e52e..f21f526 100644
      if a.print_scaled:
          sizes=scaled_sizes(read_settings(a.settings))
          if sizes: print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]}')
-@@ -287,13 +491,26 @@ def main():
+@@ -287,13 +493,26 @@ def main():
          size=render_size(settings)
          if size: print(f'{size[0]}x{size[1]}')
          return
@@ -24251,7 +24354,7 @@ index da1e52e..f21f526 100644
      size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
      # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
      # it into the output-size image with a viewport scaled by output / 1920
-@@ -302,14 +519,24 @@ def main():
+@@ -302,14 +521,24 @@ def main():
      if size:
          writes+=resolution_writes(a.xml,size,a.app_version,segments,ui)
          if size[0]*size[1]>OUTPUT_SIZE[0]*OUTPUT_SIZE[1]:
@@ -25693,9 +25796,18 @@ index fac0ac7..b70f6a1 100644
  uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
  void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
 diff --git a/src/runtime_savedata.c b/src/runtime_savedata.c
-index 99b3049..4f9b7ef 100644
+index 99b3049..e49901f 100644
 --- a/src/runtime_savedata.c
 +++ b/src/runtime_savedata.c
+@@ -74,7 +74,7 @@ static size_t mounts_done, memory_writes;
+  * (e.g. the player's weapon sounds) never play. It is set before the game reads the save.
+  * BB_SOUND_HACK=0 leaves saves untouched. */
+ static void bloodborne_sound_hack(void) {
+-    static const char *const ids[]={"CUSA00207","CUSA00208","CUSA00299","CUSA00900","CUSA01363","CUSA03014","CUSA03023","CUSA03173"};
++    static const char *const ids[]={"CUSA00207","CUSA00208","CUSA00299","CUSA00900","CUSA01363","CUSA03014","CUSA03023","CUSA03173","CUSA03179"};
+     const char *env=getenv("BB_SOUND_HACK");
+     if (env && env[0]=='0') return;
+     int bloodborne=0;
 @@ -284,7 +284,11 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
          size_t n=strlen(e->d_name);
          if (e->d_name[0]=='.' || n>=32 || (n>8 && !strcmp(e->d_name+n-8,".sce_sys"))) continue;
@@ -26787,6 +26899,29 @@ index 0000000..d15f7f5
 +    std::printf("HDR native shaders: PASS\n");
 +    return 0;
 +}
+diff --git a/tests/test_mods.py b/tests/test_mods.py
+index 795f2f7..d8d75c0 100644
+--- a/tests/test_mods.py
++++ b/tests/test_mods.py
+@@ -114,14 +114,16 @@ class ModTests(unittest.TestCase):
+ 
+     def test_wrapped_and_bare_layouts(self):
+         layouts = {'Title': 'CUSA03173/dvdroot_ps4/chr', 'Archive': 'Archive v1.2/dvdroot_ps4/chr',
+-                   'Bare': 'chr', 'Nested': 'Nested/app0/dvdroot_ps4/chr'}
++                   'Bare': 'chr', 'Nested': 'Nested/app0/dvdroot_ps4/chr',
++                   'Us': 'CUSA03179/dvdroot_ps4/chr'}
+         for name, path in layouts.items():
+             folder = self.moddir / name / path
+             folder.mkdir(parents=True)
+             (folder / 'a.dcx').write_bytes(name.encode())
+         (self.moddir / 'Archive/readme.txt').write_text('notes')
++        (self.moddir / 'Us/screenshots').mkdir()  # beside the serial folder: not one wrapper
+         (self.moddir / 'Junk/stuff').mkdir(parents=True)
+-        self.assertEqual(mods.discover(self.moddir), ['Archive', 'Bare', 'Nested', 'Title'])
++        self.assertEqual(mods.discover(self.moddir), ['Archive', 'Bare', 'Nested', 'Title', 'Us'])
+         for name in layouts:
+             with self.subTest(name=name):
+                 result = mods.build_overlay(self.game, self.root / 'out',
 diff --git a/tests/test_occlusion.cpp b/tests/test_occlusion.cpp
 new file mode 100644
 index 0000000..89dd2e5

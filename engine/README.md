@@ -27,6 +27,10 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | WriteData and DMA wait only for the fences the command processor would have written before them, not for every pending one | `BB_FENCE_ORDER=all` off |
 | DMA waits only when the DMA really writes guest memory on the CPU; spin waits for host copies instead of yield loops | `BB_DMA_WAITS=all`, `BB_HOST_WAIT_SPIN_US=0` off |
 | Lookahead thread (bb:DrawAhead) that prefetches the cache lines of the next draws for the draw recording thread; on with 8 or more hardware threads | `BB_DRAWREC_WORKERS=0` off, `=1` on, `BB_DRAWREC_LOOKAHEAD` packets ahead |
+| An unbound descriptor table (a null pointer, seen while maps load) reads as an empty descriptor instead of crashing | |
+| Texture and sampler cleanup stops at its limits instead of walking every old entry on each submission | |
+| The previous display buffer is released before the game learns of the flip, so its next frame's label is no longer cleared (no 20 ms wait at the flip) | |
+| Every retail serial (CUSA03179 included) accepted by the save sound fix, third-party patch files and mod folders | |
 | Working profile-guided builds with clang (`BB_PGO=generate`, then `use`) | |
 | In-game menu in Spanish, Portuguese (Brazil), French, German, Italian, Polish, Turkish | `menu_language` |
 | Controller: the pad in use takes over; swap sticks, invert camera, dead zone | `pad_swap_sticks`, `pad_invert_look_x/y`, `pad_deadzone` |
