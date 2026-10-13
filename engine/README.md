@@ -49,6 +49,9 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | DLSS texture LOD bias | `BB_DLSS_MIP_BIAS=0` off |
 | Optional FSR 4 balanced model | `BB_FSR4_BALANCED=1` |
 | Cheats: Blood Vials and Quicksilver Bullets (infinite or a set amount), consumables, stamina, stealth, no weapon wear, firearm range, keep echoes, echo multiplier, add echoes/insight; live and revertible (in-game menu) | `cheat_*` |
+| Texture refresh: an image the GPU rewrites every frame (the game's copy of the depth buffer) keeps the hashes of its guest memory while nothing wrote that memory, instead of hashing 9 MB a frame on the draw recording thread; large images are hashed on the copy threads | `BB_KEEP_MIP_HASHES=0`, `BB_PARALLEL_IMAGE_HASH=0` off |
+| Texture set memo for shader stages without prepared draw data as well | `BB_LOCAL_TEXTURE_SETS=0` off |
+| Effects at reduced presets: passes at the output size that read a reduced-resolution image through a point sampler read the full-size image instead, which is upscaled with linear filtering (blocky effects and moon edge with DLSS/FSR) | `BB_PROXY_POINT_NATIVE=0`, `BB_SCENE_LINEAR_RESOLVE=0` off |
 
 Parts are adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR),
 [AwesomeObserver/bloodborne_pc](https://github.com/AwesomeObserver/bloodborne_pc),
