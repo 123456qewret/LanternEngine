@@ -21,6 +21,7 @@ namespace BloodborneLauncher.Core
             ["ui_language"] = "en",
             ["game_dir"] = "",
             ["user_dir"] = "",
+            ["dlc_dir"] = "",
             ["player_profile"] = "",
             ["player_profiles"] = "",
             ["mods_dir"] = "",

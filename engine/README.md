@@ -1,6 +1,6 @@
 # Engine
 
-The engine as developed here. Our work is `bbhost-changes.patch` (engine and scripts), applied to its starting point, [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
+The engine as developed here. My work is `bbhost-changes.patch` (engine and scripts), applied to its starting point, [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
 at tag `v0.4.0-darkizuku-preview.1`.
 
 ## Changes
@@ -59,8 +59,11 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | A third-party resolution patch (any patch writing the game's resolution and UI layout sites) is left out while the output resolution isn't 1920x1080, unless kept: applied after the engine's own, it kept its shape on screen (black bars) and stopped the widescreen hooks | `BB_RESOLUTION_PATCH=keep` |
 | 120 and 144 FPS: the 90 FPS++ patch with its frame-rate values for that rate (frame times, frame counts, timings, a thread's sleep, the limiter's longest sleep, two speed scales, and the character update's frame time: left at 90's, the character fell 1.5 times as fast at 120). The uncapped patch they used before froze the game at the end of Vicar Amelia's intro | `fps_mode` (`120`, `144`) |
 | The game's two per-frame render pools are 1 MiB each instead of 256 KiB: a busy frame ran one out and the game wrote through the null pointer it got (GXWorker crash in a boss intro with Model LOD -2 at 2560x1440) | `BB_RENDER_POOLS=0` off |
-| VRAM budget for the game's data: above 85% of the driver's VRAM budget, or after a failed VRAM allocation, new blocks of the game's memory go to system memory (read by the GPU over PCIe) where the driver offers memory for them; NVIDIA's offered none in our test, and there they still get VRAM. With the PC memory model (`BB_GUEST_IN_PLACE=1`), unused copies go back after 15 s instead of 60 (3 s above 90%) | `BB_VRAM_PRESSURE_PERCENT` (`0`: only after a failed allocation) |
+| VRAM budget for the game's data: without the PC memory model (it needs an AMD GPU) every block of the game's memory the GPU used kept its VRAM copy, so 4 GB cards ran out (exit 23, or a lost device). Above 85% of the driver's VRAM budget, copies unused for 30 s leave VRAM (10 s above 90%) and are uploaded again from the game's memory when used; blocks with data the GPU wrote stay; one that comes back brings the other blocks of its 2 MiB group back whole, since a draw reads past its own range. Slots they leave take new blocks before new VRAM is allocated, cleared first (vertex buffers are bound without a size, so a draw reading past its range must find zeros there, as in new VRAM). Where the driver offers system memory for the game's data (not NVIDIA's), new blocks go there instead while VRAM is tight. With the PC memory model, unused copies go back after 15 s instead of 60 (3 s above 90%) | `BB_VRAM_PRESSURE_PERCENT` (`0` off), `BB_VRAM_IDLE_SECONDS` |
 | Third-party patches for version `1.09` are taken as well as `01.09` | |
+| Add-ons (The Old Hunters on base-game dumps): the dumped add-ons in the launcher's DLC folder and in `<user>/addcont/<title id>/` are reported to the game as installed; the label is the end of each add-on's CONTENT_ID (`sce_sys/param.sfo`, category `ac`), else its folder's name. Their data ships with update 1.09 | `BB_DLC_DIR` |
+| FPS counter: frame rate, frame time and upscaler each on or off | `show_fps_rate`, `show_fps_frame_time`, `show_fps_upscaler` |
+| Keys navigate menus as the d-pad only while a menu has the screen: in the 0.4 s after a menu closed, W was a held d-pad up in the world (HP into Quicksilver Bullets) | |
 
 Parts are adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR),
 [AwesomeObserver/bloodborne_pc](https://github.com/AwesomeObserver/bloodborne_pc),

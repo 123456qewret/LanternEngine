@@ -2181,10 +2181,18 @@ index fa3476b..8eb8214 100644
  }
  
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 944e6f6..325589c 100644
+index 944e6f6..3f4b7c4 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-@@ -523,6 +523,29 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <bit>
+ #include <cstdlib>
++#include <cstring>
+ #include <magic_enum/magic_enum.hpp>
+ #include "bbport_copy.h"
+ #include "bbport_platform.h"
+@@ -523,6 +524,29 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
          FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
                         reqs.memoryTypeBits)
              .value();
@@ -2214,7 +2222,7 @@ index 944e6f6..325589c 100644
  
      const u64 bda_pagetable_size =
          (blocks_per_arena_page * NUM_ARENA_PAGES) * sizeof(vk::DeviceAddress);
-@@ -891,6 +914,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -891,6 +915,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                                                          bool is_written, bool is_texel_buffer) {
      BB_SECTION(ObtainBuffer);
      const bool stats = BufferStatsEnabled();
@@ -2227,7 +2235,7 @@ index 944e6f6..325589c 100644
      if (stats) {
          PrintBufferStats();
          NoteHotUse(device_addr, size);
-@@ -937,6 +966,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -937,6 +967,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                  SynchronizeMemoryFromImage(arena, device_addr, size);
              }
              TraceBinding(device_addr, size, is_written, is_written ? 0 : 2);
@@ -2235,7 +2243,7 @@ index 944e6f6..325589c 100644
              if (!is_written && !is_texel_buffer) {
                  if (const auto shadow = ShadowCopy(device_addr, size)) {
                      return *shadow;
-@@ -948,6 +978,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -948,6 +979,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
      // For read-only buffers use device local stream buffer to reduce renderpass breaks.
      if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
          BB_SECTION(ObtainStream);
@@ -2243,7 +2251,7 @@ index 944e6f6..325589c 100644
          if (stats) {
              auto& region = Stats().regions[RegionKey(device_addr)];
              ++region.stream_count;
-@@ -981,6 +1012,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -981,6 +1013,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
      const auto* arena = GetArena(first_block, last_block);
      EnsureResident(arena, first_block, last_block);
      BB_SECTION(ObtainVram);
@@ -2251,7 +2259,7 @@ index 944e6f6..325589c 100644
      const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
      if (GuestInPlace()) {
          BbStats::bound_vram_bytes.fetch_add(size, std::memory_order_relaxed);
-@@ -994,6 +1026,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -994,6 +1027,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
              BbStats::buffer_upload_bytes.load(std::memory_order_relaxed) - uploaded_before;
      }
      if (is_written) {
@@ -2259,7 +2267,85 @@ index 944e6f6..325589c 100644
          gpu_modified_ranges.Add(device_addr, size);
          WriteTicks().Note(device_addr, size, scheduler.CurrentTick());
          if (Readbacks()) {
-@@ -1324,19 +1357,84 @@ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
+@@ -1131,6 +1165,8 @@ void BufferCache::ProcessFaultBuffer() {
+ }
+ 
+ void BufferCache::SynchronizeDmaBuffers() {
++    dma_second.store(BbStats::coarse_second.load(std::memory_order_relaxed),
++                     std::memory_order_relaxed);
+     for (const auto& range : resident_ranges) {
+         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
+         const VAddr device_addr = range.start << block_shift;
+@@ -1211,6 +1247,24 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+     IntervalList bind_ranges;
+     resident_ranges.ForEachGap(first_block, last_block + 1,
+                                [&](u64 start, u64 end) { bind_ranges.Add({start, end}); });
++    // bbport: blocks evicted from the 2 MiB groups of this request (EvictIdleCopies) come back
++    // with it, whole. A draw reads past its own range into bytes another binding uploaded (vertex
++    // buffers are bound without a size): back in VRAM with only this range uploaded, those read
++    // zeros until that binding came again, and geometry went missing.
++    IntervalList restored;
++    if (!evicted_blocks.Empty() && block_shift <= USE_GROUP_BITS) {
++        const u64 group_shift = USE_GROUP_BITS - block_shift;
++        const u64 from = (first_block >> group_shift) << group_shift;
++        const u64 to = ((last_block >> group_shift) + 1) << group_shift;
++        evicted_blocks.ForEachInRange(from, to, [&](const Interval& range) {
++            const Interval part{std::max(from, range.start), std::min(to, range.end)};
++            restored.Add(part);
++            bind_ranges.Add(part);
++        });
++        if (!restored.Empty()) {
++            evicted_blocks.Subtract(from, to);
++        }
++    }
+     if (bind_ranges.Empty()) {
+         memo = {first_block, last_block, ResidencyGeneration()};
+         return;
+@@ -1232,6 +1286,8 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+         vram_blocks += range.end - range.start;
+     }
+ 
++    // bbport: blocks put into slots other blocks left, cleared below.
++    boost::container::small_vector<u64, 16> reused;
+     if (vram_blocks != 0) {
+         // bbport: the slots of blocks that left VRAM first, block by block. A request of several
+         // blocks only ever took new space, and the free slots piled up while new 64 MiB chunks
+@@ -1240,6 +1296,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+         for (const auto& range : bind_ranges) {
+             u64 block = range.start;
+             for (; block < range.end && free_slot_count != 0; ++block) {
++                reused.push_back(block);
+                 const auto [memory, memory_offset] = AllocateResidency(block_size);
+                 auto* last = binds.empty() ? nullptr : &binds.back();
+                 if (last && last->end == block && last->memory == memory &&
+@@ -1297,6 +1354,26 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+ 
+     staging.Flush();
+     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
++
++    // bbport: a slot another block left still holds that block's data; only the ranges bound are
++    // uploaded into it. Vertex buffers are bound without a size (dynamic vertex input), so a draw
++    // reading past its range read zeros in new VRAM (the driver clears it) and read the other
++    // block's data in a reused slot: stretched polygons, flashing lights. Cleared like new VRAM,
++    // before the uploads that follow.
++    for (size_t i = 0; i < reused.size();) {
++        size_t j = i + 1;
++        while (j < reused.size() && reused[j] == reused[j - 1] + 1) {
++            ++j;
++        }
++        runtime.FillBuffer(arena, (reused[i] << block_shift) - arena->cpu_addr,
++                           u64(j - i) * block_size, 0u);
++        i = j;
++    }
++    // Evicted blocks back from the game's memory, whole (marked CPU-modified when they left).
++    for (const auto& range : restored) {
++        SynchronizeMemory(arena, range.start << block_shift,
++                          static_cast<u32>((range.end - range.start) << block_shift), false, false);
++    }
+ }
+ 
+ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
+@@ -1324,19 +1401,84 @@ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
      // current one is used: the kernel clears new memory, on a Steam Deck with the CPU (16-22 ms a
      // burst). At most one spare block.
      constexpr u64 ResidencyBlock = 64_MB;
@@ -2350,7 +2436,7 @@ index 944e6f6..325589c 100644
          residency_size = size;
          residency_used = 0;
          residency_chunks[static_cast<VkDeviceMemory>(residency_memory)] = {size, 0, 0, 0};
-@@ -1344,13 +1442,54 @@ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
+@@ -1344,13 +1486,58 @@ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
      const u64 offset = residency_used;
      residency_used += bytes;
      residency_chunks[static_cast<VkDeviceMemory>(residency_memory)].used += bytes;
@@ -2391,14 +2477,18 @@ index 944e6f6..325589c 100644
 +            "full: no new copies of the game's data, unused ones go back after 3 s",
 +        };
 +        static constexpr const char* kCopies[] = {
-+            "room again: new blocks of the game's data in VRAM",
-+            "tight: new blocks of the game's data in system memory",
-+            "full: new blocks of the game's data in system memory",
++            "room again: the game's data stays in VRAM",
++            "tight: the game's data unused for 30 s leaves VRAM, new blocks go to system memory",
++            "full: the game's data unused for 10 s leaves VRAM, new blocks go to system memory",
 +        };
-+        const char* what = GuestInPlace() ? kInPlace[level]
-+                           : system_memory_type_index || level == 0
-+                               ? kCopies[level]
-+                               : "tight, and no system memory for the game's data on this GPU";
++        static constexpr const char* kCopiesVram[] = {
++            "room again: the game's data stays in VRAM",
++            "tight: the game's data unused for 30 s leaves VRAM",
++            "full: the game's data unused for 10 s leaves VRAM",
++        };
++        const char* what = GuestInPlace()               ? kInPlace[level]
++                           : system_memory_type_index ? kCopies[level]
++                                                      : kCopiesVram[level];
 +        std::printf("Guest memory: VRAM %llu of %llu MiB, %s\n", (unsigned long long)(used >> 20),
 +                    (unsigned long long)(budget >> 20), what);
 +    }
@@ -2407,7 +2497,7 @@ index 944e6f6..325589c 100644
  void BufferCache::NoteResidencyUnused() {
      const u64 unused = free_slot_count * block_size + (residency_size - residency_used) +
                         (spare_residency.valid() ? 64_MB : 0);
-@@ -1430,10 +1569,18 @@ void BufferCache::EvictVramBlock(u64 block) {
+@@ -1430,10 +1617,23 @@ void BufferCache::EvictVramBlock(u64 block) {
  
  void BufferCache::ProcessIdleBlocks() {
      const u32 now = BbStats::coarse_second.load(std::memory_order_relaxed);
@@ -2417,7 +2507,12 @@ index 944e6f6..325589c 100644
      }
      idle_scan_second = now;
 +    UpdateVramLevel(now);
-+    if (!GuestInPlace() || VramIdleSeconds() == 0) {
++    if (VramIdleSeconds() == 0) {
++        return;
++    }
++    if (!GuestInPlace()) {
++        EvictIdleCopies(now);
++        FreeEmptyChunks(now);
 +        return;
 +    }
 +    const int level = vram_level.load(std::memory_order_relaxed);
@@ -2427,7 +2522,7 @@ index 944e6f6..325589c 100644
      // Blocks in VRAM whose 2 MiB were not bound for the idle time go back in place
      // (ProcessDemotions: only blocks of the game's direct memory without GPU-written data).
      const u64 tick = scheduler.CurrentTick();
-@@ -1442,7 +1589,7 @@ void BufferCache::ProcessIdleBlocks() {
+@@ -1442,7 +1642,7 @@ void BufferCache::ProcessIdleBlocks() {
              continue; // in place
          }
          for (u64 block = range.start; block < range.end; ++block) {
@@ -2436,7 +2531,7 @@ index 944e6f6..325589c 100644
                  demotions_waiting.push_back({block, tick, false, true});
              }
          }
-@@ -1452,12 +1599,14 @@ void BufferCache::ProcessIdleBlocks() {
+@@ -1452,12 +1652,14 @@ void BufferCache::ProcessIdleBlocks() {
      // into fuller chunks (AllocateResidency), and the chunk empties. Free slots spread evenly
      // (half of 1.3 GiB) left no chunk empty. One chunk every 10 s, each once a minute at most
      // (blocks with GPU-written data stay).
@@ -2453,7 +2548,84 @@ index 944e6f6..325589c 100644
                  continue;
              }
              if (sparsest == residency_chunks.end() || chunk.used < sparsest->second.used) {
-@@ -1503,7 +1652,8 @@ void BufferCache::ProcessIdleBlocks() {
+@@ -1482,6 +1684,76 @@ void BufferCache::ProcessIdleBlocks() {
+             }
+         }
+     }
++    FreeEmptyChunks(now);
++}
++
++void BufferCache::EvictIdleCopies(u32 now) {
++    // bbport: without the PC memory model (it needs an AMD GPU) every block of the game's memory
++    // the GPU used kept its VRAM copy, and a 4 GB card ran out (exit 23). While VRAM is tight the
++    // copies unused for a while go. Kept: blocks with data the GPU wrote (only VRAM has it), and
++    // all of them while shaders read the game's memory through the page table (dma_second).
++    const int level = vram_level.load(std::memory_order_relaxed);
++    if (level == 0 || TwinsEnabled()) {
++        return;
++    }
++    // Longer than the PC memory model's 15 s and 3 s: an evicted block costs an upload and can show
++    // as late geometry when it comes back.
++    const u32 idle = std::min(VramIdleSeconds(), level >= 2 ? 10u : 30u);
++    const u32 dma = dma_second.load(std::memory_order_relaxed);
++    if (dma != 0 && now - dma < idle) {
++        if (dma_kept_reports < 10 && now - dma_kept_second >= 60) {
++            ++dma_kept_reports;
++            dma_kept_second = now;
++            std::printf("Guest memory: VRAM tight, but shaders read the game's memory directly: "
++                        "its unused data stays in VRAM\n");
++        }
++        return;
++    }
++    std::vector<u64> blocks;
++    for (const auto& range : resident_ranges) {
++        if (!residency_chunks.contains(static_cast<VkDeviceMemory>(range.memory))) {
++            continue;
++        }
++        for (u64 block = range.start; block < range.end; ++block) {
++            const VAddr address = block << block_shift;
++            const u64 group = std::min<u64>(address >> USE_GROUP_BITS, group_use.size() - 1);
++            if (now - group_use[group] < idle || gpu_modified_ranges.Intersects(address, block_size) ||
++                memory_tracker->IsRegionGpuModified(address, block_size)) {
++                continue;
++            }
++            blocks.push_back(block);
++        }
++    }
++    if (blocks.empty()) {
++        return;
++    }
++    for (const u64 block : blocks) {
++        EvictVramBlock(block);
++        evicted_blocks.Add({block, block + 1});
++    }
++    // Their page table entries are cleared: a shader reading one through it reports a fault and
++    // the block is bound again (ProcessFaultBuffer) instead of the shader reading unbound memory.
++    for (size_t i = 0; i < blocks.size();) {
++        size_t j = i + 1;
++        while (j < blocks.size() && blocks[j] == blocks[j - 1] + 1) {
++            ++j;
++        }
++        runtime.FillBuffer(bda_pagetable_buffer.get(), blocks[i] * sizeof(vk::DeviceAddress),
++                           (j - i) * sizeof(vk::DeviceAddress), 0u);
++        i = j;
++    }
++    const u64 bytes = u64(blocks.size()) * block_size;
++    evicted_bytes += bytes;
++    if (evict_reports < 20 &&
++        (evicted_bytes == bytes || (evicted_bytes >> 28) != ((evicted_bytes - bytes) >> 28))) {
++        ++evict_reports;
++        std::printf("Guest memory: VRAM tight, %llu MiB of the game's data unused for %u s left VRAM "
++                    "so far (uploaded again when used)\n",
++                    (unsigned long long)(evicted_bytes >> 20), idle);
++    }
++}
++
++void BufferCache::FreeEmptyChunks(u32 now) {
+     // Chunks without blocks for 5 s, the rebinds away from them long done: back to the driver.
+     for (auto it = residency_chunks.begin(); it != residency_chunks.end();) {
+         const ResidencyChunk& chunk = it->second;
+@@ -1503,7 +1775,8 @@ void BufferCache::ProcessIdleBlocks() {
  }
  
  bool BufferCache::VramEligible(u64 block, bool garlic_known) {
@@ -2463,7 +2635,7 @@ index 944e6f6..325589c 100644
          return false;
      }
      if (!WriteTracking()) {
-@@ -1643,7 +1793,7 @@ void BufferCache::ProcessDemotions() {
+@@ -1643,7 +1916,7 @@ void BufferCache::ProcessDemotions() {
              if (!force &&
                  BbStats::coarse_second.load(std::memory_order_relaxed) -
                          group_use[address >> USE_GROUP_BITS] <
@@ -2472,7 +2644,7 @@ index 944e6f6..325589c 100644
                  return true; // bound again since
              }
          } else if (!cpu_written && VramEligible(block)) {
-@@ -2299,6 +2449,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
+@@ -2299,6 +2572,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
      boost::container::small_vector<vk::BufferCopy, 4> copies;
      size_t total_size_bytes{};
      const Buffer* src_buffer{};
@@ -2480,7 +2652,7 @@ index 944e6f6..325589c 100644
      memory_tracker->ForEachUploadRange(
          device_addr, size, is_written,
          [&](u64 addr, u64 size) {
-@@ -2364,8 +2515,10 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
+@@ -2364,8 +2638,10 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
                  copies.assign(staged.begin(), staged.end());
                  total_size_bytes = staged_bytes;
              }
@@ -2491,7 +2663,7 @@ index 944e6f6..325589c 100644
  
      if (src_buffer) {
          runtime.CopyBuffer(src_buffer, arena, copies);
-@@ -2462,6 +2615,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
+@@ -2462,6 +2738,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
  }
  
  bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size) {
@@ -2500,7 +2672,7 @@ index 944e6f6..325589c 100644
          if (*type == TextureCache::MetaType::HTile) {
              static constexpr u32 ZmaskUncompressed = 0xf;
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
-index 77a9f9a..e679e49 100644
+index 77a9f9a..f1b74b4 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 @@ -120,6 +120,12 @@ public:
@@ -2516,7 +2688,7 @@ index 77a9f9a..e679e49 100644
      /// Finds a buffer for the specified region.
      [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                               bool is_written,
-@@ -300,6 +306,8 @@ private:
+@@ -300,10 +306,18 @@ private:
      /// bbport: idle VRAM blocks (see group_use).
      void NoteUse(VAddr address, u64 size);
      void ProcessIdleBlocks();
@@ -2525,7 +2697,17 @@ index 77a9f9a..e679e49 100644
      /// A VRAM slot of a block that left it: reused by the next move to VRAM.
      void ReleaseResidencySlot(vk::DeviceMemory memory, u64 offset);
      /// Unbinds a VRAM block of memory the game unmapped (uploaded again if mapped and used).
-@@ -412,6 +420,11 @@ private:
+     void EvictVramBlock(u64 block);
++    /// bbport: without the PC memory model, while VRAM is tight (vram_level): VRAM copies of the
++    /// game's data unused for 30 s (10 s when full) leave VRAM; their slots take the next blocks
++    /// instead of new VRAM, and they are uploaded again from the game's memory when bound.
++    void EvictIdleCopies(u32 now);
++    /// Residency chunks without blocks for 5 s, the rebinds away from them done: back to the driver.
++    void FreeEmptyChunks(u32 now);
+     [[nodiscard]] static u32 VramIdleSeconds();
+     /// BB_CHUNK_TEXTURES: texture data read by the GPU straight from the guest memory chunk it is
+     /// in (no CPU copy, no VRAM buffer copy), when the range is contiguous there.
+@@ -412,6 +426,11 @@ private:
      std::array<std::unique_ptr<Buffer>, 256> chunk_buffers{}; ///< per guest memory chunk (Chunk::index)
  
      u32 arena_memory_type_index{};
@@ -2537,7 +2719,7 @@ index 77a9f9a..e679e49 100644
      vk::DeviceMemory residency_memory{}; ///< bbport: the 64 MiB block arena residency comes from
      u64 residency_size = 0, residency_used = 0;
      std::future<vk::DeviceMemory> spare_residency; ///< the next block, allocated in the background
-@@ -436,6 +449,13 @@ private:
+@@ -436,6 +455,21 @@ private:
      std::unordered_map<VkDeviceMemory, ResidencyChunk> residency_chunks;
      u32 idle_scan_second = 0;
      u32 last_evacuation = 0; ///< ProcessIdleBlocks: when a chunk was last emptied
@@ -2546,6 +2728,14 @@ index 77a9f9a..e679e49 100644
 +    std::atomic<int> vram_level{0};
 +    u32 vram_full_until = 0; ///< a failed VRAM allocation counts as full until then
 +    u32 vram_level_reports = 0;
++    /// bbport: the second a shader last read the game's memory through the page table
++    /// (SynchronizeDmaBuffers). Those reads do not mark blocks as used, so nothing leaves VRAM
++    /// while such shaders run (EvictIdleCopies).
++    std::atomic<u32> dma_second{0};
++    u64 evicted_bytes = 0;
++    /// Blocks EvictIdleCopies took out of VRAM: they come back with their whole 2 MiB group.
++    TrackedIntervalList<> evicted_blocks;
++    u32 evict_reports = 0, dma_kept_reports = 0, dma_kept_second = 0;
 +    /// The seconds a VRAM copy may go unused before it goes back in place, at this level.
 +    u32 idle_seconds_now = 60;
      u32 block_size{};
@@ -8681,7 +8871,7 @@ index f9d2884..caf3e6c 100644
          std::unique_lock lk{mutex};
          while (true) {
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..b35d635 100644
+index 83e5538..9d7e877 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -12,12 +12,15 @@
@@ -9046,7 +9236,7 @@ index 83e5538..b35d635 100644
      for (int e = 0; e < BbSettings::EffectCount; ++e) {
          restart |= s.effects[e] != s.startup_effects[e];
      }
-@@ -499,8 +759,86 @@ void Menu() {
+@@ -499,8 +759,93 @@ void Menu() {
      Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
      Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
  
@@ -9127,13 +9317,56 @@ index 83e5538..b35d635 100644
 +
      ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
      Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
++    if (s.show_fps) {
++        ImGui::Indent();
++        Checkbox(BbSettings::MenuText("Frame rate", "Частота кадров"), s.show_fps_rate);
++        Checkbox(BbSettings::MenuText("Frame time", "Время кадра"), s.show_fps_frame_time);
++        Checkbox(BbSettings::MenuText("Upscaler", "Апскейлер"), s.show_fps_upscaler);
++        ImGui::Unindent();
++    }
 +    Checkbox(BbSettings::MenuText("Hide mouse cursor", "Скрывать курсор мыши"), s.hide_cursor);
 +    Hint(BbSettings::MenuText("Hidden 2 seconds after the mouse stops moving; moving it brings it back.",
 +                              "Скрывается через 2 секунды после остановки мыши; движение возвращает его."));
  
      ImGui::Spacing();
      if (ImGui::Button(BbSettings::MenuText("Close", "Закрыть"))) {
-@@ -587,6 +925,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -516,6 +861,24 @@ void Menu() {
+ }
+ 
+ void FpsCounter() {
++    // What it shows (the menu's checkboxes under the counter); nothing chosen: no window.
++    const auto& s = BbSettings::Get();
++    char text[96];
++    int n = 0;
++    if (s.show_fps_rate) {
++        n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS",
++                           frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f);
++    }
++    if (s.show_fps_frame_time) {
++        n += std::snprintf(text + n, sizeof(text) - n, "%s%.1f ms", n ? "  " : "", frame_ms_avg);
++    }
++    if (s.show_fps_upscaler) {
++        n += std::snprintf(text + n, sizeof(text) - n, "%s%s", n ? "  " : "",
++                           BbSettings::UpscalerName(s.upscaler));
++    }
++    if (n == 0) {
++        return;
++    }
+     const ImGuiViewport* viewport = ImGui::GetMainViewport();
+     const float pad = 12.0f * base_scale;
+     ImGui::SetNextWindowPos(
+@@ -526,9 +889,7 @@ void FpsCounter() {
+                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                      ImGuiWindowFlags_NoFocusOnAppearing);
+-    const auto& s = BbSettings::Get();
+-    ImGui::Text("%.0f FPS  %.1f ms  %s", frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f,
+-                frame_ms_avg, BbSettings::UpscalerName(s.upscaler));
++    ImGui::TextUnformatted(text);
+     ImGui::End();
+ }
+ 
+@@ -587,6 +948,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -9391,7 +9624,7 @@ index f88cc52..3acef06 100644
  } // namespace BbSections
  
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..c661078 100644
+index cf4fbd8..bb303b4 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -9472,16 +9705,22 @@ index cf4fbd8..c661078 100644
      } else if (key == "upscaler") {
          for (int u = 0; u < UpscalerCount; ++u) {
              if (value == UpscalerName(u)) {
-@@ -66,6 +117,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -66,6 +117,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.debug_view = std::clamp(i, 0, DebugViewCount - 1);
      } else if (key == "show_fps") {
          v.show_fps = i != 0;
++    } else if (key == "show_fps_rate") {
++        v.show_fps_rate = i != 0;
++    } else if (key == "show_fps_frame_time") {
++        v.show_fps_frame_time = i != 0;
++    } else if (key == "show_fps_upscaler") {
++        v.show_fps_upscaler = i != 0;
 +    } else if (key == "hide_cursor") {
 +        v.hide_cursor = i != 0;
      } else if (key == "menu_pos") {
          float x = -1.0f, y = -1.0f;
          if (std::sscanf(value.c_str(), "%f,%f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f &&
-@@ -91,6 +144,30 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -91,6 +150,30 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.mouse_invert_y=i!=0;
      } else if (key == "mouse_auto_rotation") {
          v.mouse_auto_rotation=i!=0;
@@ -9512,7 +9751,7 @@ index cf4fbd8..c661078 100644
      } else if (key == "mouse_sensitivity") {
          v.mouse_sensitivity=std::clamp(i,0,10);
      } else if (key == "camera_controls") {
-@@ -109,22 +186,77 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -109,22 +192,77 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.graphics_controls=i!=0;
      } else if (key == "graphics_vignette") {
          v.graphics_vignette=i!=0;
@@ -9595,7 +9834,7 @@ index cf4fbd8..c661078 100644
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
                  v.output_res = r;
              }
-@@ -138,15 +270,65 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -138,15 +276,65 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -9662,7 +9901,7 @@ index cf4fbd8..c661078 100644
  }
  
  void Load() {
-@@ -166,9 +348,7 @@ void Load() {
+@@ -166,9 +354,7 @@ void Load() {
                  }
              }
          }
@@ -9673,7 +9912,7 @@ index cf4fbd8..c661078 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -196,6 +376,9 @@ void Load() {
+@@ -196,6 +382,9 @@ void Load() {
          {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
          {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
          {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
@@ -9683,7 +9922,7 @@ index cf4fbd8..c661078 100644
      };
      for (const auto& [env, key] : env_keys) {
          if (const char* value = std::getenv(env)) {
-@@ -211,6 +394,7 @@ void Load() {
+@@ -211,6 +400,7 @@ void Load() {
      v.startup_model_lod = v.model_lod;
      v.startup_output_res = v.output_res;
      v.startup_live_resolution = v.live_resolution;
@@ -9691,7 +9930,7 @@ index cf4fbd8..c661078 100644
  }
  
  void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
-@@ -264,7 +448,7 @@ void Save() {
+@@ -264,7 +454,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -9700,15 +9939,18 @@ index cf4fbd8..c661078 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -277,6 +461,7 @@ void Save() {
+@@ -277,6 +467,10 @@ void Save() {
      put("reactive_max", fixed(v.reactive_max, 2));
      put("debug_view", std::to_string(v.debug_view.load()));
      put("show_fps", flag(v.show_fps));
++    put("show_fps_rate", flag(v.show_fps_rate));
++    put("show_fps_frame_time", flag(v.show_fps_frame_time));
++    put("show_fps_upscaler", flag(v.show_fps_upscaler));
 +    put("hide_cursor", flag(v.hide_cursor));
      put("fsr4_auto_exposure", flag(v.fsr4_auto_exposure));
      put("fsr4_invert_jitter", flag(v.fsr4_invert_jitter));
      // Read by patches.py at start.
-@@ -284,12 +469,23 @@ void Save() {
+@@ -284,12 +478,23 @@ void Save() {
          put(Effects[e].key, flag(v.effects[e]));
      }
      put("fullscreen", flag(v.fullscreen));
@@ -9732,7 +9974,7 @@ index cf4fbd8..c661078 100644
      put("camera_controls", flag(v.camera_controls));
      put("widescreen",flag(v.widescreen));
      put("pc_controls",flag(v.pc_controls));
-@@ -299,14 +495,26 @@ void Save() {
+@@ -299,14 +504,26 @@ void Save() {
      put("mouse_invert_y",flag(v.mouse_invert_y));
      put("mouse_auto_rotation",flag(v.mouse_auto_rotation));
      put("mouse_sensitivity",std::to_string(v.mouse_sensitivity.load()));
@@ -9762,7 +10004,7 @@ index cf4fbd8..c661078 100644
      put("live_resolution", v.live_resolution < 0 ? "auto" : flag(v.live_resolution != 0));
      if (v.menu_x >= 0.0f && v.menu_y >= 0.0f) {
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..a2a7e8d 100644
+index c0e8a94..6faf11c 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -9856,16 +10098,20 @@ index c0e8a94..a2a7e8d 100644
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -65,6 +115,8 @@ struct Values {
+@@ -65,6 +115,12 @@ struct Values {
      std::atomic<float> reactive_max{0.9f};
      std::atomic<int> debug_view{DebugNone};
      std::atomic<bool> show_fps{false};
++    /// What the FPS counter shows: the frame rate, the frame time, the upscaler.
++    std::atomic<bool> show_fps_rate{true};
++    std::atomic<bool> show_fps_frame_time{true};
++    std::atomic<bool> show_fps_upscaler{true};
 +    /// The mouse cursor hidden over the game 2 s after the mouse last moved (window.cpp).
 +    std::atomic<bool> hide_cursor{true};
      /// The settings menu's position (fraction of the screen), -1 until it is moved.
      std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
      // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
-@@ -77,14 +129,40 @@ struct Values {
+@@ -77,14 +133,40 @@ struct Values {
      std::atomic<bool> widescreen{true},pc_controls{true},mouse_camera{true},mouse_menu{true};
      std::atomic<bool> mouse_invert_x{false},mouse_invert_y{false},mouse_auto_rotation{false};
      std::atomic<int> mouse_sensitivity{5};
@@ -9906,7 +10152,7 @@ index c0e8a94..a2a7e8d 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +178,12 @@ struct Values {
+@@ -100,10 +182,12 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
@@ -10576,8 +10822,20 @@ index 62aad48..1041de6 100644
      static float applied=0;if(want==applied)return;
      previous_aspect=aspect.load();aspect=want;
      const float rx=std::max(1.0f,want/original_aspect),ry=std::max(1.0f,original_aspect/want);
+diff --git a/gpu/shim/input/compat.h b/gpu/shim/input/compat.h
+index deefd94..1d12ce5 100644
+--- a/gpu/shim/input/compat.h
++++ b/gpu/shim/input/compat.h
+@@ -57,6 +57,7 @@ void menu_pointer_click();
+ uint32_t menu_pointer_take_press();
+ uint64_t menu_pointer_tick();
+ bool menu_pointer_in_menu();
++bool menu_pointer_navigating();
+ uint32_t menu_region_confirm_button();
+ uint32_t menu_confirm_button();
+ uint32_t menu_back_button();
 diff --git a/gpu/shim/input/input.cpp b/gpu/shim/input/input.cpp
-index 30fdc4f..31defd1 100644
+index 30fdc4f..7630a3d 100644
 --- a/gpu/shim/input/input.cpp
 +++ b/gpu/shim/input/input.cpp
 @@ -54,7 +54,7 @@ bool host_mouse_stage_position(float& x,float& y) {
@@ -10589,6 +10847,28 @@ index 30fdc4f..31defd1 100644
      const float present=std::min(window_w/ow,window_h/oh);
      if(!s.widescreen){
          x=(mouse_x-(window_w-ow*present)/2)/present*1920/ow;
+@@ -162,8 +162,10 @@ extern "C" int bbgpu_pc_input(BbPcPad* d,const bool* keys,int nkeys,int gamepad_
+             if(p.lx==128)p.lx=127;if(p.ly==128)p.ly=127;
+             if(p.rx==128)p.rx=127;if(p.ry==128)p.ry=127;
+         }
+-        // Separate immutable menu navigation from gameplay keys.
+-        if(menu && keys) {
++        // Separate immutable menu navigation from gameplay keys (only while a menu has the screen:
++        // menu_pointer_navigating).
++        const bool navigating=menu && menu_pointer_navigating();
++        if(navigating && keys) {
+             for(int i=kBindLookU;i<=kBindLookR;i++)held[i]=false;
+             if(keys[SDL_SCANCODE_UP]||held[kBindMoveF])p.buttons|=0x10;
+             if(keys[SDL_SCANCODE_DOWN]||held[kBindMoveB])p.buttons|=0x40;
+@@ -178,7 +180,7 @@ extern "C" int bbgpu_pc_input(BbPcPad* d,const bool* keys,int nkeys,int gamepad_
+             if(s.mouse_menu){
+                 if(edges&1)menu_pointer_click();
+                 if(edges&SDL_BUTTON_RMASK)p.buttons|=menu_back_button();
+-                if(scroll>0)p.buttons|=0x10;if(scroll<0)p.buttons|=0x40;
++                if(navigating && scroll>0)p.buttons|=0x10;if(navigating && scroll<0)p.buttons|=0x40;
+                 p.buttons|=menu_pointer_take_press();
+             }
+         }else {
 diff --git a/gpu/shim/input/input.h b/gpu/shim/input/input.h
 index d4f3a31..5716e3f 100644
 --- a/gpu/shim/input/input.h
@@ -10606,6 +10886,25 @@ index d4f3a31..5716e3f 100644
  #ifdef __cplusplus
  }
  #endif
+diff --git a/gpu/shim/input/menu_pointer.cpp b/gpu/shim/input/menu_pointer.cpp
+index 93a179a..a5116da 100644
+--- a/gpu/shim/input/menu_pointer.cpp
++++ b/gpu/shim/input/menu_pointer.cpp
+@@ -858,3 +858,14 @@ bool menu_pointer_in_menu() {
+     // few frames means none has.
+     return menu_open() || now_ms() - g_focus_ms.load(std::memory_order_relaxed) < 400;
+ }
++
++bool menu_pointer_navigating() {
++    // bbport: whether the keys that move the character navigate a menu as the d-pad (input.cpp):
++    // the front end, the flow's open menu, or a list with focus in the last few frames. Not the
++    // pointer's 400 ms after a list lost focus: W pressed right after closing the inventory was a
++    // held d-pad up in the world, which turns HP into Quicksilver Bullets.
++    if (front_end()) {
++        return true;
++    }
++    return menu_open() || now_ms() - g_focus_ms.load(std::memory_order_relaxed) < 70;
++}
 diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
 index f475c39..aa552ab 100644
 --- a/gpu/shim/window.cpp
@@ -11833,18 +12132,28 @@ index 2563dfa..d673185 100644
              }
              p->next_deadline_ns+=(uint64_t)p->adjust_ns;
 diff --git a/src/runtime_content.c b/src/runtime_content.c
-index 59a683b..673a2de 100644
+index 59a683b..93185af 100644
 --- a/src/runtime_content.c
 +++ b/src/runtime_content.c
-@@ -6,6 +6,7 @@
+@@ -1,11 +1,16 @@
+ /* Offline AppContent provider for the configured base-game profile.
+- * No package/DLC mounting, downloads, entitlement or license emulation. */
++ * No package/DLC mounting, downloads, entitlement or license emulation; dumped add-ons are
++ * reported installed (see find_addons). */
+ #include "runtime.h"
++#include <ctype.h>
++#include <dirent.h>
+ #include <stdio.h>
+ #include <stdlib.h>
  #include <string.h>
++#include <sys/stat.h>
  #define INVALID_ID ((int32_t)0x805a1000)
  #define NOT_LOADED ((int32_t)0x805a1001)
 +#define NOT_INITIALIZED ((int32_t)0x80d90001)
  #define PARAMETER ((int32_t)0x80d90002)
  #define BUSY ((int32_t)0x80d90003)
  static unsigned refs, initialized, configured;
-@@ -58,20 +59,27 @@ static ABI int32_t content_init(const unsigned char *init,unsigned char *boot) {
+@@ -58,23 +63,129 @@ static ABI int32_t content_init(const unsigned char *init,unsigned char *boot) {
      puts("Runtime: AppContent initialized; offline base-game profile, no mounted add-ons");
      return 0;
  }
@@ -11867,17 +12176,121 @@ index 59a683b..673a2de 100644
      printf("Runtime: AppContent parameter %u = %d\n",id,*out);
      return 0;
  }
++/* bbport: add-ons. The base game (not the Game of the Year edition) learns from this list which
++ * add-ons were bought; it always answered none, so The Old Hunters was missing on base-game
++ * dumps. Its data ships with the 1.09 update: a dumped add-on is only its sce_sys. Reported
++ * installed: the add-on folders in BB_DLC_DIR (the launcher's DLC folder, or one add-on folder
++ * itself) and in <user>/addcont/<title id>/ (shadPS4's layout). The entitlement label is the
++ * end of the add-on's CONTENT_ID (sce_sys/param.sfo, category "ac"), else the folder's name. */
++#define LABEL_SIZE 17
++#define MAX_ADDONS 64
++#define ADDON_INSTALLED 4u
++/* SceAppContentAddcontInfo: the entitlement label (16 characters and NUL, padding), status. */
++typedef struct { char label[LABEL_SIZE]; char padding[3]; uint32_t status; } AddonInfo;
++static char addon_labels[MAX_ADDONS][LABEL_SIZE];
++static uint32_t addon_count;
++static int addons_found;
++static uint32_t le32(const unsigned char *p) {
++    return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;
++}
++/* The string `key` of a param.sfo into out (size bytes): 1 when found. */
++static int sfo_string(const char *path,const char *key,char *out,size_t size) {
++    FILE *f=fopen(path,"rb");
++    if (!f) return 0;
++    unsigned char *sfo=malloc(65536);
++    size_t n=sfo ? fread(sfo,1,65536,f) : 0;
++    fclose(f);
++    int found=0;
++    if (n>=20 && !memcmp(sfo,"\0PSF",4)) {
++        const uint32_t keys=le32(sfo+8), data=le32(sfo+12), count=le32(sfo+16);
++        for (uint32_t i=0;i<count && 20+16*((size_t)i+1)<=n && !found;++i) {
++            const unsigned char *e=sfo+20+16*(size_t)i;
++            const size_t k=(size_t)keys+(e[0]|e[1]<<8), v=(size_t)data+le32(e+12), len=le32(e+4);
++            if (k>=n || !memchr(sfo+k,0,n-k) || strcmp((const char *)sfo+k,key)) continue;
++            if (v>=n || len>n-v || !size) break;
++            const size_t m=len<size ? len : size-1;
++            memcpy(out,sfo+v,m); out[m]=0; found=1;
++        }
++    }
++    free(sfo);
++    return found;
++}
++/* The add-on folder `path` (named `name`); need_sfo: only with an add-on's param.sfo. */
++static void add_addon(const char *path,const char *name,int need_sfo) {
++    char sfo[4096], category[16]="", id[64]="", label[64]="";
++    if (snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",path)>=(int)sizeof(sfo)) return;
++    if (sfo_string(sfo,"CATEGORY",category,sizeof(category))) {
++        if (strcmp(category,"ac")) return; /* a game, not an add-on */
++        if (sfo_string(sfo,"CONTENT_ID",id,sizeof(id))) {
++            const char *dash=strrchr(id,'-');
++            snprintf(label,sizeof(label),"%s",dash ? dash+1 : "");
++        }
++    } else if (need_sfo) return;
++    if (!label[0]) snprintf(label,sizeof(label),"%s",name);
++    const size_t n=strlen(label);
++    if (!n || n>=LABEL_SIZE || addon_count>=MAX_ADDONS) return;
++    for (size_t i=0;i<n;++i) if (!isalnum((unsigned char)label[i])) return;
++    for (uint32_t i=0;i<addon_count;++i) if (!strcmp(addon_labels[i],label)) return;
++    memcpy(addon_labels[addon_count++],label,n+1);
++    printf("Runtime: add-on %s reported installed (%s)\n",label,path);
++}
++static void scan_addons(const char *folder) {
++    DIR *dir=opendir(folder);
++    for (struct dirent *e; dir && (e=readdir(dir));) {
++        char path[4096];
++        struct stat st;
++        if (e->d_name[0]=='.' || snprintf(path,sizeof(path),"%s/%s",folder,e->d_name)>=(int)sizeof(path) ||
++            stat(path,&st) || !S_ISDIR(st.st_mode)) continue;
++        add_addon(path,e->d_name,0);
++    }
++    if (dir) closedir(dir);
++}
++static void find_addons(void) {
++    if (addons_found) return;
++    addons_found=1;
++    const char *dlc=getenv("BB_DLC_DIR");
++    if (dlc && *dlc) {
++        add_addon(dlc,"",1);
++        scan_addons(dlc);
++    }
++    char root[4096];
++    DIR *titles=snprintf(root,sizeof(root),"%s/addcont",runtime_file_user_dir())<(int)sizeof(root) ? opendir(root) : NULL;
++    for (struct dirent *t; titles && (t=readdir(titles));) {
++        char title[4096];
++        if (t->d_name[0]=='.' || snprintf(title,sizeof(title),"%s/%s",root,t->d_name)>=(int)sizeof(title)) continue;
++        scan_addons(title);
++    }
++    if (titles) closedir(titles);
++    if (dlc && *dlc && !addon_count) printf("Runtime: DLC folder %s: no add-ons found\n",dlc);
++}
  static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint32_t *hits) {
 -    require_initialized();
 -    if (service) { fputs("STOP: nonzero AppContent service label unsupported\n",stderr); exit(21); }
 +    int32_t result=require_initialized();
 +    if (result) return result;
-+    /* bbport: other service labels have no add-ons either (this ended the game, exit 21). */
++    /* bbport: other service labels have no add-ons (this ended the game, exit 21). */
 +    static unsigned noted;
 +    if (service && !noted++) fprintf(stderr,"Runtime: AppContent service label %u: no add-ons\n",service);
      if ((!capacity || !list) && !hits) return PARAMETER;
-     /* No add-ons are mounted by this provider. Never touch unused list slots. */
-     if (hits) *hits=0;
+-    /* No add-ons are mounted by this provider. Never touch unused list slots. */
+-    if (hits) *hits=0;
++    find_addons();
++    /* Without a list the count; with one at most capacity entries. Never touch unused slots. */
++    uint32_t count=service ? 0 : addon_count;
++    if (list && capacity) {
++        if (count>capacity) count=capacity;
++        for (uint32_t i=0;i<count;++i) {
++            AddonInfo info;
++            memset(&info,0,sizeof(info));
++            memcpy(info.label,addon_labels[i],strlen(addon_labels[i]));
++            info.status=ADDON_INSTALLED;
++            memcpy((unsigned char *)list+(size_t)i*sizeof(info),&info,sizeof(info));
++        }
++    }
++    if (hits) *hits=count;
+     ++lists; return 0;
+ }
+ uintptr_t runtime_content_resolve(const char *name) {
 diff --git a/src/runtime_file.c b/src/runtime_file.c
 index 6e10375..efb8985 100644
 --- a/src/runtime_file.c
@@ -12491,6 +12904,89 @@ index 65883c0..e46c2a7 100644
      t->attr.prio=prio; return 0;
  }
  static ABI int32_t thread_set_affinity(GuestThread *t,uint64_t mask) {
+diff --git a/tests/test_content.c b/tests/test_content.c
+index a2136ca..ff79682 100644
+--- a/tests/test_content.c
++++ b/tests/test_content.c
+@@ -1,6 +1,7 @@
+ #include "runtime.h"
+ #include <assert.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <stdio.h>
+ typedef int32_t (ABI *Module)(uint16_t);
+@@ -8,6 +9,11 @@ typedef int32_t (ABI *Init)(const void *,void *);
+ typedef int32_t (ABI *Param)(uint32_t,int32_t *);
+ typedef int32_t (ABI *List)(uint32_t,void *,uint32_t,uint32_t *);
+ #define GET(t,n) ((t)runtime_content_resolve(n))
++/* The runtime's user folder (runtime_file.c): TEST_USER_DIR, else one without add-ons. */
++const char *runtime_file_user_dir(void) {
++    const char *dir=getenv("TEST_USER_DIR");
++    return dir ? dir : "no-such-user-dir";
++}
+ int main(int argc,char **argv) {
+     Module load=GET(Module,"g8cM39EUZ6o#M#N");
+     Module loaded=GET(Module,"fMP5NHUOaMk#M#N");
+@@ -20,6 +26,22 @@ int main(int argc,char **argv) {
+     if (argc>1 && !strcmp(argv[1],"--missing")) { load(0xb4); return 99; }
+     const uint32_t profile[]={1,13,0x80000000,0,7};
+     runtime_content_configure(profile);
++    if (argc>1 && !strcmp(argv[1],"--addons")) {
++        /* BB_DLC_DIR and TEST_USER_DIR set by the caller (tests/test_content.py). */
++        assert(load(0xb4)==0);
++        unsigned char initial[32]={0}, boot[40];
++        assert(init(initial,boot)==0);
++        struct { char label[17]; char padding[3]; uint32_t status; } entries[3];
++        memset(entries,0xaa,sizeof(entries));
++        uint32_t hits=0;
++        assert(list(0,NULL,0,&hits)==0);
++        printf("hits %u\n",hits);
++        assert(list(0,entries,2,&hits)==0 && hits<=2);
++        for (uint32_t i=0;i<hits;++i) printf("addon %s %u\n",entries[i].label,entries[i].status);
++        const unsigned char *rest=(const unsigned char *)&entries[hits];
++        for (size_t i=0;i<sizeof(entries[0])*(3-hits);++i) assert(rest[i]==0xaa);
++        return 0;
++    }
+     if (argc>1 && !strcmp(argv[1],"--unknown")) {
+         /* Other system modules are host-provided: reference counted, independent. */
+         assert((uint32_t)loaded(0xb5)==0x805a1001);
+diff --git a/tests/test_content.py b/tests/test_content.py
+index c151e2a..5f72fc3 100644
+--- a/tests/test_content.py
++++ b/tests/test_content.py
+@@ -36,5 +36,31 @@ class ContentTests(unittest.TestCase):
+         r=self.run_case('--missing');self.assertEqual(r.returncode,21)
+         self.assertIn('needs --content-profile',r.stderr)
+ 
++    def test_dumped_addons_are_reported_installed(self):
++        # The Old Hunters on base-game dumps: add-on folders in BB_DLC_DIR and <user>/addcont/<title id>,
++        # each label once (from param.sfo's CONTENT_ID, else the folder's name); a game is not one.
++        def sfo(entries):
++            keys=data=index=b''
++            for k,v in entries:
++                kb,vb=k.encode()+b'\0',v.encode()+b'\0'
++                index+=struct.pack('<HHIII',len(keys),0x0204,len(vb),len(vb),len(data)); keys+=kb; data+=vb
++            start=20+len(index)
++            return b'\0PSF'+struct.pack('<IIII',0x101,start,start+len(keys),len(entries))+index+keys+data
++        with tempfile.TemporaryDirectory() as tmp:
++            p=Path(tmp)
++            for folder,entries in [('dlc/SPEXPANSIONDLC03',None),
++                                   ('dlc/oldhunters',[('CATEGORY','ac'),('CONTENT_ID','UP9000-CUSA00207_00-SPEXPANSIONDLC03')]),
++                                   ('dlc/game',[('CATEGORY','gd'),('CONTENT_ID','UP9000-CUSA00207_00-BLOODBORNE0000000')]),
++                                   ('dlc/dvdroot_ps4',None),('user/addcont/CUSA00207/SOUNDTRACK01',None)]:
++                (p/folder/'sce_sys').mkdir(parents=True)
++                if entries: (p/folder/'sce_sys/param.sfo').write_bytes(sfo(entries))
++            r=subprocess.run([str(EXE.resolve()),'--addons'],capture_output=True,text=True,timeout=5,
++                             env={'BB_DLC_DIR':str(p/'dlc'),'TEST_USER_DIR':str(p/'user')})
++            self.assertEqual(r.returncode,0,r.stdout+r.stderr)
++            self.assertIn('hits 2',r.stdout)
++            self.assertIn('addon SPEXPANSIONDLC03 4',r.stdout)
++            self.assertIn('addon SOUNDTRACK01 4',r.stdout)
++            r=self.run_case('--addons');self.assertIn('hits 0',r.stdout)
++
+     def test_other_modules_are_counted_independently(self):
+         r=self.run_case('--unknown');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
 diff --git a/tests/test_engine_hooks.cpp b/tests/test_engine_hooks.cpp
 index 50e085f..316ab02 100644
 --- a/tests/test_engine_hooks.cpp
@@ -16030,10 +16526,10 @@ index 0000000..2336643
 +} // namespace VideoCore
 diff --git a/gpu/shim/bbport_menu_i18n.cpp b/gpu/shim/bbport_menu_i18n.cpp
 new file mode 100644
-index 0000000..205ab5c
+index 0000000..77a227a
 --- /dev/null
 +++ b/gpu/shim/bbport_menu_i18n.cpp
-@@ -0,0 +1,1283 @@
+@@ -0,0 +1,1311 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: the in-game menu (bbport_overlay.cpp) in the languages other than English and
 +// Russian, which MenuText takes at its call sites. Each table maps the English text, exactly as
@@ -16206,6 +16702,10 @@ index 0000000..205ab5c
 +     "Otros"},
 +    {"FPS counter in corner",
 +     "Contador de FPS en la esquina"},
++    {"Frame rate",
++     "Tasa de fotogramas"},
++    {"Frame time",
++     "Tiempo de fotograma"},
 +    {"Close",
 +     "Cerrar"},
 +    {"Settings are saved to bbport.ini",
@@ -16380,6 +16880,10 @@ index 0000000..205ab5c
 +     "Outros"},
 +    {"FPS counter in corner",
 +     "Contador de FPS no canto"},
++    {"Frame rate",
++     "Taxa de quadros"},
++    {"Frame time",
++     "Tempo de quadro"},
 +    {"Close",
 +     "Fechar"},
 +    {"Settings are saved to bbport.ini",
@@ -16556,6 +17060,10 @@ index 0000000..205ab5c
 +     "Divers"},
 +    {"FPS counter in corner",
 +     "Compteur FPS dans le coin"},
++    {"Frame rate",
++     "Fréquence d'images"},
++    {"Frame time",
++     "Temps par image"},
 +    {"Close",
 +     "Fermer"},
 +    {"Settings are saved to bbport.ini",
@@ -16732,6 +17240,10 @@ index 0000000..205ab5c
 +     "Sonstiges"},
 +    {"FPS counter in corner",
 +     "FPS-Anzeige in der Ecke"},
++    {"Frame rate",
++     "Bildrate"},
++    {"Frame time",
++     "Bildzeit"},
 +    {"Close",
 +     "Schließen"},
 +    {"Settings are saved to bbport.ini",
@@ -16908,6 +17420,10 @@ index 0000000..205ab5c
 +     "Altro"},
 +    {"FPS counter in corner",
 +     "Contatore FPS nell'angolo"},
++    {"Frame rate",
++     "Frequenza fotogrammi"},
++    {"Frame time",
++     "Tempo per fotogramma"},
 +    {"Close",
 +     "Chiudi"},
 +    {"Settings are saved to bbport.ini",
@@ -17081,6 +17597,10 @@ index 0000000..205ab5c
 +     "Inne"},
 +    {"FPS counter in corner",
 +     "Licznik FPS w rogu"},
++    {"Frame rate",
++     "Liczba klatek na sekundę"},
++    {"Frame time",
++     "Czas klatki"},
 +    {"Close",
 +     "Zamknij"},
 +    {"Settings are saved to bbport.ini",
@@ -17254,6 +17774,10 @@ index 0000000..205ab5c
 +     "Diğer"},
 +    {"FPS counter in corner",
 +     "Köşede FPS sayacı"},
++    {"Frame rate",
++     "Kare hızı"},
++    {"Frame time",
++     "Kare süresi"},
 +    {"Close",
 +     "Kapat"},
 +    {"Settings are saved to bbport.ini",

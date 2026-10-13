@@ -34,6 +34,17 @@ namespace BloodborneLauncher.Views
 
             IniToggle(SymbolRegular.ArrowMove24, "Object motion vectors", "Less ghosting on characters; costs about 10% FPS", "object_motion");
             IniToggle(SymbolRegular.DataUsage24, "Show FPS", null, "show_fps");
+            // What the counter shows (on unless turned off).
+            foreach (var (icon, key, title) in new[]
+                     {
+                         (SymbolRegular.TopSpeed24, "show_fps_rate", "Frame rate"),
+                         (SymbolRegular.Timer24, "show_fps_frame_time", "Frame time"),
+                         (SymbolRegular.ResizeLarge24, "show_fps_upscaler", "Upscaler"),
+                     })
+            {
+                ToggleRow(icon, title, "Shown in the FPS counter", () => Ini.Get(key, "1") == "1", v => Ini.Set(key, v ? "1" : "0"));
+                ((System.Windows.FrameworkElement)Body.Children[^1]).Margin = new System.Windows.Thickness(24, 0, 0, 4);
+            }
 
             Add(Card(SymbolRegular.DeveloperBoard24, "DLSS", "", null, out _dlssHint));
 

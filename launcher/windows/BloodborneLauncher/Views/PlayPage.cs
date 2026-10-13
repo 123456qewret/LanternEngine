@@ -18,9 +18,9 @@ namespace BloodborneLauncher.Views
         private readonly Button _profileButton;
         private readonly TextBlock _profileHint, _backupHint;
         private readonly Button _restoreButton;
-        private readonly TextBlock _gameHint, _userHint, _statGame, _statUpscaler, _statResolution, _statFps, _statVia;
+        private readonly TextBlock _gameHint, _dlcHint, _userHint, _statGame, _statUpscaler, _statResolution, _statFps, _statVia;
         private readonly SymbolIcon _gameIcon;
-        private readonly Button _play, _resetUser;
+        private readonly Button _play, _resetUser, _resetDlc;
         private readonly TextBlock _playStatus;
         private readonly DispatcherTimer _clock;
 
@@ -106,6 +106,18 @@ namespace BloodborneLauncher.Views
             _gameIcon = gameCard.Icon;
             gameCard.ShowIcon = true;
             Add(gameCard);
+
+            // The Old Hunters on base-game dumps: the folder of the dumped add-ons (BB_DLC_DIR).
+            _resetDlc = IconButton(SymbolRegular.Dismiss24, "No DLC folder", (_, _) =>
+            {
+                S.Set("dlc_dir", "");
+                Ws.SaveSoon();
+                Refresh();
+            });
+            Add(Card(SymbolRegular.PuzzlePiece24, "DLC folder", "", Row(
+                SmallButton("Browse", SymbolRegular.FolderOpen24, (_, _) => ChooseDlc()),
+                IconButton(SymbolRegular.Open24, "Open in Explorer", (_, _) => Paths.OpenFolder(GameEnvironment.DlcDir(S))),
+                _resetDlc), out _dlcHint));
 
             // Player profiles: each its own saves and trophies (a button with a menu, not a drop-down,
             // so a click can't pick an entry by itself).
@@ -193,6 +205,12 @@ namespace BloodborneLauncher.Views
             _problem.Title = status.Health == Health.Bad ? "The game folder needs attention" : "Check the game";
             _problem.Message = status.Summary;
 
+            var dlc = GameEnvironment.DlcDir(S);
+            SetHint(_dlcHint, dlc.Length > 0
+                ? dlc
+                : "Only with a base-game dump: the folder of your dumped add-ons, one folder each (The Old Hunters: SPEXPANSIONDLC03). The Game of the Year edition (CUSA03173) has it already");
+            _resetDlc.IsEnabled = dlc.Length > 0;
+
             var custom = S.Str("user_dir").Length > 0;
             var root = GameEnvironment.SavesRoot(S);
             SetHint(_userHint, (custom ? root : $"Default: {root}") + "  ·  every profile's saves live here");
@@ -257,6 +275,16 @@ namespace BloodborneLauncher.Views
                 Ws.ResolvePort(); // the port may sit beside the new game folder
             Ws.SaveSoon();
             Ws.Log("Game folder: " + path, LogLevel.Step);
+            Refresh();
+        }
+
+        private void ChooseDlc()
+        {
+            var path = PickFolder("DLC folder (your dumped add-ons, like SPEXPANSIONDLC03)", GameEnvironment.DlcDir(S));
+            if (path == null) return;
+            S.Set("dlc_dir", path);
+            Ws.SaveSoon();
+            Ws.Log("DLC folder: " + path, LogLevel.Step);
             Refresh();
         }
 

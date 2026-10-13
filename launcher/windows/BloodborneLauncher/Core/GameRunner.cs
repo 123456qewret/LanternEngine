@@ -68,6 +68,8 @@ namespace BloodborneLauncher.Core
             {
                 var process = new Process { StartInfo = info, EnableRaisingEvents = true };
                 OpenLog();
+                // The first line of every log, the Output page's export included: which build ran.
+                Emit($"Bloodborne Launcher {Updater.CurrentLabel}, engine {Updater.LocalEngine() ?? "unknown"}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
                 process.OutputDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
                 process.ErrorDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
                 process.Exited += (_, _) =>
@@ -107,7 +109,6 @@ namespace BloodborneLauncher.Core
                 catch (IOException) { /* still open elsewhere: only this session's is kept */ }
                 var stream = new FileStream(SessionLog, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
                 _log = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
-                _log.WriteLine($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  Bloodborne Launcher {Updater.CurrentLabel}");
             }
             catch { _log = null; /* read-only folder: the Log tab still has it */ }
         }

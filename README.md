@@ -1,6 +1,6 @@
 # Bloodborne PC
 
-Bloodborne on Windows in one package: our launcher and our own engine. You only need your own game dump.
+Bloodborne on Windows in one package: my launcher and my own engine. You only need your own game dump.
 
 **Community:** [join the Discord](https://discord.gg/d3Uv3Cfr5x) for help, news, co-op partners and beta feedback.
 
@@ -18,9 +18,9 @@ The launcher updates itself from the Releases page.
 
 ## Features
 
-- **Play**: game folder check, player profiles (each with its own saves and trophies), automatic save backups with restore, save import from shadPS4 or another port, session summary.
+- **Play**: game folder check, player profiles (each with its own saves and trophies), automatic save backups with restore, save import from shadPS4 or another port, DLC folder (The Old Hunters on base-game dumps), session summary.
 - **Display**: resolution (or your display's own, any shape), fullscreen, widescreen (21:9, 32:9), native HDR, 30 to 144 FPS or uncapped, in-game menu in 9 languages.
-- **Graphics**: FSR 4, FSR 3, DLSS and DLAA, TAA, sharpening, occlusion culling, picture and camera tuning, best settings for your PC.
+- **Graphics**: FSR 4, FSR 3, DLSS and DLAA, TAA, sharpening, occlusion culling, picture and camera tuning, FPS counter (frame rate, frame time, upscaler), best settings for your PC.
 - **Controls**: keyboard and mouse for every action, the game's button prompts shown as your keys or as Xbox buttons, controller remapping, stick options, live controller detection, shareable profiles.
 - **Cheats**: Blood Vials and Quicksilver Bullets (infinite or a set amount), infinite consumables and stamina, stealth, no weapon wear, firearm range, keep echoes on death, echo multiplier. Each can be turned off.
 - **Trophies**: all 40, completion rate, in-game notification, reset.
@@ -74,7 +74,7 @@ across nearly 100 files.
 
 The patch against the starting point, every change with its switch, and build steps are in [engine/](engine/).
 
-### What we changed
+### What I changed
 
 The starting point already ran the game's own code natively and split GPU work over several
 threads. The charts show what was changed here on top of it; each item is a row in
@@ -126,10 +126,11 @@ flowchart LR
     s10["Unlock Game Region with online on:<br/>no server for that region"] --> f10["Left out while online, unless you keep it"]
     s11["Busy frame (a boss intro at high model detail):<br/>a render pool ran out, crash"] --> f11["Render pools four times larger"]
     s12["120 / 144 FPS: the game froze<br/>at the end of Vicar Amelia's intro"] --> f12["The 90 FPS patch,<br/>with its values for that rate"]
+    s13["4 GB cards: VRAM full,<br/>exit 23 or a lost device"] --> f13["Game data unused for a while<br/>leaves VRAM once it is nearly full"]
     classDef was fill:#4a2b2b,stroke:#bf6f6f,color:#fff
     classDef now fill:#2b4a2b,stroke:#6fbf6f,color:#fff
-    class s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12 was
-    class f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12 now
+    class s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13 was
+    class f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13 now
 ```
 
 #### Button prompts: keyboard, mouse and Xbox

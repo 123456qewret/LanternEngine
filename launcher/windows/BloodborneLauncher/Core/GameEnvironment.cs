@@ -18,6 +18,10 @@ namespace BloodborneLauncher.Core
         public static string UserDir(LauncherSettings s) =>
             PlayerProfiles.Folder(s, PlayerProfiles.Current(s));
 
+        /// <summary>The dumped add-ons' folder (The Old Hunters on base-game dumps), or "".</summary>
+        public static string DlcDir(LauncherSettings s) =>
+            s.Str("dlc_dir") is { Length: > 0 } dir ? Paths.Expand(dir) : "";
+
         public static string ModsDir(LauncherSettings s) =>
             s.Str("mods_dir") is { Length: > 0 } dir ? Paths.Expand(dir) : Path.Combine(Paths.DataDir, "mods");
 
@@ -59,6 +63,7 @@ namespace BloodborneLauncher.Core
                 ["BB_VBLANK_HZ"] = fps switch { "90" => "90", "30" or "60" => "60", _ => "0" },
                 ["PYTHONUNBUFFERED"] = "1",
             };
+            if (DlcDir(s) is { Length: > 0 } dlc) env["BB_DLC_DIR"] = dlc;
             if (RegionPatchOnline is { } region) env["BB_REGION_PATCH_ONLINE"] = region;
             if (ResolutionPatchChoice is { } resolution) env["BB_RESOLUTION_PATCH"] = resolution;
             if (s.Str("present_mode").Length > 0) env["BB_PRESENT_MODE"] = s.Str("present_mode");
