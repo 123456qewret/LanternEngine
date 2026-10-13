@@ -21,7 +21,7 @@ The launcher updates itself from the Releases page.
 - **Play**: game folder check, player profiles (each with its own saves and trophies), automatic save backups with restore, save import from shadPS4 or another port, session summary.
 - **Display**: resolution (or your display's own, any shape), fullscreen, widescreen (21:9, 32:9), native HDR, 30 to 144 FPS or uncapped, in-game menu in 9 languages.
 - **Graphics**: FSR 4, FSR 3, DLSS and DLAA, TAA, sharpening, occlusion culling, picture and camera tuning, best settings for your PC.
-- **Controls**: keyboard and mouse for every action, the game's button prompts shown as your keys, controller remapping, stick options, live controller detection, shareable profiles.
+- **Controls**: keyboard and mouse for every action, the game's button prompts shown as your keys or as Xbox buttons, controller remapping, stick options, live controller detection, shareable profiles.
 - **Cheats**: Blood Vials and Quicksilver Bullets (infinite or a set amount), infinite consumables and stamina, stealth, no weapon wear, firearm range, keep echoes on death, echo multiplier. Each can be turned off.
 - **Trophies**: all 40, completion rate, in-game notification, reset.
 - **More**: mods and patches, online (The Hunter's Dream for messages and bloodstains, shadNet for co-op), game log, crash helper with safe mode, memory check before starting, stable or beta updates with a version selector.
@@ -124,23 +124,28 @@ flowchart LR
     s8["Sound slowly falls behind the picture"] --> f8["Output follows the device's real rate"]
     s9["Online: signed out by the server,<br/>a network drop sent the game to the title menu"] --> f9["Client reports its version,<br/>90 s to reconnect"]
     s10["Unlock Game Region with online on:<br/>no server for that region"] --> f10["Left out while online, unless you keep it"]
+    s11["Busy frame (a boss intro at high model detail):<br/>a render pool ran out, crash"] --> f11["Render pools four times larger"]
+    s12["120 / 144 FPS: the game froze<br/>at the end of Vicar Amelia's intro"] --> f12["The 90 FPS patch,<br/>with its values for that rate"]
     classDef was fill:#4a2b2b,stroke:#bf6f6f,color:#fff
     classDef now fill:#2b4a2b,stroke:#6fbf6f,color:#fff
-    class s1,s2,s3,s4,s5,s6,s7,s8,s9,s10 was
-    class f1,f2,f3,f4,f5,f6,f7,f8,f9,f10 now
+    class s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12 was
+    class f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12 now
 ```
 
-#### Keyboard and mouse button prompts
+#### Button prompts: keyboard, mouse and Xbox
 
 ```mermaid
 flowchart TD
     T["The game uploads a texture"] --> I{"One of the game's button icons?<br/>(its 20 key-guide icons, the HUD's buttons)"}
     I -->|"no"| N["Uploaded unchanged"]
     I -->|"yes"| D{"Keyboard or mouse in use?<br/>(Button Prompts: Automatic)"}
-    D -->|"controller"| O["The game's own icon"]
+    D -->|"controller"| X{"Xbox controller in use?<br/>(Controller Icons: Automatic)"}
+    X -->|"no"| O["The game's own icon"]
+    X -->|"yes"| P["The Xbox button bound to it (A, B, X, Y, LB, RT...),<br/>drawn the same way"]
+    P --> U
     D -->|"keyboard or mouse"| K["A keycap of the bound key, drawn and encoded<br/>in the game's texture format"]
     K --> U["Uploaded in its place;<br/>the game's memory is not changed"]
-    S["Device switched, menu opened or closed, key rebound"] -.->|"icons uploaded again"| T
+    S["Device or controller switched, menu opened or closed, key rebound"] -.->|"icons uploaded again"| T
 ```
 
 ## Credits

@@ -160,7 +160,7 @@ namespace BloodborneLauncher.Core
             {
                 var xml = XDocument.Load(Path.Combine(Paths.PortDir, "patches", "Bloodborne.xml"));
                 var template = xml.Descendants("Metadata").FirstOrDefault(m => (string?)m.Attribute("Name") == ResolutionTemplate);
-                return template?.Descendants("Line").Select(Range).OfType<(long Start, long End)>().ToList() ?? new();
+                return template?.Descendants("Line").Select(Range).Where(r => r.HasValue).Select(r => r!.Value).ToList() ?? new();
             }
             catch
             {
@@ -186,6 +186,14 @@ namespace BloodborneLauncher.Core
         }
 
         public static string ProfilePath => Path.Combine(Paths.DataDir, "patches.json");
+
+        /// <summary>"1.09" is "01.09" (patch files write either; scripts/patches.py same_app_version).</summary>
+        private static bool IsSupportedVersion(string? value)
+        {
+            var parts = (value ?? "").Trim().Split('.');
+            return parts.Length == 2 && int.TryParse(parts[0], out var major) && int.TryParse(parts[1], out var minor) &&
+                   major == 1 && minor == 9;
+        }
 
         public static List<Patch> Discover(string directory)
         {
@@ -215,7 +223,7 @@ namespace BloodborneLauncher.Core
 
                 foreach (var meta in root.Descendants("Metadata"))
                 {
-                    if ((string?)meta.Attribute("AppVer") != "01.09" ||
+                    if (!IsSupportedVersion((string?)meta.Attribute("AppVer")) ||
                         ((string?)meta.Attribute("AppElf") ?? "eboot.bin") != "eboot.bin")
                         continue;
                     var name = (string?)meta.Attribute("Name") ?? "";

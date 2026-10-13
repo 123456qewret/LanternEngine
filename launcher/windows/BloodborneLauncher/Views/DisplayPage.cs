@@ -45,7 +45,7 @@ namespace BloodborneLauncher.Views
                 Choices.HdrUiColor, () => Ini.Get("hdr_ui_color", "1"), v => Ini.Set("hdr_ui_color", v));
 
             Group("Frame rate");
-            SettingCombo(SymbolRegular.Gauge24, "Frame rate", "30, 60 and 90 are fixed presets; 120 and Uncapped use the uncapped patch with the sprint fix", Choices.FpsModes, "fps_mode");
+            SettingCombo(SymbolRegular.Gauge24, "Frame rate", "30, 60, 90, 120 and 144 are the game's frame-rate patches for that rate; Uncapped uses the community uncapped patch", Choices.FpsModes, "fps_mode");
         }
     }
 }

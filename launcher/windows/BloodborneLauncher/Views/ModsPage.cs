@@ -36,7 +36,8 @@ namespace BloodborneLauncher.Views
             Body.Children.Add(_modList);
 
             Group("Third-party patches");
-            Body.Children.Add(Text("shadPS4-format XML patches for version 01.09 from the patches folder.", "Faint"));
+            Body.Children.Add(Text("shadPS4-format XML patches for version 01.09 from the patches folder. Put your own in a file of " +
+                                   "their own there: Bloodborne.xml is the port's built-in file, replaced on every update, and is not listed.", "Faint"));
             Add(Card(SymbolRegular.Folder24, "Patches folder", "", Row(
                 SmallButton("Browse", SymbolRegular.FolderOpen24, (_, _) =>
                 {

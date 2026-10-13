@@ -2181,10 +2181,40 @@ index fa3476b..8eb8214 100644
  }
  
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 944e6f6..f7b2bc0 100644
+index 944e6f6..325589c 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-@@ -891,6 +891,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -523,6 +523,29 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
+         FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
+                        reqs.memoryTypeBits)
+             .value();
++    // bbport: without the PC memory model (it needs an AMD GPU) every block of the game's memory
++    // the GPU uses gets VRAM and keeps it, so a 4 GB card ran out (exit 23). System memory the
++    // arena takes, read by the GPU over PCIe, holds new blocks once VRAM is tight instead.
++    if (!integrated_gpu) {
++        const auto& props = instance.GetMemoryProperties();
++        for (u32 i = 0; i < props.memoryTypeCount; ++i) {
++            const auto heap = props.memoryHeaps[props.memoryTypes[i].heapIndex];
++            if ((reqs.memoryTypeBits & (1u << i)) != 0 &&
++                !(heap.flags & vk::MemoryHeapFlagBits::eDeviceLocal)) {
++                system_memory_type_index = i;
++                break;
++            }
++        }
++    }
++    if (system_memory_type_index) {
++        std::printf("Guest memory: the game's data in VRAM (memory type %u), in system memory "
++                    "(type %u) while VRAM is tight\n",
++                    arena_memory_type_index, *system_memory_type_index);
++    } else {
++        std::printf("Guest memory: the game's data in VRAM (memory type %u); no system memory "
++                    "type for it on this GPU\n",
++                    arena_memory_type_index);
++    }
+ 
+     const u64 bda_pagetable_size =
+         (blocks_per_arena_page * NUM_ARENA_PAGES) * sizeof(vk::DeviceAddress);
+@@ -891,6 +914,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                                                          bool is_written, bool is_texel_buffer) {
      BB_SECTION(ObtainBuffer);
      const bool stats = BufferStatsEnabled();
@@ -2197,7 +2227,7 @@ index 944e6f6..f7b2bc0 100644
      if (stats) {
          PrintBufferStats();
          NoteHotUse(device_addr, size);
-@@ -937,6 +943,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -937,6 +966,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                  SynchronizeMemoryFromImage(arena, device_addr, size);
              }
              TraceBinding(device_addr, size, is_written, is_written ? 0 : 2);
@@ -2205,7 +2235,7 @@ index 944e6f6..f7b2bc0 100644
              if (!is_written && !is_texel_buffer) {
                  if (const auto shadow = ShadowCopy(device_addr, size)) {
                      return *shadow;
-@@ -948,6 +955,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -948,6 +978,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
      // For read-only buffers use device local stream buffer to reduce renderpass breaks.
      if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
          BB_SECTION(ObtainStream);
@@ -2213,7 +2243,7 @@ index 944e6f6..f7b2bc0 100644
          if (stats) {
              auto& region = Stats().regions[RegionKey(device_addr)];
              ++region.stream_count;
-@@ -981,6 +989,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -981,6 +1012,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
      const auto* arena = GetArena(first_block, last_block);
      EnsureResident(arena, first_block, last_block);
      BB_SECTION(ObtainVram);
@@ -2221,7 +2251,7 @@ index 944e6f6..f7b2bc0 100644
      const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
      if (GuestInPlace()) {
          BbStats::bound_vram_bytes.fetch_add(size, std::memory_order_relaxed);
-@@ -994,6 +1003,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -994,6 +1026,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
              BbStats::buffer_upload_bytes.load(std::memory_order_relaxed) - uploaded_before;
      }
      if (is_written) {
@@ -2229,7 +2259,220 @@ index 944e6f6..f7b2bc0 100644
          gpu_modified_ranges.Add(device_addr, size);
          WriteTicks().Note(device_addr, size, scheduler.CurrentTick());
          if (Readbacks()) {
-@@ -2299,6 +2309,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
+@@ -1324,19 +1357,84 @@ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
+     // current one is used: the kernel clears new memory, on a Steam Deck with the CPU (16-22 ms a
+     // burst). At most one spare block.
+     constexpr u64 ResidencyBlock = 64_MB;
+-    const auto allocate = [this](u64 size) {
+-        const auto memory = Vulkan::Check(instance.GetDevice().allocateMemory({
++    const auto try_allocate = [this](u64 size, u32 type) -> vk::DeviceMemory {
++        const auto [result, memory] = instance.GetDevice().allocateMemory({
+             .allocationSize = size,
+-            .memoryTypeIndex = arena_memory_type_index,
+-        }));
++            .memoryTypeIndex = type,
++        });
++        if (result != vk::Result::eSuccess) {
++            return {};
++        }
+         BbStats::device_alloc_bytes.fetch_add(size, std::memory_order_relaxed);
+         BbStats::residency_alloc_bytes.fetch_add(size, std::memory_order_relaxed);
+         return memory;
+     };
++    // bbport: out of VRAM is no longer the end of the game. VRAM while there is room; while it is
++    // tight (vram_level, not with the PC memory model: there a copy in system memory would only
++    // duplicate the game's own) or once an allocation failed (full for 30 s), system memory.
++    // Without that, the empty chunks go back to the driver and VRAM is tried once more; only a
++    // failure then stops, as before.
++    const auto allocate = [this, &try_allocate](u64 size) {
++        const u32 now = BbStats::coarse_second.load(std::memory_order_relaxed);
++        const bool tight = !GuestInPlace() && vram_level.load(std::memory_order_relaxed) >= 1;
++        if (!tight || !system_memory_type_index) {
++            if (const auto memory = try_allocate(size, arena_memory_type_index)) {
++                return memory;
++            }
++            vram_full_until = now + 30;
++            vram_level.store(2, std::memory_order_relaxed);
++            std::printf("Guest memory: out of VRAM for %llu MiB of the game's data\n",
++                        (unsigned long long)(size >> 20));
++        }
++        if (system_memory_type_index) {
++            if (const auto memory = try_allocate(size, *system_memory_type_index)) {
++                system_residency_bytes += size;
++                if (system_residency_reports < 20 &&
++                    (system_residency_bytes == size ||
++                     (system_residency_bytes >> 28) != ((system_residency_bytes - size) >> 28))) {
++                    ++system_residency_reports;
++                    std::printf("Guest memory: VRAM tight, %llu MiB of the game's data in system "
++                                "memory so far\n",
++                                (unsigned long long)(system_residency_bytes >> 20));
++                }
++                return memory;
++            }
++            std::printf("Guest memory: no system memory either for %llu MiB of the game's data\n",
++                        (unsigned long long)(size >> 20));
++        }
++        if (spare_residency.valid()) {
++            if (const auto spare = spare_residency.get()) {
++                instance.GetDevice().freeMemory(spare);
++                BbStats::residency_alloc_bytes.fetch_sub(64_MB, std::memory_order_relaxed);
++                BbStats::device_free_bytes.fetch_add(64_MB, std::memory_order_relaxed);
++            }
++        }
++        // Empty chunks the GPU is done with (as ProcessIdleBlocks, without its 5 s wait).
++        for (auto it = residency_chunks.begin(); it != residency_chunks.end();) {
++            if (it->second.used != 0 || it->first == static_cast<VkDeviceMemory>(residency_memory) ||
++                !pending_binds.empty() || !scheduler.GetWorkSemaphore()->IsFree(it->second.empty_tick + 1)) {
++                ++it;
++                continue;
++            }
++            free_slot_count -= it->second.free_offsets.size();
++            instance.GetDevice().freeMemory(vk::DeviceMemory{it->first});
++            BbStats::residency_alloc_bytes.fetch_sub(it->second.size, std::memory_order_relaxed);
++            BbStats::device_free_bytes.fetch_add(it->second.size, std::memory_order_relaxed);
++            it = residency_chunks.erase(it);
++        }
++        NoteResidencyUnused();
++        return Vulkan::Check(instance.GetDevice().allocateMemory({
++            .allocationSize = size,
++            .memoryTypeIndex = arena_memory_type_index,
++        }));
++    };
+     if (residency_used + bytes > residency_size) {
+         const u64 size = std::max(bytes, ResidencyBlock);
+-        residency_memory = size == ResidencyBlock && spare_residency.valid() ? spare_residency.get()
+-                                                                              : allocate(size);
++        vk::DeviceMemory spare{};
++        if (size == ResidencyBlock && spare_residency.valid()) {
++            spare = spare_residency.get(); // null when the background allocation failed
++        }
++        residency_memory = spare ? spare : allocate(size);
+         residency_size = size;
+         residency_used = 0;
+         residency_chunks[static_cast<VkDeviceMemory>(residency_memory)] = {size, 0, 0, 0};
+@@ -1344,13 +1442,54 @@ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
+     const u64 offset = residency_used;
+     residency_used += bytes;
+     residency_chunks[static_cast<VkDeviceMemory>(residency_memory)].used += bytes;
+-    if (!spare_residency.valid() && residency_used * 2 >= residency_size) {
+-        spare_residency = std::async(std::launch::async, allocate, ResidencyBlock);
++    if (!spare_residency.valid() && residency_used * 2 >= residency_size &&
++        vram_level.load(std::memory_order_relaxed) == 0) {
++        spare_residency =
++            std::async(std::launch::async, try_allocate, ResidencyBlock, arena_memory_type_index);
+     }
+     NoteResidencyUnused();
+     return {residency_memory, offset};
+ }
+ 
++void BufferCache::UpdateVramLevel(u32 now) {
++    static const u64 percent = [] {
++        const char* env = std::getenv("BB_VRAM_PRESSURE_PERCENT");
++        return std::min<u64>(env ? std::strtoull(env, nullptr, 10) : 85, 95);
++    }();
++    int level = 0;
++    u64 used = 0, budget = 0;
++    if (percent != 0 && instance.CanReportMemoryUsage()) {
++        used = instance.GetDeviceMemoryUsage();
++        budget = instance.GetDeviceMemoryBudgetNow();
++        if (budget != 0) {
++            level = used * 100 >= budget * (percent + 5) ? 2 : used * 100 >= budget * percent ? 1 : 0;
++        }
++    }
++    if (now < vram_full_until) {
++        level = 2;
++    }
++    const int was = vram_level.exchange(level, std::memory_order_relaxed);
++    if (level != was && vram_level_reports < 40) {
++        ++vram_level_reports;
++        static constexpr const char* kInPlace[] = {
++            "room again: the game's data may get VRAM copies",
++            "tight: copies of the game's data unused for 15 s go back to system memory",
++            "full: no new copies of the game's data, unused ones go back after 3 s",
++        };
++        static constexpr const char* kCopies[] = {
++            "room again: new blocks of the game's data in VRAM",
++            "tight: new blocks of the game's data in system memory",
++            "full: new blocks of the game's data in system memory",
++        };
++        const char* what = GuestInPlace() ? kInPlace[level]
++                           : system_memory_type_index || level == 0
++                               ? kCopies[level]
++                               : "tight, and no system memory for the game's data on this GPU";
++        std::printf("Guest memory: VRAM %llu of %llu MiB, %s\n", (unsigned long long)(used >> 20),
++                    (unsigned long long)(budget >> 20), what);
++    }
++}
++
+ void BufferCache::NoteResidencyUnused() {
+     const u64 unused = free_slot_count * block_size + (residency_size - residency_used) +
+                        (spare_residency.valid() ? 64_MB : 0);
+@@ -1430,10 +1569,18 @@ void BufferCache::EvictVramBlock(u64 block) {
+ 
+ void BufferCache::ProcessIdleBlocks() {
+     const u32 now = BbStats::coarse_second.load(std::memory_order_relaxed);
+-    if (now == idle_scan_second || !GuestInPlace() || VramIdleSeconds() == 0) {
++    if (now == idle_scan_second) {
+         return;
+     }
+     idle_scan_second = now;
++    UpdateVramLevel(now);
++    if (!GuestInPlace() || VramIdleSeconds() == 0) {
++        return;
++    }
++    const int level = vram_level.load(std::memory_order_relaxed);
++    idle_seconds_now = level >= 2 ? std::min(VramIdleSeconds(), 3u)
++                       : level == 1 ? std::min(VramIdleSeconds(), 15u)
++                                    : VramIdleSeconds();
+     // Blocks in VRAM whose 2 MiB were not bound for the idle time go back in place
+     // (ProcessDemotions: only blocks of the game's direct memory without GPU-written data).
+     const u64 tick = scheduler.CurrentTick();
+@@ -1442,7 +1589,7 @@ void BufferCache::ProcessIdleBlocks() {
+             continue; // in place
+         }
+         for (u64 block = range.start; block < range.end; ++block) {
+-            if (now - group_use[(block << block_shift) >> USE_GROUP_BITS] >= VramIdleSeconds()) {
++            if (now - group_use[(block << block_shift) >> USE_GROUP_BITS] >= idle_seconds_now) {
+                 demotions_waiting.push_back({block, tick, false, true});
+             }
+         }
+@@ -1452,12 +1599,14 @@ void BufferCache::ProcessIdleBlocks() {
+     // into fuller chunks (AllocateResidency), and the chunk empties. Free slots spread evenly
+     // (half of 1.3 GiB) left no chunk empty. One chunk every 10 s, each once a minute at most
+     // (blocks with GPU-written data stay).
+-    if (free_slot_count * block_size >= 128_MB && now - last_evacuation >= 10) {
++    // Under VRAM pressure (vram_level) whatever the free slots, every 2 s when full.
++    if ((free_slot_count * block_size >= 128_MB || level >= 1) &&
++        now - last_evacuation >= (level >= 2 ? 2u : 10u)) {
+         auto sparsest = residency_chunks.end();
+         for (auto it = residency_chunks.begin(); it != residency_chunks.end(); ++it) {
+             const ResidencyChunk& chunk = it->second;
+             if (it->first == static_cast<VkDeviceMemory>(residency_memory) || chunk.used == 0 ||
+-                now - chunk.evacuated_second < 60) {
++                now - chunk.evacuated_second < (level >= 2 ? 10u : 60u)) {
+                 continue;
+             }
+             if (sparsest == residency_chunks.end() || chunk.used < sparsest->second.used) {
+@@ -1503,7 +1652,8 @@ void BufferCache::ProcessIdleBlocks() {
+ }
+ 
+ bool BufferCache::VramEligible(u64 block, bool garlic_known) {
+-    if (!GarlicInVram() || dynamic_blocks.Contains(block)) {
++    if (!GarlicInVram() || dynamic_blocks.Contains(block) ||
++        vram_level.load(std::memory_order_relaxed) >= 2) {
+         return false;
+     }
+     if (!WriteTracking()) {
+@@ -1643,7 +1793,7 @@ void BufferCache::ProcessDemotions() {
+             if (!force &&
+                 BbStats::coarse_second.load(std::memory_order_relaxed) -
+                         group_use[address >> USE_GROUP_BITS] <
+-                    VramIdleSeconds()) {
++                    idle_seconds_now) {
+                 return true; // bound again since
+             }
+         } else if (!cpu_written && VramEligible(block)) {
+@@ -2299,6 +2449,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
      boost::container::small_vector<vk::BufferCopy, 4> copies;
      size_t total_size_bytes{};
      const Buffer* src_buffer{};
@@ -2237,7 +2480,7 @@ index 944e6f6..f7b2bc0 100644
      memory_tracker->ForEachUploadRange(
          device_addr, size, is_written,
          [&](u64 addr, u64 size) {
-@@ -2364,8 +2375,10 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
+@@ -2364,8 +2515,10 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32
                  copies.assign(staged.begin(), staged.end());
                  total_size_bytes = staged_bytes;
              }
@@ -2248,7 +2491,7 @@ index 944e6f6..f7b2bc0 100644
  
      if (src_buffer) {
          runtime.CopyBuffer(src_buffer, arena, copies);
-@@ -2462,6 +2475,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
+@@ -2462,6 +2615,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
  }
  
  bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size) {
@@ -2257,7 +2500,7 @@ index 944e6f6..f7b2bc0 100644
          if (*type == TextureCache::MetaType::HTile) {
              static constexpr u32 ZmaskUncompressed = 0xf;
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
-index 77a9f9a..d3cbce7 100644
+index 77a9f9a..e679e49 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 @@ -120,6 +120,12 @@ public:
@@ -2273,6 +2516,41 @@ index 77a9f9a..d3cbce7 100644
      /// Finds a buffer for the specified region.
      [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                               bool is_written,
+@@ -300,6 +306,8 @@ private:
+     /// bbport: idle VRAM blocks (see group_use).
+     void NoteUse(VAddr address, u64 size);
+     void ProcessIdleBlocks();
++    /// bbport: vram_level from the driver's usage and budget (BB_VRAM_PRESSURE_PERCENT, 85).
++    void UpdateVramLevel(u32 now);
+     /// A VRAM slot of a block that left it: reused by the next move to VRAM.
+     void ReleaseResidencySlot(vk::DeviceMemory memory, u64 offset);
+     /// Unbinds a VRAM block of memory the game unmapped (uploaded again if mapped and used).
+@@ -412,6 +420,11 @@ private:
+     std::array<std::unique_ptr<Buffer>, 256> chunk_buffers{}; ///< per guest memory chunk (Chunk::index)
+ 
+     u32 arena_memory_type_index{};
++    /// bbport: a memory type the arena takes outside the card's own heaps (discrete GPUs): new
++    /// blocks of the game's data go there while VRAM is tight or full (AllocateResidency).
++    std::optional<u32> system_memory_type_index;
++    u64 system_residency_bytes = 0;
++    u32 system_residency_reports = 0;
+     vk::DeviceMemory residency_memory{}; ///< bbport: the 64 MiB block arena residency comes from
+     u64 residency_size = 0, residency_used = 0;
+     std::future<vk::DeviceMemory> spare_residency; ///< the next block, allocated in the background
+@@ -436,6 +449,13 @@ private:
+     std::unordered_map<VkDeviceMemory, ResidencyChunk> residency_chunks;
+     u32 idle_scan_second = 0;
+     u32 last_evacuation = 0; ///< ProcessIdleBlocks: when a chunk was last emptied
++    /// bbport: how full VRAM is against the driver's budget, once a second (UpdateVramLevel):
++    /// 0 room, 1 tight (idle VRAM copies go back sooner), 2 full (no new ones either).
++    std::atomic<int> vram_level{0};
++    u32 vram_full_until = 0; ///< a failed VRAM allocation counts as full until then
++    u32 vram_level_reports = 0;
++    /// The seconds a VRAM copy may go unused before it goes back in place, at this level.
++    u32 idle_seconds_now = 60;
+     u32 block_size{};
+     u32 block_shift{};
+     u32 blocks_per_arena_page{};
 diff --git a/gpu/shadps4/video_core/page_manager.cpp b/gpu/shadps4/video_core/page_manager.cpp
 index 128e922..c79e2dd 100644
 --- a/gpu/shadps4/video_core/page_manager.cpp
@@ -9113,7 +9391,7 @@ index f88cc52..3acef06 100644
  } // namespace BbSections
  
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..9ac5e1b 100644
+index cf4fbd8..c661078 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -9203,7 +9481,7 @@ index cf4fbd8..9ac5e1b 100644
      } else if (key == "menu_pos") {
          float x = -1.0f, y = -1.0f;
          if (std::sscanf(value.c_str(), "%f,%f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f &&
-@@ -91,6 +144,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -91,6 +144,30 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.mouse_invert_y=i!=0;
      } else if (key == "mouse_auto_rotation") {
          v.mouse_auto_rotation=i!=0;
@@ -9219,10 +9497,22 @@ index cf4fbd8..9ac5e1b 100644
 +                        value.c_str());
 +        }
 +        v.button_prompts = mode < 0 ? PromptsAuto : mode;
++    } else if (key == "pad_icons") {
++        int mode = -1;
++        for (int m = 0; m < PadIconsCount; ++m) {
++            if (value == PadIconsNames[m]) {
++                mode = m;
++            }
++        }
++        if (mode < 0) {
++            std::printf("Settings: unknown pad_icons '%s' (expected auto, playstation or xbox); auto\n",
++                        value.c_str());
++        }
++        v.pad_icons = mode < 0 ? PadIconsAuto : mode;
      } else if (key == "mouse_sensitivity") {
          v.mouse_sensitivity=std::clamp(i,0,10);
      } else if (key == "camera_controls") {
-@@ -109,22 +174,77 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -109,22 +186,77 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.graphics_controls=i!=0;
      } else if (key == "graphics_vignette") {
          v.graphics_vignette=i!=0;
@@ -9305,7 +9595,7 @@ index cf4fbd8..9ac5e1b 100644
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
                  v.output_res = r;
              }
-@@ -138,15 +258,65 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -138,15 +270,65 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -9372,7 +9662,7 @@ index cf4fbd8..9ac5e1b 100644
  }
  
  void Load() {
-@@ -166,9 +336,7 @@ void Load() {
+@@ -166,9 +348,7 @@ void Load() {
                  }
              }
          }
@@ -9383,7 +9673,7 @@ index cf4fbd8..9ac5e1b 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -196,6 +364,9 @@ void Load() {
+@@ -196,6 +376,9 @@ void Load() {
          {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
          {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
          {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
@@ -9393,7 +9683,7 @@ index cf4fbd8..9ac5e1b 100644
      };
      for (const auto& [env, key] : env_keys) {
          if (const char* value = std::getenv(env)) {
-@@ -211,6 +382,7 @@ void Load() {
+@@ -211,6 +394,7 @@ void Load() {
      v.startup_model_lod = v.model_lod;
      v.startup_output_res = v.output_res;
      v.startup_live_resolution = v.live_resolution;
@@ -9401,7 +9691,7 @@ index cf4fbd8..9ac5e1b 100644
  }
  
  void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
-@@ -264,7 +436,7 @@ void Save() {
+@@ -264,7 +448,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -9410,7 +9700,7 @@ index cf4fbd8..9ac5e1b 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -277,6 +449,7 @@ void Save() {
+@@ -277,6 +461,7 @@ void Save() {
      put("reactive_max", fixed(v.reactive_max, 2));
      put("debug_view", std::to_string(v.debug_view.load()));
      put("show_fps", flag(v.show_fps));
@@ -9418,7 +9708,7 @@ index cf4fbd8..9ac5e1b 100644
      put("fsr4_auto_exposure", flag(v.fsr4_auto_exposure));
      put("fsr4_invert_jitter", flag(v.fsr4_invert_jitter));
      // Read by patches.py at start.
-@@ -284,12 +457,23 @@ void Save() {
+@@ -284,12 +469,23 @@ void Save() {
          put(Effects[e].key, flag(v.effects[e]));
      }
      put("fullscreen", flag(v.fullscreen));
@@ -9442,11 +9732,12 @@ index cf4fbd8..9ac5e1b 100644
      put("camera_controls", flag(v.camera_controls));
      put("widescreen",flag(v.widescreen));
      put("pc_controls",flag(v.pc_controls));
-@@ -299,14 +483,25 @@ void Save() {
+@@ -299,14 +495,26 @@ void Save() {
      put("mouse_invert_y",flag(v.mouse_invert_y));
      put("mouse_auto_rotation",flag(v.mouse_auto_rotation));
      put("mouse_sensitivity",std::to_string(v.mouse_sensitivity.load()));
 +    put("button_prompts", ButtonPromptsNames[std::clamp(v.button_prompts.load(), 0, PromptsCount - 1)]);
++    put("pad_icons", PadIconsNames[std::clamp(v.pad_icons.load(), 0, PadIconsCount - 1)]);
      put("change_appearance", flag(v.change_appearance));
      put("rebirth", flag(v.rebirth));
      put("camera_fov_scale", fixed(v.camera_fov_scale, 2));
@@ -9471,7 +9762,7 @@ index cf4fbd8..9ac5e1b 100644
      put("live_resolution", v.live_resolution < 0 ? "auto" : flag(v.live_resolution != 0));
      if (v.menu_x >= 0.0f && v.menu_y >= 0.0f) {
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..dd05a0a 100644
+index c0e8a94..a2a7e8d 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -9508,7 +9799,7 @@ index c0e8a94..dd05a0a 100644
      {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
      {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
      {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
-@@ -45,11 +54,46 @@ inline constexpr Effect Effects[] = {
+@@ -45,11 +54,52 @@ inline constexpr Effect Effects[] = {
      {"debug_menu", "Debug menu (requires font files)", "Debug menu (нужны файлы шрифтов)", false},
  };
  inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
@@ -9556,10 +9847,16 @@ index c0e8a94..dd05a0a 100644
 +enum ButtonPrompts : int { PromptsAuto = 0, PromptsKeyboard = 1, PromptsController = 2, PromptsCount };
 +inline constexpr const char* ButtonPromptsNames[] = {"auto", "keyboard", "controller"};
 +static_assert(sizeof(ButtonPromptsNames) / sizeof(ButtonPromptsNames[0]) == PromptsCount);
++
++/// pad_icons in bbport.ini: the game's controller icons as they are (PlayStation's) or as an Xbox
++/// controller's buttons; auto follows the gamepad in use. engine/key_prompts.h.
++enum PadIcons : int { PadIconsAuto = 0, PadIconsPlayStation = 1, PadIconsXbox = 2, PadIconsCount };
++inline constexpr const char* PadIconsNames[] = {"auto", "playstation", "xbox"};
++static_assert(sizeof(PadIconsNames) / sizeof(PadIconsNames[0]) == PadIconsCount);
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -65,6 +109,8 @@ struct Values {
+@@ -65,6 +115,8 @@ struct Values {
      std::atomic<float> reactive_max{0.9f};
      std::atomic<int> debug_view{DebugNone};
      std::atomic<bool> show_fps{false};
@@ -9568,11 +9865,12 @@ index c0e8a94..dd05a0a 100644
      /// The settings menu's position (fraction of the screen), -1 until it is moved.
      std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
      // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
-@@ -77,14 +123,39 @@ struct Values {
+@@ -77,14 +129,40 @@ struct Values {
      std::atomic<bool> widescreen{true},pc_controls{true},mouse_camera{true},mouse_menu{true};
      std::atomic<bool> mouse_invert_x{false},mouse_invert_y{false},mouse_auto_rotation{false};
      std::atomic<int> mouse_sensitivity{5};
 +    std::atomic<int> button_prompts{PromptsAuto}; ///< ButtonPrompts; live
++    std::atomic<int> pad_icons{PadIconsAuto}; ///< PadIcons; live
      std::atomic<bool> change_appearance{false}, rebirth{false}; // next launch, engine features
      std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
      std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
@@ -9608,7 +9906,7 @@ index c0e8a94..dd05a0a 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +171,12 @@ struct Values {
+@@ -100,10 +178,12 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
@@ -10077,7 +10375,7 @@ index c1e5ac1..67c8822 100644
  }
  }
 diff --git a/gpu/shim/engine/option_menu.cpp b/gpu/shim/engine/option_menu.cpp
-index cf652fe..57293f0 100644
+index cf652fe..b455025 100644
 --- a/gpu/shim/engine/option_menu.cpp
 +++ b/gpu/shim/engine/option_menu.cpp
 @@ -606,15 +606,29 @@ Slider camera[] = {
@@ -10149,7 +10447,7 @@ index cf652fe..57293f0 100644
  }
  GUEST_ABI std::int64_t OpenGraphics(void* root,void* params) {
      return open_named(root,params,"PCGraphics",reinterpret_cast<void*>(&GraphicsHandler),4);
-@@ -687,9 +712,19 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
+@@ -687,9 +712,22 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
      GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenEffects));
      hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;
  }
@@ -10166,21 +10464,29 @@ index cf652fe..57293f0 100644
 +// Button Prompts (engine/key_prompts.h): BbSettings::ButtonPrompts.
 +std::int32_t prompts=0,last_prompts=0;
 +const Choice prompt_choices[]={{BbSettings::PromptsAuto,118010},{BbSettings::PromptsKeyboard,118011},{BbSettings::PromptsController,118012}};
++// Controller Icons: BbSettings::PadIcons.
++std::int32_t pad_icons=0,last_pad_icons=0;
++const Choice pad_icon_choices[]={{BbSettings::PadIconsAuto,118013},{BbSettings::PadIconsPlayStation,118014},{BbSettings::PadIconsXbox,118015}};
  GUEST_ABI void ControlsHandler(void* dialog,void*) {
      alignas(16) std::uint8_t scratch[0x100]{};hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
      auto& s=BbSettings::Get();sensitivity=last_sensitivity=s.mouse_sensitivity;
-@@ -697,7 +732,9 @@ GUEST_ABI void ControlsHandler(void* dialog,void*) {
+@@ -697,9 +735,13 @@ GUEST_ABI void ControlsHandler(void* dialog,void*) {
      add_toggle_row(dialog,&controls[0].value,118000,1);
      add_slider_row(dialog,&sensitivity,118001,5);
      for(int i=1;i<5;i++)add_toggle_row(dialog,&controls[i].value,controls[i].id,i==3?1:0);
 -    controls_seeded=true;log_rows("PCControls",dialog,6,6);
 +    prompts=last_prompts=s.button_prompts;
 +    add_list_row(dialog,&prompts,118006,prompt_choices,BbSettings::PromptsCount,BbSettings::PromptsAuto);
-+    controls_seeded=true;log_rows("PCControls",dialog,7,7);
++    pad_icons=last_pad_icons=s.pad_icons;
++    add_list_row(dialog,&pad_icons,118007,pad_icon_choices,BbSettings::PadIconsCount,BbSettings::PadIconsAuto);
++    controls_seeded=true;log_rows("PCControls",dialog,8,8);
  }
- GUEST_ABI std::int64_t OpenControls(void* root,void* params) {return open_named(root,params,"PCControls",reinterpret_cast<void*>(&ControlsHandler),-1);}
+-GUEST_ABI std::int64_t OpenControls(void* root,void* params) {return open_named(root,params,"PCControls",reinterpret_cast<void*>(&ControlsHandler),-1);}
++GUEST_ABI std::int64_t OpenControls(void* root,void* params) {return open_named(root,params,"PCControls",reinterpret_cast<void*>(&ControlsHandler),-2);}
  GUEST_ABI std::int64_t OpenKeys(void* root,void* params) {return open_named(root,params,"PCKeys",reinterpret_cast<void*>(&pc_keys_handler),-2);}
-@@ -712,6 +749,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+ GUEST_ABI void* OpenControlsRow(void* out,void* ctx) {GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenControls));hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;}
+ GUEST_ABI void* OpenKeysRow(void* out,void* ctx) {GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenKeys));hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;}
+@@ -712,6 +754,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
          { Captions c(110010);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenEffectsRow));
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
@@ -10189,7 +10495,7 @@ index cf652fe..57293f0 100644
      }
      if(input_page) {
          {Captions c(110008);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenControlsRow));hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag);}
-@@ -720,7 +759,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -720,7 +764,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
      if (camera_page) { Captions c(110011);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenCameraRow));
        hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
      hle_call_guest<std::int64_t>(guest_fn(kSystemFinalize),out,builder,arg3);
@@ -10198,7 +10504,7 @@ index cf652fe..57293f0 100644
      return out;
  }
  } // namespace
-@@ -783,7 +822,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -783,7 +827,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
      graphics_sliders[0].setting=&settings.graphics_ao_strength;graphics_sliders[1].setting=&settings.graphics_shadow_scale;
      effect_toggles[0].setting=&settings.effects[2];effect_toggles[1].setting=&settings.effects[1];
      effect_toggles[2].setting=&settings.effects[0];effect_toggles[3].setting=&settings.graphics_vignette;
@@ -10210,7 +10516,7 @@ index cf652fe..57293f0 100644
      enhancements[0].setting=&settings.change_appearance;
      enhancements[1].setting=&settings.rebirth;
      enhancements[2].setting=&settings.camera_controls;
-@@ -797,7 +839,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -797,7 +844,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
      std::memcpy(p,&target,8); p+=8; *p++=0x41; *p++=0xff; *p=0xe3;
      const std::int32_t to_pad=pad-(call+5); std::memcpy(image+call+1,&to_pad,4);
      g_installed=true;
@@ -10219,7 +10525,7 @@ index cf652fe..57293f0 100644
      return true;
  }
  bool ClickDecides(std::uint8_t* list, int index) {
-@@ -850,17 +892,30 @@ void Tick() {
+@@ -850,17 +897,31 @@ void Tick() {
          changed=true;
      }
      auto push_sliders=[&](auto& rows,bool active) {
@@ -10248,6 +10554,7 @@ index cf652fe..57293f0 100644
      if(controls_seeded && sensitivity!=last_sensitivity){last_sensitivity=std::min<std::uint8_t>(sensitivity,10);BbSettings::Get().mouse_sensitivity=last_sensitivity;changed=true;}
 -    push_toggles(graphics_toggles,graphics_seeded);push_toggles(effect_toggles,effects_seeded);
 +    if(controls_seeded && prompts!=last_prompts){last_prompts=std::clamp(prompts,0,BbSettings::PromptsCount-1);BbSettings::Get().button_prompts=last_prompts;changed=true;}
++    if(controls_seeded && pad_icons!=last_pad_icons){last_pad_icons=std::clamp(pad_icons,0,BbSettings::PadIconsCount-1);BbSettings::Get().pad_icons=last_pad_icons;changed=true;}
 +    picture|=push_toggles(graphics_toggles,graphics_seeded);picture|=push_toggles(effect_toggles,effects_seeded);
 +    if (picture && !BbSettings::Get().graphics_controls) {
 +        BbSettings::Get().graphics_controls=true;
@@ -10282,6 +10589,23 @@ index 30fdc4f..31defd1 100644
      const float present=std::min(window_w/ow,window_h/oh);
      if(!s.widescreen){
          x=(mouse_x-(window_w-ow*present)/2)/present*1920/ow;
+diff --git a/gpu/shim/input/input.h b/gpu/shim/input/input.h
+index d4f3a31..5716e3f 100644
+--- a/gpu/shim/input/input.h
++++ b/gpu/shim/input/input.h
+@@ -23,6 +23,12 @@ typedef struct {
+     struct { uint16_t x,y;uint8_t id; } touch[2];
+ } BbPcPad;
+ int bbgpu_pc_input(BbPcPad*,const bool* keys,int nkeys,int gamepad_present);
++/* src/runtime_pad.c, for the game's button icons (engine/key_prompts.cpp): the gamepad in use's
++ * SDL_GamepadType (SDL_GAMEPAD_TYPE_UNKNOWN without one), and the gamepad button bound to a PS4
++ * button (its scePad bit; the touchpad's right side with right_side): an SDL_GamepadButton,
++ * SDL_GAMEPAD_BUTTON_COUNT and +1 for the left and right trigger, -1 for none. */
++int runtime_pad_type(void);
++int runtime_pad_button(uint32_t ps_button,int right_side);
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
 index f475c39..aa552ab 100644
 --- a/gpu/shim/window.cpp
@@ -10464,7 +10788,7 @@ index fdbf8c4..6e5d795 100644
 +    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
 diff --git a/scripts/patches.py b/scripts/patches.py
-index da1e52e..1f8d7e8 100644
+index da1e52e..f21f526 100644
 --- a/scripts/patches.py
 +++ b/scripts/patches.py
 @@ -10,6 +10,7 @@ import os
@@ -10475,15 +10799,78 @@ index da1e52e..1f8d7e8 100644
  from pathlib import Path
  
  EBOOT_BASE=0x400000
-@@ -45,6 +46,7 @@ EFFECTS={
+@@ -18,6 +19,54 @@ EBOOT_BASE=0x400000
+ # half speed (the game's wall detector measured distance per frame, a 30 FPS rule).
+ FPS_PRESETS={'30':[],'60':['60 FPS++'],'90':['90 FPS++','Sprint Fix (High FPS)'],
+              'uncap':['Uncap FPS++','Sprint Fix (High FPS)']}
++# 120 and 144: the 90 FPS++ patch with its frame-rate values for that rate. The uncapped patch (a
++# different design) deadlocked the game's model jobs at the end of Vicar Amelia's intro at any
++# frame rate, 60 included; 60 and 90 FPS++ (one design) did not. Their values follow the rate
++# from the game's own 30: frame times 1/fps, frame counts fps/6 and fps/3, timings 3/fps, a
++# thread's sleep 990000/fps us, the limiter's longest sleep just under a frame, and speed scales
++# 60/fps and fps/60 (two vectors the patch keeps over a debug string at 0x4d3bd00), and the frame
++# time the character update steps its stamina by and hands on, 1.125/fps (the patch fixes it at
++# 0.0125 for 90: kept at that at 120 and 144, the character ran 1.5 and 1.8 times as fast there and
++# fell that much faster).
++SCALED_FPS={'120':120,'144':144}
++SCALED_BASE='90 FPS++'
++
++
++def scaled_rate_values(fps):
++    """Patch address -> bytes: the 90 FPS++ values that depend on the frame rate, for `fps`."""
++    f=lambda *v: b''.join(struct.pack('<f',x) for x in v)
++    frame=bytes.fromhex('41c7442418')+f(1/fps)  # mov dword [r12+0x18], the frame time
++    cap=struct.pack('<I',{90:10000,120:8000,144:6500}[fps])
++    return {
++        0x0B6FBD4: struct.pack('<i',0x493bd00-0x76fbd8),  # a speed scale's load: the 60/fps vector
++        0x0F383CA: f(1/fps),
++        0x1CBDB42: bytes.fromhex('c7857cffffff')+f(0.0125*90/fps)+bytes.fromhex('909090909090'),  # mov dword [rbp-0x84]
++        0x1929676: struct.pack('<i',fps//6),
++        0x192C405: struct.pack('<i',fps//3),
++        0x2434840: frame, 0x243485A: frame, 0x243487E: frame, 0x24348B3: frame,
++        0x25629F0: b'\xbf'+struct.pack('<I',990000//fps),
++        0x2C012CC: b'\x81\xff'+cap+b'\x7e\x05\xbf'+cap+bytes.fromhex('e98aeb3b00'),
++        0x4CF6420: f(*[3/fps]*4),
++        0x4D27FD4: f(-3/fps), 0x4D27FE0: f(3/fps),
++        0x4D29170: f(1/fps),
++        0x4D3BD00: f(*[60/fps]*4), 0x4D3BD10: f(*[fps/60]*4),
++    }
++
++
++def rate_scaled(writes, fps):
++    """The 90 FPS++ writes with their frame-rate values for `fps`."""
++    values=scaled_rate_values(fps)
++    out,seen=[],set()
++    for offset,data in writes:
++        value=values.get(offset+EBOOT_BASE)
++        if value is not None:
++            if len(value)!=len(data): raise ValueError(f'{SCALED_BASE}: {offset+EBOOT_BASE:#x} changed size')
++            data=value
++            seen.add(offset+EBOOT_BASE)
++        out.append((offset,data))
++    missing=set(values)-seen
++    if missing: raise ValueError(f'{SCALED_BASE}: no write at {", ".join(hex(a) for a in sorted(missing))}')
++    return out
+ # Upscaler presets (bbport.ini "preset", the in-game menu): output / render size ratio. The game
+ # then renders at 1920x1080 / ratio and the port's temporal upscaler restores the output size.
+ OUTPUT_SIZE=(1920,1080)
+@@ -45,6 +94,15 @@ EFFECTS={
  # PS4's AMD CPU, so a block the game gates on a computed flag never runs. The community fix runs
  # it always; on by default on Intel. BB_INTEL_TONEMAP_FIX=0/1 forces it off or on.
  INTEL_TONEMAP='Intel Black Tonemap Fix'
 +HEAP_PATCH='Increased Graphics Heap Sizes'
++# The game's two per-frame render pools: it makes them at start, 256 KiB each, from its graphics
++# heap (mov edx,0x40000 at these image offsets), and its GX worker threads take each frame's draw
++# data from them in 2 KiB chunks. A busy frame ran one out and the game copied into the null
++# pointer it got (GXWorker crash, the same spot every time: a boss intro with Model LOD -2 at
++# 2560x1440). Built in: 1 MiB each, 1.5 MiB more in all; BB_RENDER_POOLS=0 keeps the game's size.
++RENDER_POOL_SITES=(0x2195c09,0x2195c46)
++RENDER_POOL_CODE=bytes.fromhex('ba00000400')
++RENDER_POOL_SIZE=0x100000
  
  
  def intel_cpu(cpuinfo='/proc/cpuinfo'):
-@@ -77,10 +79,14 @@ def validate_patch_requirements(names, game):
+@@ -77,10 +135,14 @@ def validate_patch_requirements(names, game):
                               'or disable debug_menu in bbport.ini')
  
  
@@ -10499,7 +10886,7 @@ index da1e52e..1f8d7e8 100644
          name=on if settings[key]=='1' else off
          if name: names.append(name)
      lod=MODEL_LOD.get(settings.get('model_lod','0'))
-@@ -115,9 +121,12 @@ def render_size(settings,override=''):
+@@ -115,9 +177,12 @@ def render_size(settings,override=''):
  
  
  def output_size(settings):
@@ -10514,7 +10901,7 @@ index da1e52e..1f8d7e8 100644
          if w>0 and h>0: return (w,h)
      except ValueError:
          pass
-@@ -202,6 +211,77 @@ def compile_patches(xml, names, app_version, segments):
+@@ -202,10 +267,101 @@ def compile_patches(xml, names, app_version, segments):
      return writes
  
  
@@ -10571,6 +10958,18 @@ index da1e52e..1f8d7e8 100644
 +    return [name for name in names if name not in bad]
 +
 +
++def render_pool_writes(elf):
++    """The writes that enlarge the render pools, when the executable has the standard code there."""
++    if os.environ.get('BB_RENDER_POOLS')=='0':
++        print('Patches: render pools at the game\'s 256 KiB (BB_RENDER_POOLS=0)',flush=True)
++        return []
++    if any(original_bytes(elf,site,len(RENDER_POOL_CODE))!=RENDER_POOL_CODE for site in RENDER_POOL_SITES):
++        print('Patches: render pools left at the game\'s size: this executable differs there',flush=True)
++        return []
++    return [(site+1,struct.pack('<I',RENDER_POOL_SIZE)) for site in RENDER_POOL_SITES]
++
++
++
 +def write_site_table(xml, app_version, elf_path):
 +    """The site table from a verified 1.09 eboot.elf (every eboot patch of `app_version`)."""
 +    from engine_assets import EBOOT_SHA, sha
@@ -10592,7 +10991,28 @@ index da1e52e..1f8d7e8 100644
  # Third-party patch files (shadPS4/GoldHEN XML) in the data directory's patches/ folder.
  BLOODBORNE_IDS={'CUSA00207','CUSA00208','CUSA00900','CUSA01363','CUSA03173','CUSA03023'}
  
-@@ -237,8 +317,43 @@ def external_selection(found, config):
+ 
++def same_app_version(value, app_version):
++    """'1.09' is '01.09' (patch files write either)."""
++    try:
++        return value is not None and [int(p) for p in value.strip().split('.')]==[int(p) for p in app_version.split('.')]
++    except ValueError:
++        return False
++
++
+ def external_patches(directory, app_version='01.09', exclude=Path(__file__).resolve().parent.parent/'patches/Bloodborne.xml'):
+     """[(key, file, metadata)] of eboot patches for this version in directory/*.xml.
+     key is "<file name>/<patch name>" (the launcher's selection, patches.json)."""
+@@ -221,7 +377,7 @@ def external_patches(directory, app_version='01.09', exclude=Path(__file__).reso
+         ids={e.text.strip() for e in root.iter('ID') if e.text}
+         if ids and not ids&BLOODBORNE_IDS: continue
+         for meta in root.iter('Metadata'):
+-            if meta.get('AppVer')==app_version and meta.get('AppElf','eboot.bin')=='eboot.bin':
++            if same_app_version(meta.get('AppVer'),app_version) and meta.get('AppElf','eboot.bin')=='eboot.bin':
+                 found.append((f'{path.name}/{meta.get("Name")}',path,meta))
+     return found
+ 
+@@ -237,8 +393,43 @@ def external_selection(found, config):
              if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
  
  
@@ -10638,7 +11058,7 @@ index da1e52e..1f8d7e8 100644
      writes=[]
      for key,_,meta in selected:
          try:
-@@ -252,6 +367,14 @@ def compile_external(selected, segments):
+@@ -252,6 +443,14 @@ def compile_external(selected, segments):
          except ValueError as error:
              print(f'Patches: skipped {key}: {error}',file=sys.stderr)
              continue
@@ -10653,7 +11073,16 @@ index da1e52e..1f8d7e8 100644
          writes+=ours
          print(f'Patches: external {key} ({len(ours)} writes)')
      return writes
-@@ -273,7 +396,12 @@ def main():
+@@ -262,7 +461,7 @@ def main():
+     p.add_argument('--patches-dir',type=Path,help='third-party patch XML files (shadPS4 format)')
+     p.add_argument('--patches-config',type=Path,help='patches.json: enabled/disabled external patches')
+     p.add_argument('--xml',type=Path,default=Path(__file__).resolve().parent.parent/'patches/Bloodborne.xml')
+-    p.add_argument('--fps',choices=sorted(FPS_PRESETS),default='uncap')
++    p.add_argument('--fps',choices=sorted(FPS_PRESETS)+sorted(SCALED_FPS),default='uncap')
+     p.add_argument('--extra',default='',help='additional patch names, separated by ";"')
+     p.add_argument('--app-version',default='01.09')
+     p.add_argument('--out',type=Path,default=Path(__file__).resolve().parent.parent/'out')
+@@ -273,7 +472,12 @@ def main():
      p.add_argument('--output-res',default='',help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080)')
      p.add_argument('--print-scaled',action='store_true',
                     help='print "RENDER OUTPUT" (WxH) when bbport.ini selects an output other than 1080p')
@@ -10666,21 +11095,36 @@ index da1e52e..1f8d7e8 100644
      if a.print_scaled:
          sizes=scaled_sizes(read_settings(a.settings))
          if sizes: print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]}')
-@@ -292,7 +420,12 @@ def main():
+@@ -287,13 +491,26 @@ def main():
+         size=render_size(settings)
+         if size: print(f'{size[0]}x{size[1]}')
+         return
+-    names=FPS_PRESETS[a.fps]+[n.strip() for n in a.extra.split(';') if n.strip()]
++    preset=FPS_PRESETS.get(a.fps) or [SCALED_BASE,'Sprint Fix (High FPS)']
++    names=preset+[n.strip() for n in a.extra.split(';') if n.strip()]
+     names+=[n for n in effect_patches(read_settings(a.settings)) if n not in names]
      if intel_tonemap_fix() and INTEL_TONEMAP not in names:
          names.append(INTEL_TONEMAP)
      validate_patch_requirements(names,a.game_dir)
 -    segments=eboot_segments((a.out/'eboot.elf').read_bytes())
 +    elf=(a.out/'eboot.elf').read_bytes()
 +    segments=eboot_segments(elf)
-+    names=checked_patches(a.xml,names,a.app_version,segments,elf,FPS_PRESETS[a.fps])
++    names=checked_patches(a.xml,names,a.app_version,segments,elf,preset)
 +    for name in [n for n in names if breaks_online(compile_patches(a.xml,[n],a.app_version,segments))]:
 +        skip_for_online(name)
 +        names.remove(name)
      writes=compile_patches(a.xml,names,a.app_version,segments)
++    if a.fps in SCALED_FPS and SCALED_BASE in names:
++        writes=rate_scaled(writes,SCALED_FPS[a.fps])
++        print(f'Patches: {a.fps} FPS: {SCALED_BASE} with its frame-rate values for {a.fps}')
++    pools=render_pool_writes(elf)
++    if pools:
++        writes+=pools
++        print(f'Patches: render pools {RENDER_POOL_SIZE>>10} KiB each (the game\'s 256)')
      size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
      # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
-@@ -302,14 +435,24 @@ def main():
+     # it into the output-size image with a viewport scaled by output / 1920
+@@ -302,14 +519,24 @@ def main():
      if size:
          writes+=resolution_writes(a.xml,size,a.app_version,segments,ui)
          if size[0]*size[1]>OUTPUT_SIZE[0]*OUTPUT_SIZE[1]:
@@ -10708,7 +11152,7 @@ index da1e52e..1f8d7e8 100644
      # relocated slots (60/90 FPS++ replace function pointers).
      blob=struct.pack('<8sQQ',b'BBPATCH2',EBOOT_BASE,len(writes))
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..a803876 100644
+index ea6daf1..ef75ba7 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
 @@ -10,12 +10,15 @@ The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_
@@ -10797,12 +11241,18 @@ index ea6daf1..a803876 100644
  def settings_value(config, key):
      if not config.is_file():
          return None
-@@ -95,6 +154,12 @@ def configure_frame_rate(env):
+@@ -95,6 +154,18 @@ def configure_frame_rate(env):
      legacy uncapped launch cannot saturate the desktop during menus or loading.
      """
      fps = env.get('BB_FPS', '60')
-+    # Bloodborne PC: higher rates use the uncapped patch (with the sprint fix) and the frame
-+    # limiter; "uncap" runs unlimited unless BB_FPS_LIMIT asks for a cap.
++    # Bloodborne PC: 120 and 144 are the 90 FPS++ patch with its frame-rate values for that rate
++    # (patches.py SCALED_FPS; the uncapped patch froze Vicar Amelia's intro at any rate). 144 Hz
++    # is above the vblank rates the engine paces on (it runs 480 Hz then); the limit holds 144.
++    if fps in ('120', '144'):
++        env.update(BB_FPS=fps, BB_FPS_LIMIT=fps, BB_VBLANK_HZ=fps)
++        return fps
++    # Other rates above 90 use the uncapped patch (with the sprint fix) and the frame limiter;
++    # "uncap" runs unlimited unless BB_FPS_LIMIT asks for a cap.
 +    if fps == 'uncap' or (fps.isdigit() and int(fps) > 90):
 +        limit = fps if fps.isdigit() else env.get('BB_FPS_LIMIT', '0')
 +        env.update(BB_FPS='uncap', BB_FPS_LIMIT=limit if limit.isdigit() else '0', BB_VBLANK_HZ='0')
@@ -10810,7 +11260,7 @@ index ea6daf1..a803876 100644
      if fps not in ('30', '60', '90'):
          print(f'Unsupported Windows FPS preset {fps!r}; using 60 FPS.', flush=True)
          fps = '60'
-@@ -139,38 +204,43 @@ def main():
+@@ -139,38 +210,43 @@ def main():
                         '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
      overlay = merged if merged.resolve() != original else None
      try:
@@ -10880,7 +11330,7 @@ index ea6daf1..a803876 100644
          # Sizes chosen below for the previous launch are recomputed after an in-game restart.
          if os.environ.get('BB_AUTO_RENDER_RES') == '1':
              for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
-@@ -192,14 +262,27 @@ def main():
+@@ -192,14 +268,27 @@ def main():
              print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
          elif scaled_output:
              os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
@@ -10910,7 +11360,7 @@ index ea6daf1..a803876 100644
          probe = ROOT / os.environ.get('BB_PROBE', out / 'bb-probe.exe')
          command = [probe, out / 'boot-linked.bin', '--content-profile', out / 'content.bin',
                     '--patches', out / 'patches.bin', '--app0', merged,
-@@ -219,7 +302,9 @@ def main():
+@@ -219,7 +308,9 @@ def main():
          except KeyboardInterrupt:
              status = 130
          print(f'bb-probe exited with code {status}', flush=True)
@@ -11759,10 +12209,18 @@ index be5a034..7fd70a4 100644
  int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
      const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
 diff --git a/src/runtime_pad.c b/src/runtime_pad.c
-index fac0ac7..96c326f 100644
+index fac0ac7..b70f6a1 100644
 --- a/src/runtime_pad.c
 +++ b/src/runtime_pad.c
-@@ -86,6 +86,52 @@ static int is_preferred(SDL_JoystickID id, const char *want) {
+@@ -60,6 +60,7 @@ static int initialized, opened, sdl_ready;
+ static SDL_Gamepad *gamepad;
+ static size_t reads;
+ static uint8_t connected_count;
++static int gamepad_type; /* runtime_pad_type: read without the lock */
+ 
+ static uint64_t now_us(void) { return host_monotonic_ns()/1000u; }
+ static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+@@ -86,6 +87,52 @@ static int is_preferred(SDL_JoystickID id, const char *want) {
      const char *name=SDL_GetGamepadNameForID(id);
      return !SDL_strcasecmp(guid,want) || (name && SDL_strcasestr(name,want));
  }
@@ -11815,15 +12273,22 @@ index fac0ac7..96c326f 100644
  /* The chosen gamepad, else the first while it is not connected (checked again every second, it
   * is taken as soon as it connects); called under lock. */
  static SDL_Gamepad *current_gamepad(void) {
-@@ -117,6 +163,7 @@ static SDL_Gamepad *current_gamepad(void) {
+@@ -117,6 +164,14 @@ static SDL_Gamepad *current_gamepad(void) {
          }
          SDL_free(ids);
      }
 +    if (!want) follow_active_pad();
++    static SDL_JoystickID typed;
++    const SDL_JoystickID id=gamepad ? SDL_GetGamepadID(gamepad) : 0;
++    if (id!=typed) {
++        typed=id;
++        __atomic_store_n(&gamepad_type,gamepad ? (int)SDL_GetGamepadType(gamepad) : (int)SDL_GAMEPAD_TYPE_UNKNOWN,
++                         __ATOMIC_RELAXED);
++    }
      return gamepad;
  }
  /* bbport (frame stats): the game's libc heap, read every 5 s from a game thread (it reads the pad)
-@@ -168,6 +215,10 @@ enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* trigge
+@@ -168,6 +223,10 @@ enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* trigge
  typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; } Binding;
  static Binding bindings[IN_COUNT];
  static int bindings_ready;
@@ -11834,7 +12299,7 @@ index fac0ac7..96c326f 100644
  
  static void bind_defaults(void) {
      static const struct { int input; SDL_Scancode key; } keys[]={
-@@ -216,6 +267,14 @@ static void load_bindings(void) {
+@@ -216,6 +275,14 @@ static void load_bindings(void) {
      while (fgets(line,sizeof line,f)) {
          const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4);
          char *eq=strchr(line,'=');
@@ -11849,7 +12314,7 @@ index fac0ac7..96c326f 100644
          if ((!keyboard && !pad) || !eq) continue;
          *eq=0;
          int input=-1;
-@@ -296,6 +355,17 @@ static void sample_host(PadData *d) {
+@@ -296,6 +363,17 @@ static void sample_host(PadData *d) {
          }
          d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
          d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
@@ -11867,7 +12332,7 @@ index fac0ac7..96c326f 100644
          if (SDL_GetNumGamepadTouchpads(g)>0) {
              const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
              for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
-@@ -456,13 +526,21 @@ static void touch_ids(PadData *d) {
+@@ -456,13 +534,21 @@ static void touch_ids(PadData *d) {
      else if (!since) since=d->timestamp;
      d->touch_held_time=d->touch_count ? (uint32_t)(d->timestamp-since) : 0;
  }
@@ -11890,6 +12355,34 @@ index fac0ac7..96c326f 100644
      if (injected.touch_side>=0) touch_click(d,injected.touch_side);
      else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
      if (injected.buttons & BTN_L2) d->l2=255;
+@@ -538,5 +624,27 @@ static const RuntimeExport exports[]={
+     {"scePadSetAngularVelocityDeadbandState",pad_ok_handle_flag}, {"scePadSetTiltCorrectionState",pad_ok_handle_flag},
+     {"scePadSetMotionSensorState",pad_ok_handle_flag},
+ };
++int runtime_pad_type(void) { return __atomic_load_n(&gamepad_type,__ATOMIC_RELAXED); }
++/* The first bound button the gamepad in use has (Touchpad: Back, then a DualShock's touchpad). */
++int runtime_pad_button(uint32_t ps_button, int right_side) {
++    int input=-1, found=-1;
++    if (ps_button==BTN_TOUCHPAD) input=right_side ? IN_TOUCHPAD_RIGHT : IN_TOUCHPAD;
++    else for (int i=IN_CROSS;i<=IN_RIGHT && input<0;++i) if (input_buttons[i]==ps_button) input=i;
++    if (input<0) return -1;
++    host_lock(&lock);
++    if (!bindings_ready) { load_bindings(); bindings_ready=1; }
++    const Binding *b=&bindings[input];
++    for (int i=0;i<b->pad_count && found<0;++i) {
++        const int p=b->pad[i];
++        const int has=!gamepad ? 1
++            : p==PAD_LEFT_TRIGGER ? SDL_GamepadHasAxis(gamepad,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)
++            : p==PAD_RIGHT_TRIGGER ? SDL_GamepadHasAxis(gamepad,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)
++            : SDL_GamepadHasButton(gamepad,(SDL_GamepadButton)p);
++        if (has) found=p;
++    }
++    if (found<0 && b->pad_count) found=b->pad[0];
++    host_unlock(&lock);
++    return found;
++}
+ uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
+ void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
 diff --git a/src/runtime_savedata.c b/src/runtime_savedata.c
 index 99b3049..4f9b7ef 100644
 --- a/src/runtime_savedata.c
@@ -12124,7 +12617,7 @@ index bf0d998..7a66466 100644
              'online_p2p_port':['0','65536','bad']}.items():
              for value in values:
 diff --git a/tests/test_patches.py b/tests/test_patches.py
-index b65009f..5ea9a4c 100644
+index b65009f..e60c0cb 100644
 --- a/tests/test_patches.py
 +++ b/tests/test_patches.py
 @@ -1,4 +1,5 @@
@@ -12164,7 +12657,21 @@ index b65009f..5ea9a4c 100644
      def test_debug_menu_checks_both_fonts_but_camera_does_not_need_them(self):
          names = effect_patches({'debug_menu': '1'})
          with tempfile.TemporaryDirectory() as directory:
-@@ -185,5 +192,102 @@ class IntelTonemapTests(unittest.TestCase):
+@@ -163,6 +170,13 @@ class ExternalPatchTests(unittest.TestCase):
+     def test_built_in_file_is_not_external(self):
+         self.assertEqual(external_patches(XML.parent), [])
+ 
++    def test_1_09_is_01_09(self):
++        self.assertTrue(patches.same_app_version('1.09', '01.09'))
++        self.assertTrue(patches.same_app_version(' 01.09 ', '01.09'))
++        self.assertFalse(patches.same_app_version('1.00', '01.09'))
++        self.assertFalse(patches.same_app_version(None, '01.09'))
++        self.assertFalse(patches.same_app_version('v1.09', '01.09'))
++
+ 
+ class IntelTonemapTests(unittest.TestCase):
+     def cpuinfo(self, vendor):
+@@ -185,5 +199,153 @@ class IntelTonemapTests(unittest.TestCase):
          self.assertIn(patches.INTEL_TONEMAP, names)
  
  
@@ -12231,6 +12738,57 @@ index b65009f..5ea9a4c 100644
 +        names = list(json.loads(patches.site_table_path(xml).read_text(encoding='utf-8')))
 +        segments = patches.eboot_segments(elf)
 +        self.assertEqual(patches.checked_patches(xml, names, '01.09', segments, elf), names)
++
++
++class ScaledRateTests(unittest.TestCase):
++    WIDE = [(0, 1 << 40)]
++
++    def test_the_formulas_rebuild_90_fps(self):
++        # At 90 every frame-rate value is the patch's own, but for the speed scale's load, which
++        # reads the patch's 60/fps vector instead of the game's own 2/3 constant.
++        writes = patches.compile_patches(XML, [patches.SCALED_BASE], '01.09', self.WIDE)
++        scaled = patches.rate_scaled(writes, 90)
++        differ = [o + EBOOT_BASE for (o, a), (_, b) in zip(writes, scaled) if a != b]
++        self.assertEqual(differ, [0x0B6FBD4])
++        values = patches.scaled_rate_values(90)
++        load = 0x76fbd8 + struct.unpack('<i', values[0x0B6FBD4])[0]
++        self.assertEqual(load, 0x4D3BD00 - EBOOT_BASE)
++        self.assertEqual(values[0x4D3BD00][:4], struct.pack('<f', 60 / 90))
++
++    def test_120_and_144_values(self):
++        for fps in (120, 144):
++            with self.subTest(fps=fps):
++                values = patches.scaled_rate_values(fps)
++                self.assertEqual(values[0x2434840][5:], struct.pack('<f', 1 / fps))
++                self.assertEqual(values[0x4D3BD00], struct.pack('<4f', *[60 / fps] * 4))
++                self.assertEqual(values[0x4D3BD10], struct.pack('<4f', *[fps / 60] * 4))
++                self.assertEqual(struct.unpack('<i', values[0x1929676])[0], fps // 6)
++                self.assertEqual(struct.unpack('<I', values[0x25629F0][1:])[0], 990000 // fps)
++                # The character's frame time keeps 90's pace (0.0125 there).
++                self.assertEqual(values[0x1CBDB42][6:10], struct.pack('<f', 0.0125 * 90 / fps))
++                writes = patches.compile_patches(XML, [patches.SCALED_BASE], '01.09', self.WIDE)
++                self.assertEqual(len(patches.rate_scaled(writes, fps)), len(writes))
++
++
++class RenderPoolTests(unittest.TestCase):
++    def test_the_pools_grow_only_over_the_standard_code(self):
++        code = bytearray(patches.RENDER_POOL_SITES[-1] + 16)
++        for site in patches.RENDER_POOL_SITES:
++            code[site:site + 5] = patches.RENDER_POOL_CODE
++        self.assertEqual(patches.render_pool_writes(fake_elf(bytes(code))),
++                         [(site + 1, struct.pack('<I', 0x100000)) for site in patches.RENDER_POOL_SITES])
++        code[patches.RENDER_POOL_SITES[1] + 3] = 0x08
++        self.assertEqual(patches.render_pool_writes(fake_elf(bytes(code))), [])
++
++    def test_the_verified_executable_has_the_pool_code(self):
++        elf_path = ROOT / 'out/eboot.elf'
++        if not elf_path.is_file():
++            self.skipTest('no prepared eboot.elf')
++        elf = elf_path.read_bytes()
++        from engine_assets import EBOOT_SHA, sha
++        if sha(elf) not in EBOOT_SHA:
++            self.skipTest('out/eboot.elf is not the verified 1.09 executable')
++        self.assertEqual(len(patches.render_pool_writes(elf)), 2)
 +
 +
 +class HeapPoolTests(unittest.TestCase):
@@ -12519,7 +13077,7 @@ index 593fed4..2087d68 100644
      std::puts("PASS: settings save keeps other keys, menu position");
  }
 diff --git a/tests/test_windows_frame_rate.py b/tests/test_windows_frame_rate.py
-index 49eb6c3..494466c 100644
+index 49eb6c3..c4355d7 100644
 --- a/tests/test_windows_frame_rate.py
 +++ b/tests/test_windows_frame_rate.py
 @@ -12,8 +12,8 @@ class WindowsFrameRateTests(unittest.TestCase):
@@ -12533,13 +13091,22 @@ index 49eb6c3..494466c 100644
              with self.subTest(value=value):
                  env = {'BB_VBLANK_HZ': '0', 'BB_FPS_LIMIT': '0'}
                  if value is not None:
-@@ -23,6 +23,25 @@ class WindowsFrameRateTests(unittest.TestCase):
+@@ -23,6 +23,34 @@ class WindowsFrameRateTests(unittest.TestCase):
                  self.assertEqual(env['BB_FPS_LIMIT'], '60')
                  self.assertEqual(env['BB_VBLANK_HZ'], '60')
  
-+    def test_high_rates_use_the_uncapped_patch_with_a_limit(self):
-+        # The launcher's 120 and 144 presets: the uncapped patch, limited to the rate.
-+        for fps in ('120', '144', '480'):
++    def test_120_and_144_are_their_own_presets(self):
++        # The launcher's 120 and 144: the 90 FPS++ patch scaled to the rate (patches.py).
++        for fps in ('120', '144'):
++            with self.subTest(fps=fps):
++                env = {'BB_FPS': fps, 'BB_FPS_LIMIT': '0', 'BB_VBLANK_HZ': '0'}
++                self.assertEqual(configure_frame_rate(env), fps)
++                self.assertEqual(env['BB_FPS'], fps)
++                self.assertEqual(env['BB_FPS_LIMIT'], fps)
++                self.assertEqual(env['BB_VBLANK_HZ'], fps)
++
++    def test_other_high_rates_use_the_uncapped_patch_with_a_limit(self):
++        for fps in ('165', '480'):
 +            with self.subTest(fps=fps):
 +                env = {'BB_FPS': fps, 'BB_FPS_LIMIT': '0', 'BB_VBLANK_HZ': '60'}
 +                self.assertEqual(configure_frame_rate(env), 'uncap')
@@ -12560,7 +13127,7 @@ index 49eb6c3..494466c 100644
  if __name__ == '__main__':
      unittest.main()
 diff --git a/tools/engine/menu_assets.cpp b/tools/engine/menu_assets.cpp
-index d51b554..b5f92c3 100644
+index d51b554..a7ece9f 100644
 --- a/tools/engine/menu_assets.cpp
 +++ b/tools/engine/menu_assets.cpp
 @@ -31,7 +31,7 @@ using Bytes = std::vector<std::uint8_t>;
@@ -12588,7 +13155,7 @@ index d51b554..b5f92c3 100644
 -    section("PCGraphics", 117020, 384, 5, 0, {"Item_5_0"});
 -    section("PCControls", 118020, 385, 6, 0, {});
 +    section("PCGraphics", 117020, 384, 6, 0, {});
-+    section("PCControls", 118020, 385, 7, 1, {});
++    section("PCControls", 118020, 385, std::nullopt, 2, {});
      section("PCKeys", 119020, 386, std::nullopt, 2, {});
 -    section("PCEffects", 120020, 387, 6, 0, {});
 +    section("PCEffects", 120020, 387, 5, 0, {"Item_5_0"});
@@ -12600,7 +13167,7 @@ index d51b554..b5f92c3 100644
  }
  
 diff --git a/tools/engine/pc_option_messages.tsv b/tools/engine/pc_option_messages.tsv
-index 2199381..9e191f1 100644
+index 2199381..8054a0c 100644
 --- a/tools/engine/pc_option_messages.tsv
 +++ b/tools/engine/pc_option_messages.tsv
 @@ -7,7 +7,7 @@
@@ -12617,7 +13184,7 @@ index 2199381..9e191f1 100644
  110006	PC Settings	Options added by the PC port.
  110007	PC Graphics	Graphics options added by the PC port.
 -110008	PC Controls	The mouse: camera, sensitivity and the pointer.
-+110008	PC Controls	The mouse: camera, sensitivity and the pointer; button prompts.
++110008	PC Controls	The mouse: camera, sensitivity and the pointer; button prompts and controller icons.
  110009	Key Bindings	Keyboard and mouse bindings.
  110010	PC Effects	Post-processing: blur, bloom, vignette and lens effects.
  110011	PC Camera	The follow camera: field of view, distance and height.
@@ -12641,7 +13208,7 @@ index 2199381..9e191f1 100644
  121020	PC Camera	
  121000	Camera Distance	How far behind the character the camera sits. 5 is the game's own.
  121001	Camera Height	How high above the character the camera looks. 5 is the game's own.
-@@ -120,9 +126,15 @@
+@@ -120,9 +126,19 @@
  14000336	Undo Rebirth	
  
  118005	Camera Auto Rotation	Allow the camera to turn automatically while using the mouse.
@@ -12655,6 +13222,10 @@ index 2199381..9e191f1 100644
 +118010	Automatic	
 +118011	Keyboard	
 +118012	Controller	
++118007	Controller Icons	The controller's buttons in menus and prompts. Automatic shows Xbox buttons while an Xbox controller is in use.
++118013	Automatic	
++118014	PlayStation	
++118015	Xbox	
 +117040	2560x1080 (21:9)
 +117041	3440x1440 (21:9)
 +117042	3840x1600 (24:10)
@@ -18125,10 +18696,10 @@ index 0000000..1c7cb8b
 +} // namespace BbEngine::Cheats
 diff --git a/gpu/shim/engine/key_prompts.cpp b/gpu/shim/engine/key_prompts.cpp
 new file mode 100644
-index 0000000..9ffe046
+index 0000000..3ae602e
 --- /dev/null
 +++ b/gpu/shim/engine/key_prompts.cpp
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,435 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "engine/key_prompts.h"
 +
@@ -18151,6 +18722,7 @@ index 0000000..9ffe046
 +#include "engine/keycap_art.h"
 +#include "input/bindings.h"
 +#include "input/compat.h"
++#include "input/input.h"
 +
 +namespace KeyPrompts {
 +namespace {
@@ -18203,8 +18775,21 @@ index 0000000..9ffe046
 +    std::uint32_t confirm = 0;  // the pad button that confirms there
 +    bool mouse_camera = false;
 +    std::uint64_t serial = 0;   // host_bindings_serial
++    bool xbox = false;          // the controller icons as an Xbox controller's buttons
 +    bool operator==(const State&) const = default;
 +};
++
++// Chosen, or (auto) while an Xbox controller is the gamepad in use.
++bool XboxIcons() {
++    switch (BbSettings::Get().pad_icons.load(std::memory_order_relaxed)) {
++    case BbSettings::PadIconsXbox: return true;
++    case BbSettings::PadIconsPlayStation: return false;
++    default: {
++        const int type = runtime_pad_type();
++        return type == SDL_GAMEPAD_TYPE_XBOX360 || type == SDL_GAMEPAD_TYPE_XBOXONE;
++    }
++    }
++}
 +
 +State Current() {
 +    State s;
@@ -18218,6 +18803,8 @@ index 0000000..9ffe046
 +        s.confirm = menu_confirm_button();
 +        s.mouse_camera = settings.mouse_camera;
 +        s.serial = host_bindings_serial();
++    } else {
++        s.xbox = XboxIcons();
 +    }
 +    return s;
 +}
@@ -18283,8 +18870,58 @@ index 0000000..9ffe046
 +    return spec;
 +}
 +
++// The gamepad button bound to the icon's PS4 button (runtime_pad.c), as an Xbox controller's.
++// The d-pad and the sticks keep the game's icons, which fit any controller.
++std::optional<Keycap::Spec> PadSpec(int icon) {
++    using namespace Keycap;
++    static constexpr struct {
++        Icon icon;
++        std::uint32_t bit;  // scePad's
++    } kButtons[] = {
++        {kCross, kPadCross}, {kCircle, kPadCircle}, {kSquare, 0x8000}, {kTriangle, 0x1000},
++        {kL1, 0x400},        {kR1, 0x800},          {kL2, 0x100},      {kR2, 0x200},
++        {kL3, 0x2},          {kR3, 0x4},            {kOptions, 0x8},   {kTouchLeft, 0x100000},
++        {kTouchRight, 0x100000},
++    };
++    const auto it = std::find_if(std::begin(kButtons), std::end(kButtons), [&](const auto& b) { return b.icon == icon; });
++    if (it == std::end(kButtons)) {
++        return std::nullopt;
++    }
++    int button;
++    switch (runtime_pad_button(it->bit, icon == kTouchRight)) {
++    case SDL_GAMEPAD_BUTTON_SOUTH: button = PadA; break;
++    case SDL_GAMEPAD_BUTTON_EAST: button = PadB; break;
++    case SDL_GAMEPAD_BUTTON_WEST: button = PadX; break;
++    case SDL_GAMEPAD_BUTTON_NORTH: button = PadY; break;
++    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: button = PadLB; break;
++    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: button = PadRB; break;
++    case SDL_GAMEPAD_BUTTON_COUNT: button = PadLT; break;
++    case SDL_GAMEPAD_BUTTON_COUNT + 1: button = PadRT; break;
++    case SDL_GAMEPAD_BUTTON_LEFT_STICK: button = PadLS; break;
++    case SDL_GAMEPAD_BUTTON_RIGHT_STICK: button = PadRS; break;
++    case SDL_GAMEPAD_BUTTON_BACK: button = PadView; break;
++    case SDL_GAMEPAD_BUTTON_START: button = PadMenu; break;
++    case SDL_GAMEPAD_BUTTON_MISC1: button = PadShare; break;
++    case SDL_GAMEPAD_BUTTON_DPAD_UP: button = PadUp; break;
++    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: button = PadDown; break;
++    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: button = PadLeft; break;
++    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: button = PadRight; break;
++    case SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1: button = PadP1; break;
++    case SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2: button = PadP2; break;
++    case SDL_GAMEPAD_BUTTON_LEFT_PADDLE1: button = PadP3; break;
++    case SDL_GAMEPAD_BUTTON_LEFT_PADDLE2: button = PadP4; break;
++    case SDL_GAMEPAD_BUTTON_TOUCHPAD: button = PadTouchpad; break;
++    case SDL_GAMEPAD_BUTTON_GUIDE: button = PadGuide; break;
++    default: return std::nullopt;  // unbound
++    }
++    return Spec{Spec::Pad, {}, button};
++}
++
 +std::optional<Keycap::Spec> IconSpec(int icon, const State& s) {
 +    using Keycap::Spec;
++    if (!s.keys) {
++        return s.xbox ? PadSpec(icon) : std::nullopt;
++    }
 +    // In a menu the face buttons that confirm and go back are Menu Confirm's and Menu Back's
 +    // keys, and the d-pad is the arrow keys (input.cpp).
 +    if (s.menu) {
@@ -18332,6 +18969,17 @@ index 0000000..9ffe046
 +State g_state;
 +bool g_have_state = false;
 +std::atomic<bool> g_logged{false};
++
++// With g_mutex held.
++void SetState(const State& now) {
++    static int shown = -1;  // the controller icons last logged: 0 the game's, 1 Xbox
++    if (!now.keys && shown != int(now.xbox)) {
++        shown = int(now.xbox);
++        host_log("button prompts: %s controller icons", now.xbox ? "Xbox" : "the game's (PlayStation)");
++    }
++    g_state = now;
++    g_have_state = true;
++}
 +// Drawn keycaps by what they are for and Spec::Id(), kept for the session (a few dozen at most).
 +// Never destroyed, so no late upload outlives it.
 +auto& g_drawn = *new std::unordered_map<std::string, std::vector<std::uint8_t>>;
@@ -18406,10 +19054,10 @@ index 0000000..9ffe046
 +
 +void LogFound() {
 +    if (!g_logged.exchange(true)) {
-+        host_log("button prompts: the game's button icons found; keys and mouse buttons while the "
-+                 "keyboard or mouse is in use (button_prompts = %s)",
-+                 BbSettings::ButtonPromptsNames[std::clamp(BbSettings::Get().button_prompts.load(), 0,
-+                                                           BbSettings::PromptsCount - 1)]);
++        const auto& settings = BbSettings::Get();
++        host_log("button prompts: the game's button icons found (button_prompts = %s, pad_icons = %s)",
++                 BbSettings::ButtonPromptsNames[std::clamp(settings.button_prompts.load(), 0, BbSettings::PromptsCount - 1)],
++                 BbSettings::PadIconsNames[std::clamp(settings.pad_icons.load(), 0, BbSettings::PadIconsCount - 1)]);
 +    }
 +}
 +
@@ -18441,10 +19089,9 @@ index 0000000..9ffe046
 +    }
 +    std::scoped_lock lock{g_mutex};
 +    if (!g_have_state) {
-+        g_state = Current();
-+        g_have_state = true;
++        SetState(Current());
 +    }
-+    if (!g_state.keys) {
++    if (!g_state.keys && !g_state.xbox) {
 +        return false;
 +    }
 +    if (texture != kHud) {
@@ -18477,24 +19124,23 @@ index 0000000..9ffe046
 +    const State now = Current();
 +    std::scoped_lock lock{g_mutex};
 +    if (!g_have_state) {
-+        g_state = now;
-+        g_have_state = true;
++        SetState(now);
 +        return false;
 +    }
 +    if (now == g_state) {
 +        return false;
 +    }
-+    g_state = now;
++    SetState(now);
 +    return true;
 +}
 +
 +} // namespace KeyPrompts
 diff --git a/gpu/shim/engine/key_prompts.h b/gpu/shim/engine/key_prompts.h
 new file mode 100644
-index 0000000..be58525
+index 0000000..ec76593
 --- /dev/null
 +++ b/gpu/shim/engine/key_prompts.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,36 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#pragma once
 +
@@ -18505,7 +19151,9 @@ index 0000000..be58525
 +// keyboard or mouse is in use the texture cache uploads keycaps over them (engine/keycap_art.h):
 +// the key, or the mouse button, bound to what that pad button does there - in a menu, Menu
 +// Confirm and Menu Back for the face buttons that confirm and go back. The pad, or
-+// button_prompts = controller, brings the game's own icons back; nothing in the game's memory
++// button_prompts = controller, brings the controller's icons back: the game's own (PlayStation),
++// or with an Xbox controller in use (pad_icons = auto) or pad_icons = xbox, the Xbox button bound
++// to each PS4 button (src/runtime_pad.c), drawn the same way. Nothing in the game's memory
 +// changes.
 +
 +#include <cstddef>
@@ -18518,22 +19166,23 @@ index 0000000..be58525
 +/// Which of the game's textures with button icons this is, or -1.
 +int Identify(const void* data, std::size_t size, std::uint32_t width, std::uint32_t height);
 +
-+/// Draws the keycaps over `data`, a copy of that texture's data about to be uploaded (the game's
-+/// format and tiling). False, and `data` unchanged, while the game's own icons show.
++/// Draws the keycaps or Xbox buttons over `data`, a copy of that texture's data about to be
++/// uploaded (the game's format and tiling). False, and `data` unchanged, while the game's own
++/// icons show.
 +bool Draw(int texture, std::uint8_t* data, std::size_t size);
 +
 +/// Once a frame (Rasterizer::OnSubmit): whether what the icons show changed since the last call
-+/// (the device in use, a menu opened or closed, a binding, the setting), so that the texture
-+/// cache uploads them again.
++/// (the device or gamepad in use, a menu opened or closed, a binding, the settings), so that the
++/// texture cache uploads them again.
 +bool Changed();
 +
 +} // namespace KeyPrompts
 diff --git a/gpu/shim/engine/keycap_art.cpp b/gpu/shim/engine/keycap_art.cpp
 new file mode 100644
-index 0000000..1d2016f
+index 0000000..d91da06
 --- /dev/null
 +++ b/gpu/shim/engine/keycap_art.cpp
-@@ -0,0 +1,733 @@
+@@ -0,0 +1,808 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "engine/keycap_art.h"
 +
@@ -18747,7 +19396,7 @@ index 0000000..1d2016f
 +}
 +
 +// `text` centred on (cx, cy), its capitals `cap` pixels tall, smaller if it is wider than `width`.
-+void DrawText(Canvas& c, const std::string& text, float cx, float cy, float width, float cap) {
++void DrawText(Canvas& c, const std::string& text, float cx, float cy, float width, float cap, Color color = kInk) {
 +    const Font& font = GetFont();
 +    const auto cps = Utf8(text);
 +    if (!font.ok || cps.empty()) {
@@ -18816,7 +19465,7 @@ index 0000000..1d2016f
 +    }
 +    for (int y = 0; y < n; ++y) {
 +        for (int x = 0; x < n; ++x) {
-+            c.Blend(x, y, kInk, ink[std::size_t(y) * n + x]);
++            c.Blend(x, y, color, ink[std::size_t(y) * n + x]);
 +        }
 +    }
 +}
@@ -18861,6 +19510,77 @@ index 0000000..1d2016f
 +        // The camera: the mouse moved.
 +        DrawArrow(c, 3.5f, 17.0f, 6.0f, 3, kInk);
 +        DrawArrow(c, 28.5f, 17.0f, 6.0f, 1, kInk);
++    }
++}
++
++// The round cap of the game's face buttons and sticks (KG_Cancel, KG_L3), and the wide one of
++// its shoulder buttons (KG_L1).
++constexpr Box kRoundCap{3.7f, 3.2f, 28.3f, 27.8f, 12.3f};
++constexpr Box kWideCap{0.5f, 6.0f, 31.5f, 26.0f, 4.0f};
++// A, B, X and Y in their colours, as bright as the game's own symbols.
++constexpr Color kPadFace[] = {Rgb(0x5bbf3f), Rgb(0xe2423a), Rgb(0x3a7bf0), Rgb(0xf1c232)};
++constexpr const char* kPadNames[] = {"A",  "B",  "X",  "Y",  "LB", "RB", "LT",  "RT",
++                                     "LS", "RS", "",   "",   "",   "",   "",    "",
++                                     "",   "P1", "P2", "P3", "P4", "Pad", "Home"};
++static_assert(sizeof(kPadNames) / sizeof(kPadNames[0]) == PadGuide + 1);
++
++// The shoulder buttons, the triggers and the names are on a wide cap, the rest round.
++bool PadWide(int button) {
++    return (button >= PadLB && button <= PadRT) || button >= PadP1;
++}
++
++// An outlined box: `line` units thick, its inside the cap's face.
++void DrawFrame(Canvas& c, const Box& box, float line) {
++    Paint(c, kInk, [&](float x, float y) { return Inside(box, x, y); });
++    const Box inside = Inset(box, line, line, line, line);
++    Paint(c, kFace, [&](float x, float y) { return Inside(inside, x, y); });
++}
++
++void DrawPad(Canvas& c, int button) {
++    button = std::clamp(button, 0, int(PadGuide));
++    if (PadWide(button)) {
++        DrawLabel(c, kWideCap, kPadNames[button], button <= PadRT ? 12.5f : 10.0f);
++        return;
++    }
++    DrawCap(c, kRoundCap);
++    const float cx = 16.0f, cy = 15.8f;
++    switch (button) {
++    case PadA:
++    case PadB:
++    case PadX:
++    case PadY:
++        DrawText(c, kPadNames[button], cx, cy, 20.0f, 13.0f, kPadFace[button]);
++        break;
++    case PadLS:
++    case PadRS:
++        DrawText(c, kPadNames[button], cx, cy, 19.0f, 11.5f);
++        break;
++    case PadView:
++        // Two windows, one over the other.
++        DrawFrame(c, {9.0f, 9.5f, 18.5f, 17.0f, 1.5f}, 1.5f);
++        DrawFrame(c, {13.5f, 14.0f, 23.0f, 21.5f, 1.5f}, 1.5f);
++        break;
++    case PadMenu:
++        for (const float y : {11.0f, 15.5f, 20.0f}) {
++            const Box line{10.0f, y - 0.9f, 22.0f, y + 0.9f, 0.9f};
++            Paint(c, kInk, [&](float px, float py) { return Inside(line, px, py); });
++        }
++        break;
++    case PadShare: {
++        // An arrow out of a tray.
++        DrawArrow(c, cx, 13.0f, 9.0f, 0, kInk);
++        const Box tray[] = {{10.0f, 15.5f, 11.8f, 21.5f, 0.6f}, {20.2f, 15.5f, 22.0f, 21.5f, 0.6f},
++                            {10.0f, 19.7f, 22.0f, 21.5f, 0.6f}};
++        for (const Box& b : tray) {
++            Paint(c, kInk, [&](float x, float y) { return Inside(b, x, y); });
++        }
++        break;
++    }
++    default: {  // the d-pad: up, down, left, right
++        constexpr int kDir[] = {0, 2, 3, 1};
++        DrawArrow(c, cx, cy, 12.0f, kDir[std::clamp(button - int(PadUp), 0, 3)], kInk);
++        break;
++    }
 +    }
 +}
 +
@@ -19192,7 +19912,8 @@ index 0000000..1d2016f
 +    // A square cap fills a smaller button: the 27 units around it at that size. Other layouts
 +    // scale down whole.
 +    const std::string first = spec.labels.empty() ? std::string() : spec.labels[0];
-+    const bool square = spec.kind == Spec::Key && (Utf8(first).size() <= 2 || ArrowDir(first) >= 0);
++    const bool square = spec.kind == Spec::Pad ? !PadWide(spec.button)
++                                               : spec.kind == Spec::Key && (Utf8(first).size() <= 2 || ArrowDir(first) >= 0);
 +    float scale = float(size) / kSize, origin = 0.0f;
 +    if (size != kSize && square) {
 +        scale = float(size) / 27.0f;
@@ -19202,6 +19923,9 @@ index 0000000..1d2016f
 +    switch (spec.kind) {
 +    case Spec::Mouse:
 +        DrawMouse(c, spec.button);
++        break;
++    case Spec::Pad:
++        DrawPad(c, spec.button);
 +        break;
 +    case Spec::Keys:
 +        if (spec.labels.size() >= 4) {
@@ -19269,17 +19993,18 @@ index 0000000..1d2016f
 +} // namespace Keycap
 diff --git a/gpu/shim/engine/keycap_art.h b/gpu/shim/engine/keycap_art.h
 new file mode 100644
-index 0000000..46310e2
+index 0000000..77a036f
 --- /dev/null
 +++ b/gpu/shim/engine/keycap_art.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,53 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#pragma once
 +
-+// Keyboard and mouse button icons in the style of the game's own (menu/common.tpf's KG_*: a dark
-+// cap with a light top rim and a shadow under it, tan lettering), drawn here, 32x32, and stored
-+// the way those are: BC7 in the PS4's thin tiling, one tile of 8x8 4x4-blocks in Morton order,
-+// 0x400 bytes. engine/key_prompts.cpp shows them in place of the game's icons.
++// Keyboard, mouse and Xbox controller button icons in the style of the game's own
++// (menu/common.tpf's KG_*: a dark cap with a light top rim and a shadow under it, tan lettering,
++// the face buttons round with a coloured symbol), drawn here, 32x32, and stored the way those
++// are: BC7 in the PS4's thin tiling, one tile of 8x8 4x4-blocks in Morton order, 0x400 bytes.
++// engine/key_prompts.cpp shows them in place of the game's icons.
 +
 +#include <cstddef>
 +#include <cstdint>
@@ -19291,17 +20016,25 @@ index 0000000..46310e2
 +constexpr int kSize = 32;
 +constexpr std::size_t kBytes = 0x400;
 +
++/// An Xbox controller's buttons (Spec::Pad). The paddles, the touchpad and the guide button,
++/// which a binding can name too, show as their names.
++enum PadButton : int {
++    PadA, PadB, PadX, PadY, PadLB, PadRB, PadLT, PadRT, PadLS, PadRS, PadView, PadMenu, PadShare,
++    PadUp, PadDown, PadLeft, PadRight, PadP1, PadP2, PadP3, PadP4, PadTouchpad, PadGuide,
++};
++
 +struct Spec {
 +    enum Kind : std::uint8_t {
 +        Key,    // one cap: labels[0]
 +        Keys,   // two caps side by side, or four as an inverted T (up, left, down, right)
 +        Mouse,  // the mouse, `button` lit
++        Pad,    // an Xbox controller's button: `button` a PadButton
 +    };
 +    Kind kind = Key;
 +    /// Cap texts, UTF-8. "Up", "Down", "Left" and "Right" are drawn as arrows.
 +    std::vector<std::string> labels;
 +    /// Mouse: 0 none (the mouse itself, for the camera), 1 left, 2 right, 3 middle, 6 and 7 the
-+    /// wheel up and down.
++    /// wheel up and down. Pad: a PadButton.
 +    int button = 0;
 +
 +    /// One string per distinct icon (the caches' key).

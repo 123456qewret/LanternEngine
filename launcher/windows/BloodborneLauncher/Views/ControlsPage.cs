@@ -91,6 +91,10 @@ namespace BloodborneLauncher.Views
 
             Group("Gamepad");
             Add(Card(SymbolRegular.XboxController24, "Controller", "", null, out _padStatus));
+            ComboRow(SymbolRegular.Games24, "Controller icons",
+                "The controller's buttons in the game's menus and prompts. Automatic shows Xbox buttons (A, B, X, Y, LB, RT…) with an Xbox controller, " +
+                "and PlayStation's with any other; rebound buttons show as bound. Also in-game under System › PC Controls",
+                Choices.PadIcons, () => Ini.Get("pad_icons", "auto"), v => Ini.Set("pad_icons", v));
             IniToggle(SymbolRegular.ArrowSwap24, "Swap sticks", "Move with the right stick and look with the left", "pad_swap_sticks", changed: () => Rebuild());
             IniToggle(SymbolRegular.ArrowBidirectionalLeftRight24, "Invert camera left / right", "The camera stick's horizontal direction", "pad_invert_look_x");
             IniToggle(SymbolRegular.ArrowBidirectionalUpDown24, "Invert camera up / down", "The camera stick's vertical direction", "pad_invert_look_y");

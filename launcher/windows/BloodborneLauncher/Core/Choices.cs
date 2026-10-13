@@ -91,9 +91,9 @@
         {
             new("60 FPS", "60"),
             new("90 FPS", "90", "Includes the sprint fix for high frame rates"),
-            new("120 FPS", "120", "The uncapped patch with a 120 FPS limit"),
-            new("144 FPS", "144", "The uncapped patch with a 144 FPS limit"),
-            new("Uncapped", "uncap", "No limit: as fast as your PC runs it. Use VSync (FIFO) to keep it to your monitor"),
+            new("120 FPS", "120", "The 90 FPS patch made for 120"),
+            new("144 FPS", "144", "The 90 FPS patch made for 144"),
+            new("Uncapped", "uncap", "The community uncapped patch, no limit. It can freeze at the end of a boss intro (Vicar Amelia's); 120 and 144 use another patch"),
             new("30 FPS (as on PS4)", "30"),
         };
 
@@ -153,6 +153,12 @@
         public static readonly Choice[] ButtonPrompts =
         {
             new("Automatic (default)", "auto"), new("Keyboard", "keyboard"), new("Controller", "controller"),
+        };
+
+        /// <summary>pad_icons: the game's controller icons as they are (PlayStation's) or as an Xbox controller's buttons; automatic follows the controller in use.</summary>
+        public static readonly Choice[] PadIcons =
+        {
+            new("Automatic (default)", "auto"), new("PlayStation", "playstation"), new("Xbox", "xbox"),
         };
 
         public static readonly Choice[] HdrMode =
