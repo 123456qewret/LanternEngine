@@ -433,6 +433,25 @@ namespace BloodborneLauncher
                     : $"{names}: left out while online; it applies again with online off.", LogLevel.Step);
             }
 
+            // A third-party resolution patch while the output resolution sets the game's resolution
+            // and UI itself: it would keep its own shape (black bars) and stop the widescreen hooks.
+            GameEnvironment.ResolutionPatchChoice = null;
+            var (outW, outH) = Choices.OutputSize(ini.Get("output_res", "1920x1080"));
+            if ((outW, outH) != (1920, 1080) &&
+                Patches.ResolutionSetting(GameEnvironment.PatchesDir(s)) is { Count: > 0 } sizing)
+            {
+                var names = string.Join(", ", sizing.Select(p => $"\"{p.Name}\""));
+                var choice = Prompt.Choose("Play with " + names + "?",
+                    $"The output resolution ({outW} × {outH}) already sets the game's resolution and widens the picture and UI to fill the screen. " +
+                    names + " sets its own on top: the picture keeps the patch's shape, with black bars.\n\n" +
+                    "Leave it out? It still applies with a 1920 × 1080 output.",
+                    "Cancel", "Keep it on", "Leave it out");
+                if (choice <= 0) return;
+                GameEnvironment.ResolutionPatchChoice = choice == 1 ? "keep" : "skip";
+                ws.Log(choice == 1 ? $"{names}: kept on with the {outW} × {outH} output."
+                    : $"{names}: left out; the output resolution sets the picture.", LogLevel.Step);
+            }
+
             if (!s.Bool("memory_check_off") && MemoryCheck.Problem(ws.Ini) is { } memory)
             {
                 var choice = Prompt.Choose("Windows may run out of memory", memory, "Cancel", "Don't ask again", "Start anyway");

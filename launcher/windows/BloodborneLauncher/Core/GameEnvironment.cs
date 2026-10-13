@@ -32,6 +32,11 @@ namespace BloodborneLauncher.Core
         /// "skip"; scripts/patches.py leaves it out unless "keep"), or null when none is on.</summary>
         public static string? RegionPatchOnline { get; set; }
 
+        /// <summary>This launch's answer about a third-party resolution patch while the output
+        /// resolution isn't 1920 x 1080 ("keep" or "skip"; scripts/patches.py leaves it out unless
+        /// "keep"), or null when none is on.</summary>
+        public static string? ResolutionPatchChoice { get; set; }
+
         public static Dictionary<string, string> Build(LauncherSettings s)
         {
             var fps = Fps(s);
@@ -55,6 +60,7 @@ namespace BloodborneLauncher.Core
                 ["PYTHONUNBUFFERED"] = "1",
             };
             if (RegionPatchOnline is { } region) env["BB_REGION_PATCH_ONLINE"] = region;
+            if (ResolutionPatchChoice is { } resolution) env["BB_RESOLUTION_PATCH"] = resolution;
             if (s.Str("present_mode").Length > 0) env["BB_PRESENT_MODE"] = s.Str("present_mode");
             if (s.Bool("frame_stats")) env["BB_FRAME_STATS"] = "1";
             if (s.Bool("fsr_profile")) env["BB_FSR4_PROFILE"] = "1";

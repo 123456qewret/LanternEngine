@@ -121,21 +121,60 @@ namespace BloodborneLauncher.Core
     public static class Patches
     {
         public sealed record Patch(string Key, string Name, string File, string Author, string Note, bool DefaultOn,
-            bool ChangesRegion = false);
+            bool ChangesRegion = false, bool SetsResolution = false);
 
         // The game's region function (scripts/patches.py REGION_FUNCTION, as patch addresses).
         // "Unlock Game Region" makes it return a region with no Bloodborne server.
         private const long RegionStart = 0x23b9190, RegionEnd = 0x23b91e3;
 
-        private static bool WritesRegion(XElement line)
+        // The bytes a line writes (patch addresses), or null when it can't be read.
+        private static (long Start, long End)? Range(XElement line)
         {
             var address = ((string?)line.Attribute("Address") ?? "").Trim();
             if (address.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
                 address = address[2..];
             if (!long.TryParse(address, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var at))
-                return false;
-            var length = Math.Max(1, ((string?)line.Attribute("Value") ?? "").Trim().Length / 2);
-            return at < RegionEnd && RegionStart < at + length;
+                return null;
+            var value = ((string?)line.Attribute("Value") ?? "").Trim();
+            var length = ((string?)line.Attribute("Type") ?? "bytes") switch
+            {
+                "bytes16" => 2,
+                "bytes32" or "float32" => 4,
+                "bytes64" or "float64" => 8,
+                _ => Math.Max(1, value.Replace(" ", "").Length / 2),
+            };
+            return (at, at + length);
+        }
+
+        private static bool WritesRegion(XElement line) =>
+            Range(line) is { } r && r.Start < RegionEnd && RegionStart < r.End;
+
+        // The game's resolution and UI layout: the sites every community "Resolution Patch"
+        // writes, read from the built-in one the engine uses as its template (scripts/patches.py
+        // RESOLUTION_TEMPLATE).
+        private const string ResolutionTemplate = "Resolution Patch 1280x720 (16:9)";
+
+        private static List<(long Start, long End)> ResolutionFootprint()
+        {
+            try
+            {
+                var xml = XDocument.Load(Path.Combine(Paths.PortDir, "patches", "Bloodborne.xml"));
+                var template = xml.Descendants("Metadata").FirstOrDefault(m => (string?)m.Attribute("Name") == ResolutionTemplate);
+                return template?.Descendants("Line").Select(Range).OfType<(long Start, long End)>().ToList() ?? new();
+            }
+            catch
+            {
+                return new();
+            }
+        }
+
+        /// <summary>The enabled patches that set the game's resolution and UI layout: while the
+        /// output resolution isn't 1920 x 1080 it does that itself, and the patch would keep its
+        /// own shape on screen (black bars) and stop the widescreen hooks.</summary>
+        public static List<Patch> ResolutionSetting(string directory)
+        {
+            var profile = LoadProfile();
+            return Discover(directory).Where(p => p.SetsResolution && IsOn(p, profile)).ToList();
         }
 
         /// <summary>The enabled patches that change the game's region: with one on, Play online
@@ -155,6 +194,7 @@ namespace BloodborneLauncher.Core
                 return found;
 
             var builtIn = Path.GetFullPath(Path.Combine(Paths.PortDir, "patches", "Bloodborne.xml"));
+            var footprint = ResolutionFootprint();
             foreach (var path in Directory.GetFiles(directory, "*.xml").OrderBy(p => p, StringComparer.Ordinal))
             {
                 if (string.Equals(Path.GetFullPath(path), builtIn, StringComparison.OrdinalIgnoreCase))
@@ -184,7 +224,9 @@ namespace BloodborneLauncher.Core
                         (string?)meta.Attribute("Author") ?? "",
                         ((string?)meta.Attribute("Note") ?? "").Replace("\\n", "\n"),
                         string.Equals((string?)meta.Attribute("isEnabled"), "true", StringComparison.OrdinalIgnoreCase),
-                        meta.Descendants("Line").Any(WritesRegion)));
+                        meta.Descendants("Line").Any(WritesRegion),
+                        meta.Descendants("Line").Select(Range).Any(r => r is { } w &&
+                            footprint.Any(f => f.Start < w.End && w.Start < f.End))));
                 }
             }
             return found;
