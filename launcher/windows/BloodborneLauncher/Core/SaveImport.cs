@@ -59,11 +59,16 @@ namespace BloodborneLauncher.Core
             var found = new List<Source>();
             void Walk(string dir, int left)
             {
-                if (string.Equals(Path.GetFileName(dir), SaveDir, StringComparison.OrdinalIgnoreCase))
+                // SPRJ0005 itself, an export named after it (Apollo Save Tool: CUSA00207_SPRJ0005),
+                // or any folder with the game's system save file.
+                var name = Path.GetFileName(dir);
+                if (name.EndsWith(SaveDir, StringComparison.OrdinalIgnoreCase) || File.Exists(Path.Combine(dir, "userdata0010")))
                 {
                     if (HasSaves(dir))
+                    {
                         found.Add(new Source(dir, Directory.GetFiles(dir, "userdata*").Max(File.GetLastWriteTime), from));
-                    return;
+                        return;
+                    }
                 }
                 if (left == 0) return;
                 string[] children;
@@ -72,16 +77,34 @@ namespace BloodborneLauncher.Core
                 foreach (var child in children)
                 {
                     // Game files and backups are not where saves live, and a dump has thousands of folders.
-                    var name = Path.GetFileName(child);
-                    if (name.Equals("dvdroot_ps4", StringComparison.OrdinalIgnoreCase) ||
-                        name.Equals("launcher-backups", StringComparison.OrdinalIgnoreCase) ||
-                        name.Equals("save-backups", StringComparison.OrdinalIgnoreCase))
+                    var childName = Path.GetFileName(child);
+                    if (childName.Equals("dvdroot_ps4", StringComparison.OrdinalIgnoreCase) ||
+                        childName.Equals("launcher-backups", StringComparison.OrdinalIgnoreCase) ||
+                        childName.Equals("save-backups", StringComparison.OrdinalIgnoreCase))
                         continue;
                     Walk(child, left - 1);
                 }
             }
             Walk(root, depth);
             return found.OrderByDescending(f => f.Saved).ToList();
+        }
+
+        /// <summary>Whether `root` (or a folder a few levels under it) holds a PS4 save as the console
+        /// copies it to USB: sdimg_SPRJ0005, an image encrypted with that console's keys, which no
+        /// PC tool can open; it has to be exported decrypted on the PS4 (Apollo Save Tool) or by
+        /// Save Wizard.</summary>
+        public static bool HasEncryptedPs4Save(string root, int depth = 7)
+        {
+            bool Walk(string dir, int left)
+            {
+                try
+                {
+                    if (Directory.EnumerateFiles(dir, "sdimg_*").Any()) return true;
+                    return left > 0 && Directory.GetDirectories(dir).Any(child => Walk(child, left - 1));
+                }
+                catch { return false; }
+            }
+            return Walk(root, depth);
         }
 
         /// <summary>Copies a save folder's files in as the current profile's saves, after backing up

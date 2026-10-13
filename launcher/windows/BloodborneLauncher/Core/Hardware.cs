@@ -112,15 +112,14 @@ namespace BloodborneLauncher.Core
             var dlss = File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll"));
             Ini("Upscaler", "upscaler", Rtx && dlss ? "dlss" : Rdna4 ? "fsr4" : "fsr3", Choices.Upscalers);
 
-            // The output: the display's own size where it is one of the choices, else the largest that fits.
-            var output = Choices.OutputResolutions.Select(c => c.Value)
-                .Select(v => (Value: v, W: int.Parse(v.Split('x')[0]), H: int.Parse(v.Split('x')[1])))
-                .Where(r => ScreenWidth == 0 || r.W <= ScreenWidth && r.H <= ScreenHeight)
-                .OrderByDescending(r => r.W).Select(r => r.Value).FirstOrDefault() ?? "1920x1080";
+            // The output: the display's own size, by name where it is one of the choices, else
+            // "Display (auto)"; 1920 x 1080 when the display is unknown.
+            var output = ScreenWidth == 0 ? "1920x1080"
+                : Choices.OutputResolutions.Select(c => c.Value).FirstOrDefault(v => v == $"{ScreenWidth}x{ScreenHeight}") ?? "auto";
             Ini("Output resolution", "output_res", output, Choices.OutputResolutions, "1920x1080");
 
             // How far below the output the game renders: more for bigger outputs and smaller GPUs.
-            var height = int.Parse(output.Split('x')[1]);
+            var height = Choices.OutputSize(output).H;
             var preset = (height, tier) switch
             {
                 (<= 720, Tier.Low) => 1,

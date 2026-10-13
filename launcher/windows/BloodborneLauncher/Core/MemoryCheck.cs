@@ -27,9 +27,8 @@ namespace BloodborneLauncher.Core
         public static long NeededMiB(IniFile ini)
         {
             var dmem = 5056L;
-            var output = ini.Get("output_res").Split('x');
-            if (ini.Get("live_resolution") == "0" && output.Length == 2 &&
-                long.TryParse(output[0], out var w) && long.TryParse(output[1], out var h) && w * h > 1920 * 1080)
+            var (w, h) = Choices.OutputSize(ini.Get("output_res", "1920x1080"));
+            if (ini.Get("live_resolution") == "0" && (long)w * h > 1920 * 1080)
                 dmem = 9152;
             return dmem + 1024 + 3072;
         }

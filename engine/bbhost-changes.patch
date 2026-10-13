@@ -6786,7 +6786,7 @@ index d310098..1a0e045 100644
  
  } // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
-index a3240be..2281bb7 100644
+index a3240be..72f63ff 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 @@ -14,6 +14,7 @@
@@ -6819,6 +6819,17 @@ index a3240be..2281bb7 100644
      // Reject unsupported shaders before allocating resources or recording a frame.
      if (instance.IsDlssCapable()) {
          dlss = std::make_unique<DlssUpscaler>(instance, scheduler);
+@@ -352,8 +356,8 @@ bool TemporalUpscaler::OnFrameStart() {
+     const int output = settings.output_res.load();
+     const bool output_changed = !scaled_session && applied_output != output;
+     if (output_changed) {
+-        target_width = BbSettings::OutputWidths[output];
+-        target_height = BbSettings::OutputHeights[output];
++        target_width = BbSettings::OutputWidth(output);
++        target_height = BbSettings::OutputHeight(output);
+         std::printf("Output resolution: %ux%u (live)\n", target_width, target_height);
+         failed = false;
+         fsr4_failed = false;
 @@ -411,15 +415,23 @@ bool TemporalUpscaler::OnFrameStart() {
  }
  
@@ -8392,7 +8403,7 @@ index f9d2884..caf3e6c 100644
          std::unique_lock lk{mutex};
          while (true) {
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..fb4a71e 100644
+index 83e5538..b35d635 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -12,12 +12,15 @@
@@ -8717,7 +8728,28 @@ index 83e5538..fb4a71e 100644
          BbSettings::Save();
      }
      ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-@@ -439,6 +695,8 @@ void Menu() {
+@@ -303,8 +559,8 @@ void Menu() {
+                 label, sizeof(label),
+                 BbSettings::MenuText("%s (x%.1f, render %dx%d)", "%s (x%.1f, рендер %dx%d)"),
+                 BbSettings::PresetName(i), scale,
+-                int(std::lround(BbSettings::OutputWidths[output] / scale / 2) * 2),
+-                int(std::lround(BbSettings::OutputHeights[output] / scale / 2) * 2));
++                int(std::lround(BbSettings::OutputWidth(output) / scale / 2) * 2),
++                int(std::lround(BbSettings::OutputHeight(output) / scale / 2) * 2));
+             if (ImGui::Selectable(label, i == preset)) {
+                 Store(s.preset, i, true);
+             }
+@@ -389,7 +645,8 @@ void Menu() {
+ 
+     ImGui::SeparatorText(BbSettings::MenuText("Output resolution", "Разрешение вывода"));
+     static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
+-        "2560 x 1080", "3440 x 1440", "3840 x 1600", "3840 x 1080", "5120 x 1440", "5120 x 2160"};
++        "2560 x 1080", "3440 x 1440", "3840 x 1600", "3840 x 1080", "5120 x 1440", "5120 x 2160",
++        "7680 x 2160", "Display (auto)"};
+     static_assert(std::size(outputs)==BbSettings::OutputCount);
+     int output = s.output_res;
+     if (ImGui::BeginCombo(BbSettings::MenuText("Output resolution", "Разрешение вывода"),
+@@ -439,6 +696,8 @@ void Menu() {
          "остаётся в 1080p — на Steam Deck и старых видеокартах это заметно медленнее. "
          "Выключена: всё рисуется в разрешении пресета, смена — через перезапуск. Авто включает "
          "её на мощных дискретных видеокартах. Применяется после перезапуска игры."));
@@ -8726,7 +8758,7 @@ index 83e5538..fb4a71e 100644
      ImGui::SeparatorText(BbSettings::MenuText("Game effects (restart required)",
                                                "Эффекты игры (после перезапуска)"));
      const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
-@@ -478,7 +736,8 @@ void Menu() {
+@@ -478,7 +737,8 @@ void Menu() {
  
      bool restart =
          s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
@@ -8736,7 +8768,7 @@ index 83e5538..fb4a71e 100644
      for (int e = 0; e < BbSettings::EffectCount; ++e) {
          restart |= s.effects[e] != s.startup_effects[e];
      }
-@@ -499,8 +758,86 @@ void Menu() {
+@@ -499,8 +759,86 @@ void Menu() {
      Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
      Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
  
@@ -8823,7 +8855,7 @@ index 83e5538..fb4a71e 100644
  
      ImGui::Spacing();
      if (ImGui::Button(BbSettings::MenuText("Close", "Закрыть"))) {
-@@ -587,6 +924,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -587,6 +925,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -9081,7 +9113,7 @@ index f88cc52..3acef06 100644
  } // namespace BbSections
  
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index cf4fbd8..7d80971 100644
+index cf4fbd8..9ac5e1b 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -6,9 +6,11 @@
@@ -9190,7 +9222,7 @@ index cf4fbd8..7d80971 100644
      } else if (key == "mouse_sensitivity") {
          v.mouse_sensitivity=std::clamp(i,0,10);
      } else if (key == "camera_controls") {
-@@ -109,20 +174,72 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -109,22 +174,77 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.graphics_controls=i!=0;
      } else if (key == "graphics_vignette") {
          v.graphics_vignette=i!=0;
@@ -9265,9 +9297,15 @@ index cf4fbd8..7d80971 100644
 +    } else if (key == "cheat_echo_multiplier") {
 +        v.cheat_echo_multiplier = CheatChoice(key, value, CheatEchoMultipliers, "1, 2, 5 or 10");
      } else if (key == "output_res") {
-         for (int r = 0; r < OutputCount; ++r) {
+-        for (int r = 0; r < OutputCount; ++r) {
++        if (value == "auto") {
++            v.output_res = OutputAuto;
++        }
++        for (int r = 0; r < OutputAuto; ++r) {
              if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
-@@ -138,6 +255,27 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+                 v.output_res = r;
+             }
+@@ -138,15 +258,65 @@ void Set(Values& v, const std::string& key, const std::string& value) {
      }
  }
  
@@ -9294,8 +9332,34 @@ index cf4fbd8..7d80971 100644
 +
  } // namespace
  
++// The display's size for output_res = auto: BB_DISPLAY_SIZE ("WxH", from run_windows.py), even
++// (the game has half-resolution buffers); 1920x1080 without it.
++static std::pair<int, int> DisplaySize() {
++    static const std::pair<int, int> size = [] {
++        int w = 0, h = 0;
++        const char* env = std::getenv("BB_DISPLAY_SIZE");
++        if (env && std::sscanf(env, "%dx%d", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 16384 &&
++            h <= 8640) {
++            return std::pair<int, int>{w & ~1, h & ~1};
++        }
++        return std::pair<int, int>{1920, 1080};
++    }();
++    return size;
++}
++
++int OutputWidth(int index) {
++    index = std::clamp(index, 0, OutputCount - 1);
++    return index == OutputAuto ? DisplaySize().first : OutputWidths[index];
++}
++
++int OutputHeight(int index) {
++    index = std::clamp(index, 0, OutputCount - 1);
++    return index == OutputAuto ? DisplaySize().second : OutputHeights[index];
++}
++
  Values& Get() {
-@@ -146,7 +284,11 @@ Values& Get() {
+     static Values values;
+     return values;
  }
  
  const char* MenuText(const char* english, const char* russian) {
@@ -9308,7 +9372,7 @@ index cf4fbd8..7d80971 100644
  }
  
  void Load() {
-@@ -166,9 +308,7 @@ void Load() {
+@@ -166,9 +336,7 @@ void Load() {
                  }
              }
          }
@@ -9319,7 +9383,7 @@ index cf4fbd8..7d80971 100644
      }
      if (FILE* file = std::fopen(Path(), "r")) {
          char line[256];
-@@ -196,6 +336,9 @@ void Load() {
+@@ -196,6 +364,9 @@ void Load() {
          {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
          {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
          {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
@@ -9329,7 +9393,7 @@ index cf4fbd8..7d80971 100644
      };
      for (const auto& [env, key] : env_keys) {
          if (const char* value = std::getenv(env)) {
-@@ -211,6 +354,7 @@ void Load() {
+@@ -211,6 +382,7 @@ void Load() {
      v.startup_model_lod = v.model_lod;
      v.startup_output_res = v.output_res;
      v.startup_live_resolution = v.live_resolution;
@@ -9337,7 +9401,7 @@ index cf4fbd8..7d80971 100644
  }
  
  void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss) {
-@@ -264,7 +408,7 @@ void Save() {
+@@ -264,7 +436,7 @@ void Save() {
          return std::string(text);
      };
      const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
@@ -9346,7 +9410,7 @@ index cf4fbd8..7d80971 100644
      put("upscaler", UpscalerName(v.upscaler));
      put("preset", std::to_string(v.preset.load()));
      put("sharpen", flag(v.sharpen));
-@@ -277,6 +421,7 @@ void Save() {
+@@ -277,6 +449,7 @@ void Save() {
      put("reactive_max", fixed(v.reactive_max, 2));
      put("debug_view", std::to_string(v.debug_view.load()));
      put("show_fps", flag(v.show_fps));
@@ -9354,7 +9418,7 @@ index cf4fbd8..7d80971 100644
      put("fsr4_auto_exposure", flag(v.fsr4_auto_exposure));
      put("fsr4_invert_jitter", flag(v.fsr4_invert_jitter));
      // Read by patches.py at start.
-@@ -284,12 +429,23 @@ void Save() {
+@@ -284,12 +457,23 @@ void Save() {
          put(Effects[e].key, flag(v.effects[e]));
      }
      put("fullscreen", flag(v.fullscreen));
@@ -9378,7 +9442,7 @@ index cf4fbd8..7d80971 100644
      put("camera_controls", flag(v.camera_controls));
      put("widescreen",flag(v.widescreen));
      put("pc_controls",flag(v.pc_controls));
-@@ -299,12 +455,22 @@ void Save() {
+@@ -299,14 +483,25 @@ void Save() {
      put("mouse_invert_y",flag(v.mouse_invert_y));
      put("mouse_auto_rotation",flag(v.mouse_auto_rotation));
      put("mouse_sensitivity",std::to_string(v.mouse_sensitivity.load()));
@@ -9389,6 +9453,8 @@ index cf4fbd8..7d80971 100644
      put("camera_distance_scale", fixed(v.camera_distance_scale, 2));
      put("camera_height_scale", fixed(v.camera_height_scale, 2));
      put("model_lod", std::to_string(v.model_lod.load()));
+-    put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
+-                          std::to_string(OutputHeights[v.output_res]));
 +    put("cheat_vials", CheatText(v.cheat_vials));
 +    put("cheat_bullets", CheatText(v.cheat_bullets));
 +    put("cheat_stamina", flag(v.cheat_stamina));
@@ -9398,11 +9464,14 @@ index cf4fbd8..7d80971 100644
 +    put("cheat_echo_multiplier", std::to_string(v.cheat_echo_multiplier.load()));
 +    put("cheat_no_durability", flag(v.cheat_no_durability));
 +    put("cheat_consumables", flag(v.cheat_consumables));
-     put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
-                           std::to_string(OutputHeights[v.output_res]));
++    put("output_res", v.output_res == OutputAuto ? std::string("auto")
++                                                  : std::to_string(OutputWidths[v.output_res]) + "x" +
++                                                        std::to_string(OutputHeights[v.output_res]));
      // Read by run.sh at start.
+     put("live_resolution", v.live_resolution < 0 ? "auto" : flag(v.live_resolution != 0));
+     if (v.menu_x >= 0.0f && v.menu_y >= 0.0f) {
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e8a94..6f7f580 100644
+index c0e8a94..dd05a0a 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -22,7 +22,14 @@ inline bool IsFrameUpscaler(int upscaler) {
@@ -9439,10 +9508,26 @@ index c0e8a94..6f7f580 100644
      {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
      {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
      {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
-@@ -50,6 +59,34 @@ inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5
- inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
- inline constexpr int OutputCount = 10;
+@@ -45,11 +54,46 @@ inline constexpr Effect Effects[] = {
+     {"debug_menu", "Debug menu (requires font files)", "Debug menu (нужны файлы шрифтов)", false},
+ };
+ inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
+-/// Live output resolutions: the upscaler's output and the UI host targets.
+-inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5120,5120};
+-inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160};
+-inline constexpr int OutputCount = 10;
++/// Live output resolutions: the upscaler's output and the UI host targets. The last is the
++/// display's own size (output_res = auto): BB_DISPLAY_SIZE, which run_windows.py reads from
++/// Windows at start, else 1920x1080. Use OutputWidth/OutputHeight, which know it.
++inline constexpr int OutputWidths[] = {1280,1920,2560,3840,2560,3440,3840,3840,5120,5120,7680,0};
++inline constexpr int OutputHeights[] = {720,1080,1440,2160,1080,1440,1600,1080,1440,2160,2160,0};
++inline constexpr int OutputCount = 12;
++inline constexpr int OutputAuto = 11;
  inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
++static_assert(sizeof(OutputWidths) / sizeof(OutputWidths[0]) == OutputCount &&
++              sizeof(OutputHeights) / sizeof(OutputHeights[0]) == OutputCount);
++int OutputWidth(int index);
++int OutputHeight(int index);
 +/// Live cheats (engine/cheats.cpp): cheat_vials / cheat_bullets in bbport.ini are "off",
 +/// "infinite" or an amount kept in the inventory, 1..CheatMaxAmount.
 +inline constexpr int CheatOff = 0, CheatInfinite = -1, CheatMaxAmount = 99;
@@ -9474,7 +9559,7 @@ index c0e8a94..6f7f580 100644
  
  struct Values {
      std::atomic<MenuLanguage> menu_language{MenuLanguage::English};
-@@ -65,6 +102,8 @@ struct Values {
+@@ -65,6 +109,8 @@ struct Values {
      std::atomic<float> reactive_max{0.9f};
      std::atomic<int> debug_view{DebugNone};
      std::atomic<bool> show_fps{false};
@@ -9483,7 +9568,7 @@ index c0e8a94..6f7f580 100644
      /// The settings menu's position (fraction of the screen), -1 until it is moved.
      std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
      // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
-@@ -77,14 +116,39 @@ struct Values {
+@@ -77,14 +123,39 @@ struct Values {
      std::atomic<bool> widescreen{true},pc_controls{true},mouse_camera{true},mouse_menu{true};
      std::atomic<bool> mouse_invert_x{false},mouse_invert_y{false},mouse_auto_rotation{false};
      std::atomic<int> mouse_sensitivity{5};
@@ -9523,7 +9608,7 @@ index c0e8a94..6f7f580 100644
      /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
      /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
      std::atomic<int> live_resolution{0};
-@@ -100,10 +164,12 @@ struct Values {
+@@ -100,10 +171,12 @@ struct Values {
      int startup_model_lod = 0;
      int startup_output_res = OutputDefault;
      int startup_live_resolution = 0;
@@ -9992,10 +10077,10 @@ index c1e5ac1..67c8822 100644
  }
  }
 diff --git a/gpu/shim/engine/option_menu.cpp b/gpu/shim/engine/option_menu.cpp
-index cf652fe..e088e04 100644
+index cf652fe..57293f0 100644
 --- a/gpu/shim/engine/option_menu.cpp
 +++ b/gpu/shim/engine/option_menu.cpp
-@@ -606,8 +606,14 @@ Slider camera[] = {
+@@ -606,15 +606,29 @@ Slider camera[] = {
  bool seeded=false;
  bool camera_page=false,graphics_page=false,input_page=false;
  Slider graphics_sliders[]={{nullptr,117007,0,0.2f,5},{nullptr,117006,1,0.2f,0}};
@@ -10011,10 +10096,12 @@ index cf652fe..e088e04 100644
  StartupToggle enhancements[]={{nullptr,124001},{nullptr,124002},{nullptr,124004}};
  bool enhancements_seeded=false;
  StartupToggle graphics_toggles[]={{nullptr,117001},{nullptr,117000}};
-@@ -615,6 +621,13 @@ StartupToggle effect_toggles[]={{nullptr,117005},{nullptr,117002},{nullptr,11700
+ StartupToggle effect_toggles[]={{nullptr,117005},{nullptr,117002},{nullptr,117003},{nullptr,120001}};
  bool graphics_seeded=false,effects_seeded=false;
  std::int32_t output_resolution=1,last_resolution=1;
- const Choice outputs[]={{0,117010},{1,117012},{2,117013},{3,117015},{4,117040},{5,117041},{6,117042},{7,117043},{8,117044},{9,117045}};
+-const Choice outputs[]={{0,117010},{1,117012},{2,117013},{3,117015},{4,117040},{5,117041},{6,117042},{7,117043},{8,117044},{9,117045}};
++const Choice outputs[]={{0,117010},{1,117012},{2,117013},{3,117015},{4,117040},{5,117041},{6,117042},{7,117043},{8,117044},{9,117045},{10,117046},{11,117047}};
++static_assert(sizeof(outputs)/sizeof(outputs[0])==BbSettings::OutputCount);
 +// What "Defaults" puts a toggle back to: an effect's own default (bbport_settings.h Effects: CA,
 +// DoF, motion blur and the game's AA are off), on for the others (vignette).
 +std::uint8_t DefaultOf(const std::atomic<bool>* setting) {
@@ -10025,7 +10112,7 @@ index cf652fe..e088e04 100644
  template<typename Rows> void SeedSliders(Rows& rows) {
      for (auto& s:rows) s.value=s.last=static_cast<std::uint8_t>(std::clamp(std::lround((s.setting->load()-s.base)/s.step),0l,10l));
  }
-@@ -657,21 +670,32 @@ GUEST_ABI void GraphicsHandler(void* dialog,void* params) {
+@@ -657,21 +671,32 @@ GUEST_ABI void GraphicsHandler(void* dialog,void* params) {
      host_log("pc-options: PCGraphics opened, dialog=%p params=%p",dialog,params);
      alignas(16) std::uint8_t scratch[0x100]{};
      hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
@@ -10062,7 +10149,7 @@ index cf652fe..e088e04 100644
  }
  GUEST_ABI std::int64_t OpenGraphics(void* root,void* params) {
      return open_named(root,params,"PCGraphics",reinterpret_cast<void*>(&GraphicsHandler),4);
-@@ -687,9 +711,19 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
+@@ -687,9 +712,19 @@ GUEST_ABI void* OpenEffectsRow(void* out,void* ctx) {
      GuestFunction f(kOpenerFunctorVTable,reinterpret_cast<void*>(&OpenEffects));
      hle_call_guest<std::int64_t>(guest_fn(kOpenSectionFlow),out,ctx,f.buf);return out;
  }
@@ -10082,7 +10169,7 @@ index cf652fe..e088e04 100644
  GUEST_ABI void ControlsHandler(void* dialog,void*) {
      alignas(16) std::uint8_t scratch[0x100]{};hle_call_guest<std::int64_t>(guest_fn(kScratchInit),&scratch);
      auto& s=BbSettings::Get();sensitivity=last_sensitivity=s.mouse_sensitivity;
-@@ -697,7 +731,9 @@ GUEST_ABI void ControlsHandler(void* dialog,void*) {
+@@ -697,7 +732,9 @@ GUEST_ABI void ControlsHandler(void* dialog,void*) {
      add_toggle_row(dialog,&controls[0].value,118000,1);
      add_slider_row(dialog,&sensitivity,118001,5);
      for(int i=1;i<5;i++)add_toggle_row(dialog,&controls[i].value,controls[i].id,i==3?1:0);
@@ -10093,7 +10180,7 @@ index cf652fe..e088e04 100644
  }
  GUEST_ABI std::int64_t OpenControls(void* root,void* params) {return open_named(root,params,"PCControls",reinterpret_cast<void*>(&ControlsHandler),-1);}
  GUEST_ABI std::int64_t OpenKeys(void* root,void* params) {return open_named(root,params,"PCKeys",reinterpret_cast<void*>(&pc_keys_handler),-2);}
-@@ -712,6 +748,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -712,6 +749,8 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
          { Captions c(110010);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenEffectsRow));
            hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
@@ -10102,7 +10189,7 @@ index cf652fe..e088e04 100644
      }
      if(input_page) {
          {Captions c(110008);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenControlsRow));hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag);}
-@@ -720,7 +758,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
+@@ -720,7 +759,7 @@ GUEST_ABI void* SystemFinalize(void* out,void* builder,void* arg3) {
      if (camera_page) { Captions c(110011);GuestFunction f(kRowFunctorVTable,reinterpret_cast<void*>(&OpenCameraRow));
        hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow),builder,c.buf,f.buf,&flag); }
      hle_call_guest<std::int64_t>(guest_fn(kSystemFinalize),out,builder,arg3);
@@ -10111,7 +10198,7 @@ index cf652fe..e088e04 100644
      return out;
  }
  } // namespace
-@@ -783,7 +821,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -783,7 +822,10 @@ bool Install(std::uint8_t* image,std::size_t size) {
      graphics_sliders[0].setting=&settings.graphics_ao_strength;graphics_sliders[1].setting=&settings.graphics_shadow_scale;
      effect_toggles[0].setting=&settings.effects[2];effect_toggles[1].setting=&settings.effects[1];
      effect_toggles[2].setting=&settings.effects[0];effect_toggles[3].setting=&settings.graphics_vignette;
@@ -10123,7 +10210,7 @@ index cf652fe..e088e04 100644
      enhancements[0].setting=&settings.change_appearance;
      enhancements[1].setting=&settings.rebirth;
      enhancements[2].setting=&settings.camera_controls;
-@@ -797,7 +838,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
+@@ -797,7 +839,7 @@ bool Install(std::uint8_t* image,std::size_t size) {
      std::memcpy(p,&target,8); p+=8; *p++=0x41; *p++=0xff; *p=0xe3;
      const std::int32_t to_pad=pad-(call+5); std::memcpy(image+call+1,&to_pad,4);
      g_installed=true;
@@ -10132,7 +10219,7 @@ index cf652fe..e088e04 100644
      return true;
  }
  bool ClickDecides(std::uint8_t* list, int index) {
-@@ -850,17 +891,30 @@ void Tick() {
+@@ -850,17 +892,30 @@ void Tick() {
          changed=true;
      }
      auto push_sliders=[&](auto& rows,bool active) {
@@ -10169,6 +10256,32 @@ index cf652fe..e088e04 100644
      if (graphics_seeded && output_resolution!=last_resolution) {
          last_resolution=std::clamp(output_resolution,0,BbSettings::OutputCount-1);
          BbSettings::Get().output_res=last_resolution;changed=true;
+diff --git a/gpu/shim/engine/widescreen.cpp b/gpu/shim/engine/widescreen.cpp
+index 62aad48..1041de6 100644
+--- a/gpu/shim/engine/widescreen.cpp
++++ b/gpu/shim/engine/widescreen.cpp
+@@ -87,7 +87,7 @@ void Tick() {
+     if(!installed)return;
+     const auto& settings=BbSettings::Get();
+     const auto index=std::clamp(BbSettings::ResolutionNeedsRestart()?settings.startup_output_res:settings.output_res.load(),0,BbSettings::OutputCount-1);
+-    const float want=settings.widescreen?float(BbSettings::OutputWidths[index])/BbSettings::OutputHeights[index]:original_aspect;
++    const float want=settings.widescreen?float(BbSettings::OutputWidth(index))/BbSettings::OutputHeight(index):original_aspect;
+     static float applied=0;if(want==applied)return;
+     previous_aspect=aspect.load();aspect=want;
+     const float rx=std::max(1.0f,want/original_aspect),ry=std::max(1.0f,original_aspect/want);
+diff --git a/gpu/shim/input/input.cpp b/gpu/shim/input/input.cpp
+index 30fdc4f..31defd1 100644
+--- a/gpu/shim/input/input.cpp
++++ b/gpu/shim/input/input.cpp
+@@ -54,7 +54,7 @@ bool host_mouse_stage_position(float& x,float& y) {
+     // Presenter fits the output; Scaleform fits its native 1920x1080 stage.
+     const auto& s=BbSettings::Get();
+     const int idx=std::clamp(BbSettings::ResolutionNeedsRestart()?s.startup_output_res:s.output_res.load(),0,BbSettings::OutputCount-1);
+-    const float ow=BbSettings::OutputWidths[idx],oh=BbSettings::OutputHeights[idx];
++    const float ow=float(BbSettings::OutputWidth(idx)),oh=float(BbSettings::OutputHeight(idx));
+     const float present=std::min(window_w/ow,window_h/oh);
+     if(!s.widescreen){
+         x=(mouse_x-(window_w-ow*present)/2)/present*1920/ow;
 diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
 index f475c39..aa552ab 100644
 --- a/gpu/shim/window.cpp
@@ -10351,7 +10464,7 @@ index fdbf8c4..6e5d795 100644
 +    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
 diff --git a/scripts/patches.py b/scripts/patches.py
-index da1e52e..d27d290 100644
+index da1e52e..0d07c1b 100644
 --- a/scripts/patches.py
 +++ b/scripts/patches.py
 @@ -10,6 +10,7 @@ import os
@@ -10386,7 +10499,22 @@ index da1e52e..d27d290 100644
          name=on if settings[key]=='1' else off
          if name: names.append(name)
      lod=MODEL_LOD.get(settings.get('model_lod','0'))
-@@ -202,6 +208,77 @@ def compile_patches(xml, names, app_version, segments):
+@@ -115,9 +121,12 @@ def render_size(settings,override=''):
+ 
+ 
+ def output_size(settings):
+-    """Output (UI) size from bbport.ini output_res, e.g. 3840x2160; 1920x1080 by default."""
++    """Output (UI) size from bbport.ini output_res, e.g. 3840x2160; "auto" is the display's own
++    (BB_DISPLAY_SIZE, from run_windows.py); 1920x1080 by default."""
++    value=settings.get('output_res','').lower()
++    if value=='auto': value=os.environ.get('BB_DISPLAY_SIZE','')
+     try:
+-        w,h=(int(v) for v in settings.get('output_res','').lower().split('x'))
++        w,h=(int(v) for v in value.split('x'))
+         if w>0 and h>0: return (w,h)
+     except ValueError:
+         pass
+@@ -202,6 +211,77 @@ def compile_patches(xml, names, app_version, segments):
      return writes
  
  
@@ -10464,7 +10592,7 @@ index da1e52e..d27d290 100644
  # Third-party patch files (shadPS4/GoldHEN XML) in the data directory's patches/ folder.
  BLOODBORNE_IDS={'CUSA00207','CUSA00208','CUSA00900','CUSA01363','CUSA03173','CUSA03023'}
  
-@@ -237,6 +314,26 @@ def external_selection(found, config):
+@@ -237,6 +317,26 @@ def external_selection(found, config):
              if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
  
  
@@ -10491,7 +10619,7 @@ index da1e52e..d27d290 100644
  def compile_external(selected, segments):
      """Writes of the selected external patches; a patch with unsupported lines is skipped whole."""
      writes=[]
-@@ -252,6 +349,9 @@ def compile_external(selected, segments):
+@@ -252,6 +352,9 @@ def compile_external(selected, segments):
          except ValueError as error:
              print(f'Patches: skipped {key}: {error}',file=sys.stderr)
              continue
@@ -10501,7 +10629,7 @@ index da1e52e..d27d290 100644
          writes+=ours
          print(f'Patches: external {key} ({len(ours)} writes)')
      return writes
-@@ -273,7 +373,12 @@ def main():
+@@ -273,7 +376,12 @@ def main():
      p.add_argument('--output-res',default='',help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080)')
      p.add_argument('--print-scaled',action='store_true',
                     help='print "RENDER OUTPUT" (WxH) when bbport.ini selects an output other than 1080p')
@@ -10514,7 +10642,7 @@ index da1e52e..d27d290 100644
      if a.print_scaled:
          sizes=scaled_sizes(read_settings(a.settings))
          if sizes: print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]}')
-@@ -292,7 +397,12 @@ def main():
+@@ -292,7 +400,12 @@ def main():
      if intel_tonemap_fix() and INTEL_TONEMAP not in names:
          names.append(INTEL_TONEMAP)
      validate_patch_requirements(names,a.game_dir)
@@ -10528,7 +10656,7 @@ index da1e52e..d27d290 100644
      writes=compile_patches(a.xml,names,a.app_version,segments)
      size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
      # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
-@@ -302,7 +412,7 @@ def main():
+@@ -302,7 +415,7 @@ def main():
      if size:
          writes+=resolution_writes(a.xml,size,a.app_version,segments,ui)
          if size[0]*size[1]>OUTPUT_SIZE[0]*OUTPUT_SIZE[1]:
@@ -10537,7 +10665,7 @@ index da1e52e..d27d290 100644
              writes+=compile_patches(a.xml,[heap],a.app_version,segments)
              names.append(heap)
          print(f'Patches: scene {size[0]}x{size[1]}; UI {ui[0]}x{ui[1]}')
-@@ -310,6 +420,12 @@ def main():
+@@ -310,6 +423,12 @@ def main():
          # After the built-in ones: an external patch of the same bytes wins.
          writes+=compile_external(external_selection(external_patches(a.patches_dir,a.app_version,a.xml),
                                                      a.patches_config),segments)
@@ -10551,7 +10679,7 @@ index da1e52e..d27d290 100644
      # relocated slots (60/90 FPS++ replace function pointers).
      blob=struct.pack('<8sQQ',b'BBPATCH2',EBOOT_BASE,len(writes))
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..a64f90f 100644
+index ea6daf1..a803876 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
 @@ -10,12 +10,15 @@ The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_
@@ -10570,7 +10698,26 @@ index ea6daf1..a64f90f 100644
  import zlib
  from mods import remove_overlay
  
-@@ -78,6 +81,50 @@ def build():
+@@ -48,6 +51,18 @@ def msys_root():
+     return Path(os.environ.get('BB_MSYS2', r'C:\msys64'))
+ 
+ 
++def display_size():
++    """The primary display's resolution in pixels (output_res = auto), or None."""
++    try:
++        import ctypes
++        user32 = ctypes.windll.user32
++        user32.SetProcessDPIAware()  # physical pixels, not the scaled ones
++        w, h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
++        return (w - w % 2, h - h % 2) if w >= 640 and h >= 360 else None
++    except (AttributeError, OSError):
++        return None
++
++
+ def run(arguments, capture=False, check=True, env=None):
+     result = subprocess.run(
+         [str(a) for a in arguments],
+@@ -78,6 +93,50 @@ def build():
      run([bash, '-lc', 'bash build.sh'], env=env)
  
  
@@ -10621,7 +10768,7 @@ index ea6daf1..a64f90f 100644
  def settings_value(config, key):
      if not config.is_file():
          return None
-@@ -95,6 +142,12 @@ def configure_frame_rate(env):
+@@ -95,6 +154,12 @@ def configure_frame_rate(env):
      legacy uncapped launch cannot saturate the desktop during menus or loading.
      """
      fps = env.get('BB_FPS', '60')
@@ -10634,7 +10781,7 @@ index ea6daf1..a64f90f 100644
      if fps not in ('30', '60', '90'):
          print(f'Unsupported Windows FPS preset {fps!r}; using 60 FPS.', flush=True)
          fps = '60'
-@@ -139,38 +192,36 @@ def main():
+@@ -139,38 +204,43 @@ def main():
                         '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
      overlay = merged if merged.resolve() != original else None
      try:
@@ -10694,10 +10841,17 @@ index ea6daf1..a64f90f 100644
 +                    print(f'Engine: native PC menus disabled: {error}', flush=True)
 +        except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
 +            print(f'Engine: enhancement preparation skipped: {error}', flush=True)
++        # output_res = auto: the display's own size, for the scene size below and the engine.
++        if not os.environ.get('BB_DISPLAY_SIZE'):
++            size = display_size()
++            if size:
++                os.environ['BB_DISPLAY_SIZE'] = f'{size[0]}x{size[1]}'
++                if (settings_value(config, 'output_res') or '').lower() == 'auto':
++                    print(f'Output resolution: the display\'s own, {size[0]}x{size[1]}', flush=True)
          # Sizes chosen below for the previous launch are recomputed after an in-game restart.
          if os.environ.get('BB_AUTO_RENDER_RES') == '1':
              for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
-@@ -192,14 +243,27 @@ def main():
+@@ -192,14 +262,27 @@ def main():
              print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
          elif scaled_output:
              os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
@@ -10727,7 +10881,7 @@ index ea6daf1..a64f90f 100644
          probe = ROOT / os.environ.get('BB_PROBE', out / 'bb-probe.exe')
          command = [probe, out / 'boot-linked.bin', '--content-profile', out / 'content.bin',
                     '--patches', out / 'patches.bin', '--app0', merged,
-@@ -219,7 +283,9 @@ def main():
+@@ -219,7 +302,9 @@ def main():
          except KeyboardInterrupt:
              status = 130
          print(f'bb-probe exited with code {status}', flush=True)
@@ -12417,7 +12571,7 @@ index d51b554..b5f92c3 100644
  }
  
 diff --git a/tools/engine/pc_option_messages.tsv b/tools/engine/pc_option_messages.tsv
-index 2199381..e6e98c7 100644
+index 2199381..9e191f1 100644
 --- a/tools/engine/pc_option_messages.tsv
 +++ b/tools/engine/pc_option_messages.tsv
 @@ -7,7 +7,7 @@
@@ -12458,7 +12612,7 @@ index 2199381..e6e98c7 100644
  121020	PC Camera	
  121000	Camera Distance	How far behind the character the camera sits. 5 is the game's own.
  121001	Camera Height	How high above the character the camera looks. 5 is the game's own.
-@@ -120,9 +126,13 @@
+@@ -120,9 +126,15 @@
  14000336	Undo Rebirth	
  
  118005	Camera Auto Rotation	Allow the camera to turn automatically while using the mouse.
@@ -12478,6 +12632,8 @@ index 2199381..e6e98c7 100644
 +117043	3840x1080 (32:9)
 +117044	5120x1440 (32:9)
 +117045	5120x2160 (21:9)
++117046	7680x2160 (32:9)
++117047	Display (auto)
 diff --git a/docs/hdr.md b/docs/hdr.md
 new file mode 100644
 index 0000000..8db00a1

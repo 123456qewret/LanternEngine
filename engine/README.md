@@ -54,6 +54,7 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Effects at reduced presets: passes at the output size that read a reduced-resolution image through a point sampler read the full-size image instead, which is upscaled with linear filtering (blocky effects and moon edge with DLSS/FSR) | `BB_PROXY_POINT_NATIVE=0`, `BB_SCENE_LINEAR_RESOLVE=0` off |
 | Keyboard and mouse button prompts: the game's 20 key-guide icons and the HUD's buttons drawn as the bound keys when they are uploaded, the game's own icons again with a controller | `button_prompts` (`auto`, `keyboard`, `controller`) |
 | A patch that changes the game's region (Unlock Game Region) is left out while online is on, unless kept: the game has no server for that region | `BB_REGION_PATCH_ONLINE=keep` |
+| Output resolution 7680x2160 (32:9), and `auto`: the display's own size (read from Windows at start), the camera and UI widened to fill it | `output_res`, `BB_DISPLAY_SIZE` |
 
 Parts are adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR),
 [AwesomeObserver/bloodborne_pc](https://github.com/AwesomeObserver/bloodborne_pc),

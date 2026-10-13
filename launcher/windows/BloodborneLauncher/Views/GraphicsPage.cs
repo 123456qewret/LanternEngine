@@ -157,9 +157,7 @@ namespace BloodborneLauncher.Views
         /// <summary>The FSR 4.1.1 model files the chosen output and preset need (fsr4_411\).</summary>
         private static string? Fsr411Problem()
         {
-            var output = Ini.Get("output_res", "1920x1080").Split('x');
-            var w = int.TryParse(output[0], out var a) ? a : 1920;
-            var h = output.Length > 1 && int.TryParse(output[1], out var b) ? b : 1080;
+            var (w, h) = Choices.OutputSize(Ini.Get("output_res", "1920x1080"));
             var model = (w > 1920 || h > 1080 ? "t2160" : "t1080") + (Ini.Get("preset", "4") == "4" ? "_m1" : "_m0");
             var passes = new List<string> { "spd", "prepass", "pass0_post" };
             for (var i = 1; i <= 12; i++)

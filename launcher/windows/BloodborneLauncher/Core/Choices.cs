@@ -40,7 +40,27 @@
             new("5120 × 2160 (21:9)", "5120x2160"),
             new("3840 × 1080 (32:9)", "3840x1080"),
             new("5120 × 1440 (32:9)", "5120x1440"),
+            new("7680 × 2160 (32:9)", "7680x2160"),
+            // Any other display: its own size, the camera and UI widened to fill it.
+            new("Display (auto)", "auto", "Your display's own resolution, whatever its shape: the picture fills the screen"),
         };
+
+        /// <summary>The size an output_res value names; "auto" is the display's own (1920 × 1080
+        /// when it is unknown), as the engine reads it at start (scripts/run_windows.py).</summary>
+        public static (int W, int H) OutputSize(string value)
+        {
+            if (value == "auto")
+            {
+                var hw = Hardware.Detect();
+                return hw.ScreenWidth >= 640 && hw.ScreenHeight >= 360
+                    ? (hw.ScreenWidth & ~1, hw.ScreenHeight & ~1)
+                    : (1920, 1080);
+            }
+            var parts = value.Split('x');
+            return parts.Length == 2 && int.TryParse(parts[0], out var w) && int.TryParse(parts[1], out var h)
+                ? (w, h)
+                : (1920, 1080);
+        }
 
         // Chromatic aberration, depth of field, motion blur and the game's own anti-aliasing start off:
         // the picture is clearer without them, and the upscalers anti-alias (players' advice).

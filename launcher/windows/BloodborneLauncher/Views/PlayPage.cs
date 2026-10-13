@@ -148,7 +148,7 @@ namespace BloodborneLauncher.Views
                 }),
                 backupToggle), out _backupHint));
             Add(Card(SymbolRegular.ArrowImport24, "Import saves",
-                "From shadPS4, another Bloodborne port's folder or a copy. This profile's saves are backed up first",
+                "From shadPS4, another Bloodborne port, or a PS4 save exported decrypted (Apollo Save Tool, Save Wizard). This profile's saves are backed up first",
                 SmallButton("Import…", SymbolRegular.FolderArrowRight24, (_, _) => ImportSaves()), out _));
 
             ComboRow(SymbolRegular.LocalLanguage24, "In-game menu language", "The port's settings menu (Insert or L3 + R3)",
@@ -209,7 +209,8 @@ namespace BloodborneLauncher.Views
         private void RefreshSummary()
         {
             _statUpscaler.Text = Label(Choices.Upscalers, Ini.Get("upscaler"));
-            _statResolution.Text = Ini.Get("output_res").Replace("x", " × ");
+            var (outW, outH) = Choices.OutputSize(Ini.Get("output_res", "1920x1080"));
+            _statResolution.Text = $"{outW} × {outH}";
             _statFps.Text = Label(Choices.FpsModes, GameEnvironment.Fps(S));
             _statVia.Text = $"{Ws.Trophies.Count} / {TrophyTracker.All.Length} · {Ws.Trophies.Completion * 100:0}%";
         }
@@ -326,8 +327,12 @@ namespace BloodborneLauncher.Views
                 if (folder == null) return;
                 if (SaveImport.Find(folder, "chosen folder").FirstOrDefault() is not { } inside)
                 {
-                    Prompt.Tell("Import saves", "No Bloodborne saves in that folder or the folders under it " +
-                        "(a SPRJ0005 folder with userdata files).");
+                    Prompt.Tell("Import saves", SaveImport.HasEncryptedPs4Save(folder)
+                        ? "That is a PS4 save as the console copies it to USB: it is encrypted with that PS4's own keys, " +
+                          "which only the console has, so no PC program can open it.\n\n" +
+                          "Export it decrypted instead: on a jailbroken PS4 with Apollo Save Tool (Copy save game → decrypted, to USB), " +
+                          "or with Save Wizard for PS4. Then import that folder here."
+                        : "No Bloodborne saves in that folder or the folders under it (a SPRJ0005 folder with userdata files).");
                     return;
                 }
                 from = inside.Dir;

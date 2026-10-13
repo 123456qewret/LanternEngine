@@ -19,7 +19,7 @@ The launcher updates itself from the Releases page.
 ## Features
 
 - **Play**: game folder check, player profiles (each with its own saves and trophies), automatic save backups with restore, save import from shadPS4 or another port, session summary.
-- **Display**: resolution, fullscreen, widescreen (21:9, 32:9), native HDR, 30 to 144 FPS or uncapped, in-game menu in 9 languages.
+- **Display**: resolution (or your display's own, any shape), fullscreen, widescreen (21:9, 32:9), native HDR, 30 to 144 FPS or uncapped, in-game menu in 9 languages.
 - **Graphics**: FSR 4, FSR 3, DLSS and DLAA, TAA, sharpening, occlusion culling, picture and camera tuning, best settings for your PC.
 - **Controls**: keyboard and mouse for every action, the game's button prompts shown as your keys, controller remapping, stick options, live controller detection, shareable profiles.
 - **Cheats**: Blood Vials and Quicksilver Bullets (infinite or a set amount), infinite consumables and stamina, stealth, no weapon wear, firearm range, keep echoes on death, echo multiplier. Each can be turned off.
