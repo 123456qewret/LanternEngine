@@ -60,17 +60,18 @@ install into a package folder instead of `LauncherApp/`.
 ## Engine
 
 The engine is developed here. It started from [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc)
-(built on bbport and shadPS4) and has been reworked for Windows since: about 10,000 lines changed or added
-across nearly 100 files.
+(built on bbport and shadPS4) and has been reworked for Windows since: about 19,000 lines changed or added
+across nearly 150 files.
 
 - **Performance**: occlusion culling with real query results, cached texture, sampler and render target lookups,
   the end of each frame handed to the draw thread, render threads first, uncapped FPS. Up to the 120 FPS cap in
   busy areas on a Ryzen 5 5600 with an RTX 5060. Some of these are switches under Graphics › Experimental.
 - **Picture**: native HDR (highlights from the game's own HDR scene), DLSS texture LOD bias, FSR 4 balanced model.
 - **Stability**: fixes for silent crashes (0xC0000005), exit 23 asserts, low memory and display loss; crash
-  reports and dumps; a GPU hang guard; VRAM cleanup.
+  reports and dumps; a GPU hang guard; VRAM cleanup, and game data leaving VRAM on cards that run short (4 GB).
 - **Sound**: the game's audio threads at their PS4 priority on Windows.
-- **Game**: cheats, menu languages, controller support, online with The Hunter's Dream.
+- **Game**: cheats, menu languages, controller support, online with The Hunter's Dream, The Old Hunters on
+  base-game dumps (DLC folder), 120 and 144 FPS from the 90 FPS patch.
 
 The patch against the starting point, every change with its switch, and build steps are in [engine/](engine/).
 
@@ -126,11 +127,14 @@ flowchart LR
     s10["Unlock Game Region with online on:<br/>no server for that region"] --> f10["Left out while online, unless you keep it"]
     s11["Busy frame (a boss intro at high model detail):<br/>a render pool ran out, crash"] --> f11["Render pools four times larger"]
     s12["120 / 144 FPS: the game froze<br/>at the end of Vicar Amelia's intro"] --> f12["The 90 FPS patch,<br/>with its values for that rate"]
-    s13["4 GB cards: VRAM full,<br/>exit 23 or a lost device"] --> f13["Game data unused for a while<br/>leaves VRAM once it is nearly full"]
+    s13["4 GB cards: game data piled up in VRAM,<br/>exit 23 or a lost device"] --> f13["Above 85% of the VRAM budget, data unused<br/>for 30 s leaves VRAM (chart below)"]
+    s14["1440p or 4K output: 10 GB asked at start,<br/>Windows error 1450, crash at launch"] --> f14["10 GB only for a scene above 1080p; the launcher<br/>warns first and closes a game left running"]
+    s15["120 / 144 FPS: the character<br/>fell 1.5 to 1.8 times as fast"] --> f15["Its frame time scaled<br/>like the patch's other values"]
+    s16["Keyboard: W right after closing a menu<br/>was a held d-pad up (HP into bullets)"] --> f16["Keys act as the d-pad only<br/>while a menu has the screen"]
     classDef was fill:#4a2b2b,stroke:#bf6f6f,color:#fff
     classDef now fill:#2b4a2b,stroke:#6fbf6f,color:#fff
-    class s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13 was
-    class f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13 now
+    class s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15,s16 was
+    class f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15,f16 now
 ```
 
 #### Button prompts: keyboard, mouse and Xbox
@@ -140,13 +144,53 @@ flowchart TD
     T["The game uploads a texture"] --> I{"One of the game's button icons?<br/>(its 20 key-guide icons, the HUD's buttons)"}
     I -->|"no"| N["Uploaded unchanged"]
     I -->|"yes"| D{"Keyboard or mouse in use?<br/>(Button Prompts: Automatic)"}
-    D -->|"controller"| X{"Xbox controller in use?<br/>(Controller Icons: Automatic)"}
-    X -->|"no"| O["The game's own icon"]
-    X -->|"yes"| P["The Xbox button bound to it (A, B, X, Y, LB, RT...),<br/>drawn the same way"]
+    D -->|"controller"| X{"A PlayStation controller in use?<br/>(Controller Icons: Automatic)"}
+    X -->|"yes"| O["The game's own icon"]
+    X -->|"no: Xbox, 8BitDo, any other"| P["The Xbox button bound to it (A, B, X, Y, LB, RT...),<br/>drawn the same way"]
     P --> U
     D -->|"keyboard or mouse"| K["A keycap of the bound key, drawn and encoded<br/>in the game's texture format"]
     K --> U["Uploaded in its place;<br/>the game's memory is not changed"]
     S["Device or controller switched, menu opened or closed, key rebound"] -.->|"icons uploaded again"| T
+```
+
+#### Game data in VRAM: why 4 GB cards no longer run out
+
+Every block of the game's memory a draw uses gets a copy in VRAM. Before, those copies stayed for good,
+so VRAM only grew with every area visited.
+
+```mermaid
+flowchart TD
+    L["Once a second: VRAM used against the driver's budget"] -->|"under 85%"| K["Everything stays in VRAM"]
+    L -->|"85% or more"| E["Blocks unused for 30 s leave VRAM<br/>(10 s from 90%)"]
+    E --> H["Kept: blocks with data the GPU wrote (only VRAM has it),<br/>and all of them while shaders read the game's memory directly"]
+    E --> F["Their slots take the next blocks:<br/>VRAM stops growing"]
+    U["A draw needs a block that left"] --> B["Bound again in a free slot, cleared first,<br/>or in new VRAM"]
+    B --> W["The other blocks of its 2 MiB group come back with it, whole:<br/>draws read past their own range"]
+    W --> R["Uploaded from the game's memory, then drawn"]
+    classDef ours fill:#2b4a2b,stroke:#6fbf6f,color:#fff
+    class E,H,F,B,W,R ours
+```
+
+#### Starting the game
+
+```mermaid
+flowchart TD
+    A["Play in the launcher"] --> C{"Game left running?"}
+    B["Bloodborne.exe, from a shortcut or Steam:<br/>the launcher stays out of sight"] --> C
+    C -->|"yes"| C2["Offered to close it first"] --> M
+    C -->|"no"| M{"Room for the<br/>memory pool?"}
+    M -->|"no"| M2["Not enough RAM plus page file:<br/>a warning with the fix, or start anyway"] --> R
+    M -->|"yes"| R["scripts/run_windows.py: every log starts<br/>with the launcher version and engine"]
+    R --> P1["Patches checked against the 1.09 executable:<br/>FPS preset, resolution, render pools,<br/>third-party patches (01.09 or 1.09)"]
+    R --> P2["Memory pool: 9152 MiB for a scene above 1080p<br/>or a patch that enlarges the game's heaps, else 5056 MiB"]
+    P1 --> E["Engine (bb-probe.exe)"]
+    P2 --> E
+    E --> D["Add-ons in the DLC folder reported installed:<br/>The Old Hunters on base-game dumps"]
+    D --> G["The game"]
+    G -->|"ends normally"| X1["Bloodborne.exe: the launcher closes"]
+    G -->|"crashes"| X2["Crash helper: the cause, safe mode,<br/>a report to copy"]
+    classDef ours fill:#2b4a2b,stroke:#6fbf6f,color:#fff
+    class B,C2,M2,P2,D,X1 ours
 ```
 
 ## Credits
