@@ -26,6 +26,13 @@ namespace BloodborneLauncher.Core
         private static string Cause(List<string> tail, long code)
         {
             bool Has(string text) => tail.Any(l => l.Contains(text, StringComparison.OrdinalIgnoreCase));
+            // The game's memory pool could not be created at start: Windows counts all of it against
+            // RAM plus page file (error 1450: not enough left).
+            if (Has("creating the memory pool section") || Has("mapping the memory pool"))
+                return "Windows could not give the game its memory at start (about 10 GB above 1080p, 6 GB at 1080p, " +
+                       "RAM plus page file). Set the page file to System managed size (Windows Settings › System › About › " +
+                       "Advanced system settings › Performance Settings › Advanced › Virtual memory › Change), close other " +
+                       "programs, or turn Live resolution On (Display) or choose 1920 × 1080: both need about 4 GB less.";
             if (Has("Out of order flip IRQ"))
                 return "A frame reached the screen out of order (a timing race in the engine; Precise frame pacing makes it likelier).";
             // The game's memory pool full: the game doesn't check the failed allocation and crashes on

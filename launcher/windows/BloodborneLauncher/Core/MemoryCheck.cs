@@ -5,7 +5,7 @@ namespace BloodborneLauncher.Core
 {
     /// <summary>
     /// Whether Windows has room for the game before it starts. The engine reserves the game's
-    /// whole memory pool at start (about 6 GB; about 10 GB with Live resolution off above 1080p)
+    /// whole memory pool at start (about 6 GB; about 10 GB above 1080p unless Live resolution is On)
     /// and Windows counts it against RAM plus page file, used or not. With the page file off or
     /// fixed small and other programs open, that limit runs out during play and the engine
     /// crashes (0xC0000005). A page file Windows manages grows instead.
@@ -28,7 +28,9 @@ namespace BloodborneLauncher.Core
         {
             var dmem = 5056L;
             var (w, h) = Choices.OutputSize(ini.Get("output_res", "1920x1080"));
-            if (ini.Get("live_resolution") == "0" && (long)w * h > 1920 * 1080)
+            // As scripts/run_windows.py: unless Live resolution is On, above 1080p. Auto is off on
+            // most GPUs (bb-gpu-capabilities), and a missing value counts as off.
+            if (ini.Get("live_resolution") != "1" && (long)w * h > 1920 * 1080)
                 dmem = 9152;
             return dmem + 1024 + 3072;
         }
