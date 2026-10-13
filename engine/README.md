@@ -52,6 +52,8 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Texture refresh: an image the GPU rewrites every frame (the game's copy of the depth buffer) keeps the hashes of its guest memory while nothing wrote that memory, instead of hashing 9 MB a frame on the draw recording thread; large images are hashed on the copy threads | `BB_KEEP_MIP_HASHES=0`, `BB_PARALLEL_IMAGE_HASH=0` off |
 | Texture set memo for shader stages without prepared draw data as well | `BB_LOCAL_TEXTURE_SETS=0` off |
 | Effects at reduced presets: passes at the output size that read a reduced-resolution image through a point sampler read the full-size image instead, which is upscaled with linear filtering (blocky effects and moon edge with DLSS/FSR) | `BB_PROXY_POINT_NATIVE=0`, `BB_SCENE_LINEAR_RESOLVE=0` off |
+| Keyboard and mouse button prompts: the game's 20 key-guide icons and the HUD's buttons drawn as the bound keys when they are uploaded, the game's own icons again with a controller | `button_prompts` (`auto`, `keyboard`, `controller`) |
+| A patch that changes the game's region (Unlock Game Region) is left out while online is on, unless kept: the game has no server for that region | `BB_REGION_PATCH_ONLINE=keep` |
 
 Parts are adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR),
 [AwesomeObserver/bloodborne_pc](https://github.com/AwesomeObserver/bloodborne_pc),
