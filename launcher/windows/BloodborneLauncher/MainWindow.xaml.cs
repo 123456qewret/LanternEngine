@@ -452,6 +452,28 @@ namespace BloodborneLauncher
                     : $"{names}: left out; the output resolution sets the picture.", LogLevel.Step);
             }
 
+            // A game left running in the background (an earlier start that never ended, or another
+            // launcher's) keeps its whole memory pool, and a new start fails (Windows error 1450).
+            var leftovers = System.Diagnostics.Process.GetProcessesByName("bb-probe");
+            if (leftovers.Length > 0)
+            {
+                var choice = Prompt.Choose("The game is still running in the background",
+                    "bb-probe.exe from an earlier start is still running and holds the game's memory, so a new start would fail. " +
+                    "Close it and start?", "Cancel", "Close it and start");
+                if (choice <= 0) return;
+                foreach (var leftover in leftovers)
+                {
+                    try
+                    {
+                        leftover.Kill(entireProcessTree: true);
+                        leftover.WaitForExit(5000);
+                    }
+                    catch { /* already gone */ }
+                    leftover.Dispose();
+                }
+                ws.Log("Closed the game left running in the background.", LogLevel.Step);
+            }
+
             if (!s.Bool("memory_check_off") && MemoryCheck.Problem(ws.Ini) is { } memory)
             {
                 var choice = Prompt.Choose("Windows may run out of memory", memory, "Cancel", "Don't ask again", "Start anyway");
