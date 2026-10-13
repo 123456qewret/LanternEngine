@@ -29,11 +29,11 @@ namespace BloodborneLauncher.Core
             // The game's memory pool could not be created at start: Windows counts all of it against
             // RAM plus page file (error 1450: not enough left).
             if (Has("creating the memory pool section") || Has("mapping the memory pool"))
-                return "Windows could not give the game its memory at start (about 10 GB above 1080p, 6 GB at 1080p, " +
+                return "Windows could not give the game its memory at start (about 10 GB for a scene above 1080p, else 6 GB, " +
                        "RAM plus page file). A game left running in the background holds it: end bb-probe.exe in Task Manager " +
                        "(Details) or restart the PC. Otherwise set the page file to System managed size (Windows Settings › System › About › " +
                        "Advanced system settings › Performance Settings › Advanced › Virtual memory › Change), close other " +
-                       "programs, or turn Live resolution On (Display) or choose 1920 × 1080: both need about 4 GB less.";
+                       "programs, or turn Live resolution On (Display) or choose a lower upscaler preset: a scene up to 1080p needs about 4 GB less.";
             if (Has("Out of order flip IRQ"))
                 return "A frame reached the screen out of order (a timing race in the engine; Precise frame pacing makes it likelier).";
             // The game's memory pool full: the game doesn't check the failed allocation and crashes on

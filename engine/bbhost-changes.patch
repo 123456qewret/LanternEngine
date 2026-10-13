@@ -11451,7 +11451,7 @@ index da1e52e..f21f526 100644
      # relocated slots (60/90 FPS++ replace function pointers).
      blob=struct.pack('<8sQQ',b'BBPATCH2',EBOOT_BASE,len(writes))
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..ef75ba7 100644
+index ea6daf1..ecbdbf3 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
 @@ -10,12 +10,15 @@ The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_
@@ -11470,7 +11470,7 @@ index ea6daf1..ef75ba7 100644
  import zlib
  from mods import remove_overlay
  
-@@ -48,6 +51,18 @@ def msys_root():
+@@ -48,6 +51,24 @@ def msys_root():
      return Path(os.environ.get('BB_MSYS2', r'C:\msys64'))
  
  
@@ -11486,10 +11486,16 @@ index ea6daf1..ef75ba7 100644
 +        return None
 +
 +
++def large_scene(render):
++    """Whether a scene of `render` ('WxH') needs the 9152 MiB pool: above 1920x1080."""
++    w, h = (int(v) for v in render.split('x'))
++    return w * h > 1920 * 1080
++
++
  def run(arguments, capture=False, check=True, env=None):
      result = subprocess.run(
          [str(a) for a in arguments],
-@@ -78,6 +93,50 @@ def build():
+@@ -78,6 +99,50 @@ def build():
      run([bash, '-lc', 'bash build.sh'], env=env)
  
  
@@ -11540,7 +11546,7 @@ index ea6daf1..ef75ba7 100644
  def settings_value(config, key):
      if not config.is_file():
          return None
-@@ -95,6 +154,18 @@ def configure_frame_rate(env):
+@@ -95,6 +160,18 @@ def configure_frame_rate(env):
      legacy uncapped launch cannot saturate the desktop during menus or loading.
      """
      fps = env.get('BB_FPS', '60')
@@ -11559,7 +11565,7 @@ index ea6daf1..ef75ba7 100644
      if fps not in ('30', '60', '90'):
          print(f'Unsupported Windows FPS preset {fps!r}; using 60 FPS.', flush=True)
          fps = '60'
-@@ -139,38 +210,43 @@ def main():
+@@ -139,38 +216,43 @@ def main():
                         '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
      overlay = merged if merged.resolve() != original else None
      try:
@@ -11629,15 +11635,18 @@ index ea6daf1..ef75ba7 100644
          # Sizes chosen below for the previous launch are recomputed after an in-game restart.
          if os.environ.get('BB_AUTO_RENDER_RES') == '1':
              for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
-@@ -192,14 +268,27 @@ def main():
+@@ -192,14 +274,30 @@ def main():
              print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
          elif scaled_output:
              os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
 -            os.environ.setdefault('BB_DMEM_MB', '9152')
 -            print(f'Output {scaled_output}: scene {scaled_render}, direct memory {os.environ["BB_DMEM_MB"]} MiB '
 +            # The extra 4 GiB is for scenes above 1080p only: Windows counts the whole pool
-+            # against RAM plus page file from the start, used or not.
-+            if max(int(w) * int(h) for w, h in (s.split('x') for s in (scaled_render, scaled_output))) > 1920 * 1080:
++            # against RAM plus page file from the start, used or not. The scene, not the output:
++            # the output exists only on the host side (the upscaler fills it), and the game's UI
++            # stays 1920x1080. A 1440p output with a Quality upscaler (a 1706x960 scene) asked for
++            # 10 GB at start and failed on PCs with 16 GB (Windows error 1450).
++            if large_scene(scaled_render):
 +                os.environ.setdefault('BB_DMEM_MB', '9152')
 +            dmem = os.environ.get('BB_DMEM_MB', '5056')
 +            print(f'Output {scaled_output}: scene {scaled_render}, direct memory {dmem} MiB '
@@ -11659,7 +11668,7 @@ index ea6daf1..ef75ba7 100644
          probe = ROOT / os.environ.get('BB_PROBE', out / 'bb-probe.exe')
          command = [probe, out / 'boot-linked.bin', '--content-profile', out / 'content.bin',
                     '--patches', out / 'patches.bin', '--app0', merged,
-@@ -219,7 +308,9 @@ def main():
+@@ -219,7 +317,9 @@ def main():
          except KeyboardInterrupt:
              status = 130
          print(f'bb-probe exited with code {status}', flush=True)
@@ -13573,9 +13582,17 @@ index 593fed4..2087d68 100644
      std::puts("PASS: settings save keeps other keys, menu position");
  }
 diff --git a/tests/test_windows_frame_rate.py b/tests/test_windows_frame_rate.py
-index 49eb6c3..c4355d7 100644
+index 49eb6c3..89c9786 100644
 --- a/tests/test_windows_frame_rate.py
 +++ b/tests/test_windows_frame_rate.py
+@@ -1,6 +1,6 @@
+ from paths import ROOT
+ import unittest
+-from run_windows import configure_frame_rate
++from run_windows import configure_frame_rate, large_scene
+ 
+ 
+ class WindowsFrameRateTests(unittest.TestCase):
 @@ -12,8 +12,8 @@ class WindowsFrameRateTests(unittest.TestCase):
                  self.assertEqual(env['BB_FPS_LIMIT'], fps)
                  self.assertEqual(env['BB_VBLANK_HZ'], '90' if fps == '90' else '60')
@@ -13587,7 +13604,7 @@ index 49eb6c3..c4355d7 100644
              with self.subTest(value=value):
                  env = {'BB_VBLANK_HZ': '0', 'BB_FPS_LIMIT': '0'}
                  if value is not None:
-@@ -23,6 +23,34 @@ class WindowsFrameRateTests(unittest.TestCase):
+@@ -23,6 +23,46 @@ class WindowsFrameRateTests(unittest.TestCase):
                  self.assertEqual(env['BB_FPS_LIMIT'], '60')
                  self.assertEqual(env['BB_VBLANK_HZ'], '60')
  
@@ -13622,6 +13639,18 @@ index 49eb6c3..c4355d7 100644
  
  if __name__ == '__main__':
      unittest.main()
++
++
++class MemoryPoolTests(unittest.TestCase):
++    def test_the_large_pool_follows_the_scene_not_the_output(self):
++        # 1440p Quality (1706x960) and 4K Performance (1916x1078) scenes fit the 5056 MiB pool;
++        # 1440p native or 4K Quality scenes need 9152 MiB.
++        self.assertFalse(large_scene('1706x960'))
++        self.assertFalse(large_scene('1916x1078'))
++        self.assertFalse(large_scene('1920x1080'))
++        self.assertTrue(large_scene('2560x1440'))
++        self.assertTrue(large_scene('2258x1270'))
++        self.assertTrue(large_scene('3840x2160'))
 diff --git a/tools/engine/menu_assets.cpp b/tools/engine/menu_assets.cpp
 index d51b554..a7ece9f 100644
 --- a/tools/engine/menu_assets.cpp
@@ -19220,10 +19249,10 @@ index 0000000..1c7cb8b
 +} // namespace BbEngine::Cheats
 diff --git a/gpu/shim/engine/key_prompts.cpp b/gpu/shim/engine/key_prompts.cpp
 new file mode 100644
-index 0000000..3ae602e
+index 0000000..dfde0a2
 --- /dev/null
 +++ b/gpu/shim/engine/key_prompts.cpp
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,438 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "engine/key_prompts.h"
 +
@@ -19303,14 +19332,17 @@ index 0000000..3ae602e
 +    bool operator==(const State&) const = default;
 +};
 +
-+// Chosen, or (auto) while an Xbox controller is the gamepad in use.
++// Chosen, or (auto) while the gamepad in use is not a PlayStation one: a controller in DirectInput
++// mode (an 8BitDo in D-input) reports as a generic gamepad, not as an Xbox one, and kept the
++// PlayStation icons. No gamepad: the game's own.
 +bool XboxIcons() {
 +    switch (BbSettings::Get().pad_icons.load(std::memory_order_relaxed)) {
 +    case BbSettings::PadIconsXbox: return true;
 +    case BbSettings::PadIconsPlayStation: return false;
 +    default: {
 +        const int type = runtime_pad_type();
-+        return type == SDL_GAMEPAD_TYPE_XBOX360 || type == SDL_GAMEPAD_TYPE_XBOXONE;
++        return type != SDL_GAMEPAD_TYPE_UNKNOWN && type != SDL_GAMEPAD_TYPE_PS3 &&
++               type != SDL_GAMEPAD_TYPE_PS4 && type != SDL_GAMEPAD_TYPE_PS5;
 +    }
 +    }
 +}
@@ -19661,7 +19693,7 @@ index 0000000..3ae602e
 +} // namespace KeyPrompts
 diff --git a/gpu/shim/engine/key_prompts.h b/gpu/shim/engine/key_prompts.h
 new file mode 100644
-index 0000000..ec76593
+index 0000000..0a77be4
 --- /dev/null
 +++ b/gpu/shim/engine/key_prompts.h
 @@ -0,0 +1,36 @@
@@ -19676,7 +19708,7 @@ index 0000000..ec76593
 +// the key, or the mouse button, bound to what that pad button does there - in a menu, Menu
 +// Confirm and Menu Back for the face buttons that confirm and go back. The pad, or
 +// button_prompts = controller, brings the controller's icons back: the game's own (PlayStation),
-+// or with an Xbox controller in use (pad_icons = auto) or pad_icons = xbox, the Xbox button bound
++// or with a controller other than a PlayStation one in use (pad_icons = auto) or pad_icons = xbox, the Xbox button bound
 +// to each PS4 button (src/runtime_pad.c), drawn the same way. Nothing in the game's memory
 +// changes.
 +

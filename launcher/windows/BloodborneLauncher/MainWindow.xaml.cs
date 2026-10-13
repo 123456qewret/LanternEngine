@@ -45,6 +45,12 @@ namespace BloodborneLauncher
                 Left = -32000;
                 Top = -32000;
             }
+            // --play (Bloodborne.exe): the game straight away with the saved settings, the launcher
+            // out of sight meanwhile (minimized, then hidden: its prompts show on their own, in the
+            // middle of the screen, and it has no taskbar button to close the game by).
+            _directPlay = args.Contains("--play");
+            if (_directPlay)
+                WindowState = WindowState.Minimized;
             Sidebar.Visibility = SettingRow.Classic ? Visibility.Visible : Visibility.Collapsed;
             TabStrip.Visibility = SettingRow.Classic ? Visibility.Collapsed : Visibility.Visible;
             if (!SettingRow.Classic)
@@ -90,10 +96,46 @@ namespace BloodborneLauncher
                         : "Bloodborne Launcher ready. Choose the engine folder in Settings.",
                     Paths.IsPortDir(Paths.PortDir) ? LogLevel.Good : LogLevel.Warn);
                 // Once: the settings that suit this PC, shown before anything changes.
-                if (!ws.Settings.Bool("hardware_offered") && Prompt.SnapshotPath == null && Paths.IsPortDir(Paths.PortDir))
+                if (_directPlay)
+                    _ = Dispatcher.BeginInvoke(async () => await PlayDirectAsync(), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                else if (!ws.Settings.Bool("hardware_offered") && Prompt.SnapshotPath == null && Paths.IsPortDir(Paths.PortDir))
                     _ = Dispatcher.BeginInvoke(() => OfferBestSettings(firstRun: true), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             };
             Closing += OnClosing;
+        }
+
+        private bool _directPlay, _directCrashed;
+
+        /// <summary>--play: starts the game; the launcher closes when it ends normally, and opens when
+        /// the start did not happen or the game crashed (the crash dialog first).</summary>
+        private async Task PlayDirectAsync()
+        {
+            var ws = Workspace.Current;
+            Hide();
+            await PlayOrStopAsync();
+            if (!ws.Game.Running)
+            {
+                _directPlay = false;
+                ShowLauncher();
+                return;
+            }
+            ws.GameCrashed += (_, _) => _directCrashed = true;
+            ws.GameStateChanged += () =>
+            {
+                if (!_directPlay || ws.Game.Running) return;
+                _directPlay = false;
+                if (_directCrashed)
+                    ShowLauncher();
+                else
+                    Close();
+            };
+        }
+
+        private void ShowLauncher()
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
         }
 
         /// <summary>Shows what would change to suit this PC, and applies it on Apply.</summary>
