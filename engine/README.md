@@ -23,7 +23,7 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | End of each submission handed to the draw recording thread instead of draining it | `BB_SUBMIT_END_TASKS=0` off |
 | Draws whose shader is still compiling are skipped for a moment instead of freezing the game; pipelines bound once compiled | `BB_SKIP_UNCOMPILED=0`, `BB_LATE_PIPELINE_BIND=0`, `BB_PIPELINE_TAKE=0` off |
 | Game threads no longer wait behind texture work on write faults | `BB_FAULT_SKIP_TEXTURES=0`, `BB_DRAIN_SLEEP=0` off |
-| Write protection after uploads applied by a thread of its own (bb:Protect) and by the copy that reads the pages, instead of on the draw recording thread | `BB_DEFER_PROTECT=0` off |
+| Write protection after uploads applied by a thread of its own (bb:Protect) and by the copy that reads the pages, instead of on the draw recording thread; off by default since 0.9.24 (a write in its window could leave a texture half-written) | `BB_DEFER_PROTECT=1` on |
 | WriteData and DMA wait only for the fences the command processor would have written before them, not for every pending one | `BB_FENCE_ORDER=all` off |
 | DMA waits only when the DMA really writes guest memory on the CPU; spin waits for host copies instead of yield loops | `BB_DMA_WAITS=all`, `BB_HOST_WAIT_SPIN_US=0` off |
 | Lookahead thread (bb:DrawAhead) that prefetches the cache lines of the next draws for the draw recording thread; on with 8 or more hardware threads | `BB_DRAWREC_WORKERS=0` off, `=1` on, `BB_DRAWREC_LOOKAHEAD` packets ahead |
