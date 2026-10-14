@@ -24225,7 +24225,7 @@ index fdbf8c4..d806a53 100644
 +    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
      return destination
 diff --git a/scripts/patches.py b/scripts/patches.py
-index da1e52e..eaeb424 100644
+index da1e52e..eb66829 100644
 --- a/scripts/patches.py
 +++ b/scripts/patches.py
 @@ -10,6 +10,7 @@ import os
@@ -24441,7 +24441,7 @@ index da1e52e..eaeb424 100644
  
  
  def external_patches(directory, app_version='01.09', exclude=Path(__file__).resolve().parent.parent/'patches/Bloodborne.xml'):
-@@ -221,7 +379,7 @@ def external_patches(directory, app_version='01.09', exclude=Path(__file__).reso
+@@ -221,11 +379,35 @@ def external_patches(directory, app_version='01.09', exclude=Path(__file__).reso
          ids={e.text.strip() for e in root.iter('ID') if e.text}
          if ids and not ids&BLOODBORNE_IDS: continue
          for meta in root.iter('Metadata'):
@@ -24450,7 +24450,35 @@ index da1e52e..eaeb424 100644
                  found.append((f'{path.name}/{meta.get("Name")}',path,meta))
      return found
  
-@@ -237,8 +395,43 @@ def external_selection(found, config):
+ 
++# Built-in patches (patches/Bloodborne.xml) the port already sets from its own settings (frame
++# rate, effects, model detail, output resolution, heaps) or no longer needs (the Intel SFX
++# workaround: link_modules.py protects the red zone): not offered as switches, never applied
++# from patches.json. The launcher hides the same ones (Core/Mods.cs ManagedBuiltIn).
++def managed_builtin(name):
++    return (name in {n for names in FPS_PRESETS.values() for n in names} or name in (SCALED_BASE, '30 FPS++',
++            '60FPS (no deltatime)', INTEL_TONEMAP, HEAP_PATCH, 'Intel 12th Gen+ SFX workaround') or
++            name in {n for pair in EFFECTS.values() for n in pair if n} or name in MODEL_LOD.values() or
++            name.startswith('Resolution Patch'))
++
++
++def builtin_selection(xml, config):
++    """The built-in patches switched on in the launcher's Mods page: patches.json keys
++    "Bloodborne.xml/<name>" in "enabled" (built-in ones start off, whatever the file says)."""
++    try:
++        enabled=json.loads(Path(config).read_text()).get('enabled',[]) if config and Path(config).is_file() else []
++    except (OSError, ValueError):
++        return []
++    prefix=Path(xml).name+'/'
++    known={meta.get('Name') for meta in ET.parse(xml).getroot().iter('Metadata')}
++    return [k[len(prefix):] for k in enabled if k.startswith(prefix) and k[len(prefix):] in known
++            and not managed_builtin(k[len(prefix):])]
++
++
+ def external_selection(found, config):
+     """Selected external patches: patches.json {"enabled": [...], "disabled": [...]} overrides
+     each file's isEnabled."""
+@@ -237,8 +419,43 @@ def external_selection(found, config):
              if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
  
  
@@ -24496,7 +24524,7 @@ index da1e52e..eaeb424 100644
      writes=[]
      for key,_,meta in selected:
          try:
-@@ -252,6 +445,14 @@ def compile_external(selected, segments):
+@@ -252,6 +469,14 @@ def compile_external(selected, segments):
          except ValueError as error:
              print(f'Patches: skipped {key}: {error}',file=sys.stderr)
              continue
@@ -24511,7 +24539,7 @@ index da1e52e..eaeb424 100644
          writes+=ours
          print(f'Patches: external {key} ({len(ours)} writes)')
      return writes
-@@ -262,7 +463,7 @@ def main():
+@@ -262,7 +487,7 @@ def main():
      p.add_argument('--patches-dir',type=Path,help='third-party patch XML files (shadPS4 format)')
      p.add_argument('--patches-config',type=Path,help='patches.json: enabled/disabled external patches')
      p.add_argument('--xml',type=Path,default=Path(__file__).resolve().parent.parent/'patches/Bloodborne.xml')
@@ -24520,7 +24548,7 @@ index da1e52e..eaeb424 100644
      p.add_argument('--extra',default='',help='additional patch names, separated by ";"')
      p.add_argument('--app-version',default='01.09')
      p.add_argument('--out',type=Path,default=Path(__file__).resolve().parent.parent/'out')
-@@ -273,7 +474,12 @@ def main():
+@@ -273,7 +498,12 @@ def main():
      p.add_argument('--output-res',default='',help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080)')
      p.add_argument('--print-scaled',action='store_true',
                     help='print "RENDER OUTPUT" (WxH) when bbport.ini selects an output other than 1080p')
@@ -24533,7 +24561,7 @@ index da1e52e..eaeb424 100644
      if a.print_scaled:
          sizes=scaled_sizes(read_settings(a.settings))
          if sizes: print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]}')
-@@ -287,13 +493,26 @@ def main():
+@@ -287,13 +517,27 @@ def main():
          size=render_size(settings)
          if size: print(f'{size[0]}x{size[1]}')
          return
@@ -24541,6 +24569,7 @@ index da1e52e..eaeb424 100644
 +    preset=FPS_PRESETS.get(a.fps) or [SCALED_BASE,'Sprint Fix (High FPS)']
 +    names=preset+[n.strip() for n in a.extra.split(';') if n.strip()]
      names+=[n for n in effect_patches(read_settings(a.settings)) if n not in names]
++    names+=[n for n in builtin_selection(a.xml,a.patches_config) if n not in names]
      if intel_tonemap_fix() and INTEL_TONEMAP not in names:
          names.append(INTEL_TONEMAP)
      validate_patch_requirements(names,a.game_dir)
@@ -24562,7 +24591,7 @@ index da1e52e..eaeb424 100644
      size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
      # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
      # it into the output-size image with a viewport scaled by output / 1920
-@@ -302,14 +521,24 @@ def main():
+@@ -302,14 +546,24 @@ def main():
      if size:
          writes+=resolution_writes(a.xml,size,a.app_version,segments,ui)
          if size[0]*size[1]>OUTPUT_SIZE[0]*OUTPUT_SIZE[1]:
@@ -27494,7 +27523,7 @@ index bf0d998..f34e29c 100644
          self.assertEqual(http_base('https://server.example:34443/api/'),'https://server.example:34443/api')
          for url in ('http://server.example?x=1','http://server.example#x','http://server.example\n'):
 diff --git a/tests/test_patches.py b/tests/test_patches.py
-index b65009f..e60c0cb 100644
+index b65009f..71f71f9 100644
 --- a/tests/test_patches.py
 +++ b/tests/test_patches.py
 @@ -1,4 +1,5 @@
@@ -27548,7 +27577,7 @@ index b65009f..e60c0cb 100644
  
  class IntelTonemapTests(unittest.TestCase):
      def cpuinfo(self, vendor):
-@@ -185,5 +199,153 @@ class IntelTonemapTests(unittest.TestCase):
+@@ -185,5 +199,169 @@ class IntelTonemapTests(unittest.TestCase):
          self.assertIn(patches.INTEL_TONEMAP, names)
  
  
@@ -27698,6 +27727,22 @@ index b65009f..e60c0cb 100644
 +            self.assertTrue(self.run_patches(directory, True))
 +        with tempfile.TemporaryDirectory() as directory:
 +            self.assertFalse(self.run_patches(directory, False))
++
++
++class BuiltInSelectionTests(unittest.TestCase):
++    def test_switched_on_builtins_apply_and_managed_ones_never(self):
++        xml = Path(patches.__file__).resolve().parent.parent / 'patches/Bloodborne.xml'
++        with tempfile.TemporaryDirectory() as directory:
++            config = Path(directory) / 'patches.json'
++            config.write_text(json.dumps({'enabled': ['Bloodborne.xml/No Rally Decay', 'Bloodborne.xml/60 FPS++',
++                                                      'Bloodborne.xml/Disable DoF', 'Bloodborne.xml/Not a patch',
++                                                      'other.xml/No Rally Decay'],
++                                          'disabled': ['Bloodborne.xml/Increased camera distance']}))
++            self.assertEqual(patches.builtin_selection(xml, config), ['No Rally Decay'])
++            self.assertEqual(patches.builtin_selection(xml, None), [])
++        self.assertTrue(patches.managed_builtin('Resolution Patch 2560x1080 (21:9)'))
++        self.assertTrue(patches.managed_builtin('Intel 12th Gen+ SFX workaround'))
++        self.assertFalse(patches.managed_builtin('Unlock Game Region'))
 +
 +
  if __name__ == '__main__':

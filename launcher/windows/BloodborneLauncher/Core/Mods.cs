@@ -195,6 +195,20 @@ namespace BloodborneLauncher.Core
                    major == 1 && minor == 9;
         }
 
+        /// <summary>Built-in patches the port sets from its own settings or no longer needs: not
+        /// offered (scripts/patches.py managed_builtin, the same list).</summary>
+        public static bool ManagedBuiltIn(string name) =>
+            name.Contains("FPS++", StringComparison.Ordinal) || name.StartsWith("Resolution Patch", StringComparison.Ordinal) ||
+            name.StartsWith("Model LOD", StringComparison.Ordinal) || ManagedNames.Contains(name);
+
+        private static readonly HashSet<string> ManagedNames = new(StringComparer.Ordinal)
+        {
+            "Sprint Fix (High FPS)", "60FPS (no deltatime)", "Intel Black Tonemap Fix", "Increased Graphics Heap Sizes",
+            "Intel 12th Gen+ SFX workaround", "Disable Chromatic Aberration", "Disable DoF", "Disable Motion Blur (perf increase)",
+            "Disable SSAO", "Disable AA", "Disable Dynamic Light Shadows (perf increase)", "Enable Screen Space Reflections (READ NOTE)",
+            "Skip Intro", "Restore Debug Camera", "Restore Debug Menu (READ NOTES)",
+        };
+
         public static List<Patch> Discover(string directory)
         {
             var found = new List<Patch>();
@@ -203,10 +217,13 @@ namespace BloodborneLauncher.Core
 
             var builtIn = Path.GetFullPath(Path.Combine(Paths.PortDir, "patches", "Bloodborne.xml"));
             var footprint = ResolutionFootprint();
-            foreach (var path in Directory.GetFiles(directory, "*.xml").OrderBy(p => p, StringComparer.Ordinal))
+            // The built-in file first (it lives in the package's patches folder; updates replace it):
+            // its optional patches, off until switched on here.
+            var files = Directory.GetFiles(directory, "*.xml").Where(p => !string.Equals(Path.GetFullPath(p), builtIn, StringComparison.OrdinalIgnoreCase));
+            if (File.Exists(builtIn)) files = files.Prepend(builtIn);
+            foreach (var path in files.Distinct().ToList())
             {
-                if (string.Equals(Path.GetFullPath(path), builtIn, StringComparison.OrdinalIgnoreCase))
-                    continue;
+                var isBuiltIn = string.Equals(Path.GetFullPath(path), builtIn, StringComparison.OrdinalIgnoreCase);
                 XElement root;
                 try
                 {
@@ -227,11 +244,13 @@ namespace BloodborneLauncher.Core
                         ((string?)meta.Attribute("AppElf") ?? "eboot.bin") != "eboot.bin")
                         continue;
                     var name = (string?)meta.Attribute("Name") ?? "";
+                    if (isBuiltIn && ManagedBuiltIn(name))
+                        continue;
                     var file = Path.GetFileName(path);
                     found.Add(new Patch($"{file}/{name}", name.Length > 0 ? name : $"{file}/{name}", file,
                         (string?)meta.Attribute("Author") ?? "",
                         ((string?)meta.Attribute("Note") ?? "").Replace("\\n", "\n"),
-                        string.Equals((string?)meta.Attribute("isEnabled"), "true", StringComparison.OrdinalIgnoreCase),
+                        !isBuiltIn && string.Equals((string?)meta.Attribute("isEnabled"), "true", StringComparison.OrdinalIgnoreCase),
                         meta.Descendants("Line").Any(WritesRegion),
                         meta.Descendants("Line").Select(Range).Any(r => r is { } w &&
                             footprint.Any(f => f.Start < w.End && w.Start < f.End))));

@@ -53,6 +53,7 @@ at tag `v0.4.0-darkizuku-preview.1`.
 | Online: a network drop of the shadNet connection keeps the game signed in for 90 s while it reconnects (it returned to the title menu) | |
 | Online co-op on The Hunter's Dream with bbhost players: the launcher starts bbbridge (MaskZeus, GPL-3.0-or-later, built unmodified, in `bbbridge\`) with the game and points the game's shadNet and server traffic at it; Discord sign-in on the Online page, account in `network\bbbridge\` | `online_pool=huntersdream` |
 | Intel 12th gen and later: the game's stores that keep values just below the stack pointer run 128 bytes lower, so Windows' exception frames no longer overwrite them (the crash when hit); 607 sites, skipped where the bytes differ (d4rksp4rt4n, Supermedo/bloodborne_pc #2, `patches/redzone.json`) | |
+| Built-in patches (Bloodborne.xml) can be switched on in the launcher's Mods page again, off by default; the ones the port sets from its own settings are not offered | `patches.json` |
 | eboot.bin as a plain decrypted ELF is accepted as well as the PS4 SELF | |
 | Quit game button in the in-game menu (Insert or L3+R3), pressed twice: the same clean exit as closing the window | |
 | Online co-op: shadNet server framing for signaling, UPnP port mapping (Supermedo 004d2c37), P2P port 3658 by default, play logs to the game server | `SHADPS4_P2P_PORT` |
