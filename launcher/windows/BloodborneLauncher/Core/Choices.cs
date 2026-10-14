@@ -181,6 +181,13 @@
             new("Exact (sRGB)", "0"), new("In between", "0.5"), new("Vivid (default)", "1"),
         };
 
+        public static readonly Choice[] CoopPools =
+        {
+            new("The Hunter's Dream (with bbhost players)", "huntersdream",
+                "Sign in with Discord below; bbbridge (by MaskZeus) starts with the game"),
+            new("shadNet server", "shadnet", "A shadNet account on the server below"),
+        };
+
         public static readonly Choice[] SignTimeout =
         {
             new("30 seconds (default)", "30"), new("60 seconds", "60"), new("The game's own (180 seconds)", "0"),

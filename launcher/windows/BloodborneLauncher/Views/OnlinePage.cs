@@ -23,9 +23,9 @@ namespace BloodborneLauncher.Views
         private const string ShadnetSignUp = "https://shadnet.shadps4.net";
 
         public OnlinePage() : base("Online",
-            "1. Make a shadNet account (button below). 2. Turn on Play online. 3. Enter that account's name and password. " +
-            "4. In the game, choose online at the title screen: The Hunter's Dream's welcome message means you are online. " +
-            "Everyone needs game version 1.09 and the same servers.")
+            "1. Turn on Play online. 2. Choose a co-op pool: The Hunter's Dream (sign in with Discord, play with bbhost players) " +
+            "or a shadNet server (its account below). 3. In the game, choose online at the title screen: The Hunter's Dream's " +
+            "welcome message means you are online. Everyone needs game version 1.09.")
         {
             // Earlier versions defaulted the game server to the shadNet Web API, which has none.
             if (Ini.Get("online_game_api").Length > 0 && Online.GameServer(Ini.Get("online_game_api")) == LauncherSettings.OnlineCommunity)
@@ -43,6 +43,14 @@ namespace BloodborneLauncher.Views
                         Ini.Set("online_port", "31313");
                     }
                 });
+
+            Group("Co-op pool");
+            ComboRow(SymbolRegular.PeopleTeam24, "Play with", null, Choices.CoopPools,
+                () => Ini.Get("online_pool", "shadnet") == "huntersdream" ? "huntersdream" : "shadnet",
+                v => Ini.Set("online_pool", v));
+            _thdButton = SmallButton("Sign in with Discord", SymbolRegular.Person24, async (_, _) => await SignInAsync());
+            Add(Card(SymbolRegular.PersonAccounts24, "The Hunter's Dream account", null, _thdButton, out _thdHint));
+            ShowAccount();
 
             Group("Game server (messages, bloodstains, ghosts)");
             TextRow(SymbolRegular.Globe24, "Game server", "Empty: The Hunter's Dream. Only the name is needed; the game picks the port",
@@ -90,6 +98,60 @@ namespace BloodborneLauncher.Views
             _test = SmallButton("Test", SymbolRegular.PlayCircle24, async (_, _) => await TestAsync());
             Add(Card(SymbolRegular.Pulse24, "Test the connection", "Checks the game server, the co-op server and its Web API", _test, out _));
             Body.Children.Add(_results);
+        }
+
+        private readonly Button _thdButton;
+        private readonly System.Windows.Controls.TextBlock _thdHint;
+        private CancellationTokenSource? _signIn;
+
+        private void ShowAccount()
+        {
+            var accounts = HuntersDream.Accounts();
+            var name = accounts.Contains(Ini.Get("online_thd_account")) ? Ini.Get("online_thd_account") : accounts.FirstOrDefault();
+            SetHint(_thdHint, name is null
+                ? "Not signed in. Your Discord account becomes your online name; no password is stored"
+                : $"Signed in as {name}");
+        }
+
+        /// <summary>bbbridge's Discord sign-in: the code goes to the clipboard and the page opens;
+        /// pressing the button again while it waits cancels.</summary>
+        private async Task SignInAsync()
+        {
+            if (_signIn is { } running)
+            {
+                running.Cancel();
+                return;
+            }
+            _signIn = new CancellationTokenSource();
+            _thdButton.Content = "Cancel";
+            try
+            {
+                var name = await HuntersDream.SignInAsync((page, code) => Dispatcher.Invoke(() =>
+                {
+                    try { Clipboard.SetText(code); } catch (Exception) { }
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(page) { UseShellExecute = true });
+                    SetHint(_thdHint, $"Enter the code {code} on the page that opened (it is on the clipboard), then approve");
+                }), _signIn.Token);
+                Ini.Set("online_thd_account", name);
+                Ini.Set("online_pool", "huntersdream");
+                Ws.Log($"The Hunter's Dream: signed in as {name}", LogLevel.Good);
+                ShowAccount();
+            }
+            catch (OperationCanceledException)
+            {
+                ShowAccount();
+            }
+            catch (Exception e)
+            {
+                ShowAccount();
+                Prompt.Tell("Sign-in failed", e.Message);
+            }
+            finally
+            {
+                _signIn.Dispose();
+                _signIn = null;
+                _thdButton.Content = "Sign in with Discord";
+            }
         }
 
         private void IniText(SymbolRegular icon, string title, string? hint, string placeholder, string key, double width = 300) =>

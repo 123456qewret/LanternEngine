@@ -15350,7 +15350,7 @@ index 0000000..693ca50
 +
 +} // namespace BbSettings
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 83e5538..9d7e877 100644
+index 83e5538..9fbf7a9 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -12,12 +12,15 @@
@@ -15715,7 +15715,7 @@ index 83e5538..9d7e877 100644
      for (int e = 0; e < BbSettings::EffectCount; ++e) {
          restart |= s.effects[e] != s.startup_effects[e];
      }
-@@ -499,8 +759,93 @@ void Menu() {
+@@ -499,13 +759,114 @@ void Menu() {
      Slider("Camera distance scale", s.camera_distance_scale, 0.5f, 1.5f);
      Slider("Camera height scale", s.camera_height_scale, 0.5f, 1.5f);
  
@@ -15809,7 +15809,28 @@ index 83e5538..9d7e877 100644
  
      ImGui::Spacing();
      if (ImGui::Button(BbSettings::MenuText("Close", "Закрыть"))) {
-@@ -516,6 +861,24 @@ void Menu() {
+         keep_open = false;
+     }
++    // Quit (issue #21): the same clean exit as closing the window, so a controller player need not
++    // force-close the game. Asks once more before quitting; the game's own save is untouched.
++    static bool quit_armed = false;
++    ImGui::SameLine();
++    if (ImGui::Button(quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз")
++                                 : BbSettings::MenuText("Quit game", "Выйти из игры"))) {
++        if (quit_armed) {
++            SDL_Event quit{};
++            quit.type = SDL_EVENT_QUIT;
++            SDL_PushEvent(&quit);
++        }
++        quit_armed = !quit_armed;
++    }
++    if (quit_armed && !ImGui::IsItemHovered() && !ImGui::IsItemFocused()) {
++        quit_armed = false;
++    }
+     ImGui::SameLine();
+     ImGui::TextDisabled("%s", BbSettings::MenuText("Settings are saved to bbport.ini",
+                                              "Настройки сохраняются в bbport.ini"));
+@@ -516,6 +877,24 @@ void Menu() {
  }
  
  void FpsCounter() {
@@ -15834,7 +15855,7 @@ index 83e5538..9d7e877 100644
      const ImGuiViewport* viewport = ImGui::GetMainViewport();
      const float pad = 12.0f * base_scale;
      ImGui::SetNextWindowPos(
-@@ -526,9 +889,7 @@ void FpsCounter() {
+@@ -526,9 +905,7 @@ void FpsCounter() {
                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                       ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                       ImGuiWindowFlags_NoFocusOnAppearing);
@@ -15845,7 +15866,7 @@ index 83e5538..9d7e877 100644
      ImGui::End();
  }
  
-@@ -587,6 +948,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -587,6 +964,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      style.GrabRounding = 4.0f;
      style.Colors[ImGuiCol_WindowBg].w = 0.92f;
  
@@ -23928,7 +23949,7 @@ index d6818eb..ceca08e 100644
          dvdroot = child(base, 'dvdroot_ps4')
          if dvdroot.is_dir():
 diff --git a/scripts/online.py b/scripts/online.py
-index fdbf8c4..6e5d795 100644
+index fdbf8c4..d806a53 100644
 --- a/scripts/online.py
 +++ b/scripts/online.py
 @@ -6,8 +6,22 @@ from pathlib import Path
@@ -23975,7 +23996,89 @@ index fdbf8c4..6e5d795 100644
  def http_base(text):
      if not text or any(ord(c) < 32 for c in text):
          raise ValueError('Online requires an explicit WebAPI / game API URL')
-@@ -41,8 +68,8 @@ def configure_online(settings, data, env):
+@@ -29,20 +56,90 @@ def http_base(text):
+         raise ValueError('Invalid online API port')
+     return text.rstrip('/')
+ 
++# The Hunter's Dream co-op pool (online_pool=huntersdream), with bbhost's players: bbbridge
++# (MaskZeus, GPL-3.0-or-later, bbbridge/ in the package) stands in for the shadNet server on this PC
++# and talks to The Hunter's Dream the way bbhost does. Its account (Discord sign-in) and settings
++# live in network/bbbridge/, which updates keep.
++BRIDGE_HOST = '127.0.0.1'
++BRIDGE_PORT = 31313
++BRIDGE_WEBAPI = f'http://{BRIDGE_HOST}:31315'
++# The game's own server traffic, through the bridge's proxies (bbbridge src/setup.cpp).
++BRIDGE_OVERRIDES = {
++    GAME_STATUS_ORIGIN: f'http://{BRIDGE_HOST}:31316',
++    'https://thehuntersdream.com:20443': f'http://{BRIDGE_HOST}:31316',
++    'https://thehuntersdream.com:18671': f'http://{BRIDGE_HOST}:31317',
++    'http://thehuntersdream.com:18671': f'http://{BRIDGE_HOST}:31317',
++    'https://bb-playlog-test.s3.amazonaws.com:443': f'http://{BRIDGE_HOST}:31317',
++    'https://bb-playlog-prod.s3.amazonaws.com:443': f'http://{BRIDGE_HOST}:31317',
++    'https://thehuntersdream.com:18671/summon_messenger': BRIDGE_WEBAPI,
++    'http://thehuntersdream.com:18671/summon_messenger': BRIDGE_WEBAPI,
++}
++
++def bridge_folder(data):
++    """network/bbbridge with bbbridge's settings file pointing at its account file there.
++    Returns (folder, settings file)."""
++    folder = Path(data) / 'network' / 'bbbridge'
++    folder.mkdir(parents=True, exist_ok=True)
++    config = folder / 'bbbridge_config.json'
++    wanted = {'state_file': str((folder / 'bbbridge_state.json').resolve())}
++    try:
++        current = json.loads(config.read_text(encoding='utf-8'))
++    except (OSError, ValueError):
++        current = {}
++    if not isinstance(current, dict):
++        current = {}
++    if any(current.get(k) != v for k, v in wanted.items()):
++        config.write_text(json.dumps({**current, **wanted}, indent=2) + '\n', encoding='utf-8')
++    return folder, config
++
++def bridge_accounts(data):
++    """The Hunter's Dream accounts signed in on this PC (bbbridge's account file)."""
++    try:
++        state = json.loads((Path(data) / 'network/bbbridge/bbbridge_state.json').read_text(encoding='utf-8'))
++        return list(state.get('accounts', {}))
++    except (OSError, ValueError, AttributeError):
++        return []
++
++def configure_hunters_dream(settings, data, env):
++    accounts = bridge_accounts(data)
++    if not accounts:
++        raise ValueError("The Hunter's Dream: sign in with Discord on the launcher's Online page first")
++    wanted = settings.get('online_thd_account', '')
++    destination = Path(data) / 'network/host_overrides.json'
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    temporary = destination.with_suffix('.json.tmp')
++    temporary.write_text(json.dumps(BRIDGE_OVERRIDES, indent=2), encoding='utf-8')
++    os.replace(temporary, destination)
++    env.update(BB_ONLINE='1', BB_BRIDGE='1', BB_SHADNET_SERVER=f'{BRIDGE_HOST}:{BRIDGE_PORT}',
++               BB_SHADNET_WEBAPI=BRIDGE_WEBAPI,
++               BB_SHADNET_NPID=wanted if wanted in accounts else accounts[0],
++               # The game signs in with a password; the bridge never reads it.
++               BB_SHADNET_PASSWORD='bbbridge',
++               BB_UPNP='1' if settings.get('online_upnp') == '1' else '0',
++               SHADPS4_HTTP_HOST_OVERRIDES_JSON=str(destination.resolve()),
++               # The bridge sends the other players' traffic to this port: no fallback to another.
++               SHADPS4_P2P_PORT=str(DEFAULT_P2P_PORT), SHADPS4_P2P_PORT_DEFAULT='0')
++    timeout = settings.get('online_sign_timeout', '').strip()
++    env['BB_SIGN_TIMEOUT'] = str(min(max(int(timeout), 0), 600)) if timeout.isdigit() else str(DEFAULT_SIGN_TIMEOUT)
++    return destination
++
+ def configure_online(settings, data, env):
++    env.pop('BB_BRIDGE', None)
+     if settings.get('online_enabled') != '1' or settings.get('online_connected', '1') != '1':
+         for key in ONLINE_ENV:
+             env.pop(key, None)
+         env['BB_ONLINE'] = '0'
+         return None
++    if settings.get('online_pool') == 'huntersdream':
++        return configure_hunters_dream(settings, data, env)
+     host = settings.get('online_host', '').strip().strip('[]')
+     if not host or any(c.isspace() or ord(c) < 32 for c in host) or any(c in host for c in '/@?#:'):
+         raise ValueError('Enter a shadNet server before enabling online')
      port = int(settings.get('online_port', ''))
      if not 1 <= port <= 65535:
          raise ValueError('shadNet TCP port must be between 1 and 65535')
@@ -23986,7 +24089,7 @@ index fdbf8c4..6e5d795 100644
      if urlsplit(webapi).path not in ('', '/') or urlsplit(game_api).path not in ('', '/'):
          raise ValueError('WebAPI and game API require a server origin without an extra path')
      username = settings.get('online_username', '')
-@@ -52,19 +79,24 @@ def configure_online(settings, data, env):
+@@ -52,19 +149,24 @@ def configure_online(settings, data, env):
          raise ValueError('Sign in with the account password in the launcher')
      p2p = settings.get('online_p2p_port', '').strip()
      if p2p and not 1 <= int(p2p) <= 65535:
@@ -24382,7 +24485,7 @@ index da1e52e..eaeb424 100644
      # relocated slots (60/90 FPS++ replace function pointers).
      blob=struct.pack('<8sQQ',b'BBPATCH2',EBOOT_BASE,len(writes))
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..ecbdbf3 100644
+index ea6daf1..6413fc4 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
 @@ -10,12 +10,15 @@ The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_
@@ -24496,9 +24599,68 @@ index ea6daf1..ecbdbf3 100644
      if fps not in ('30', '60', '90'):
          print(f'Unsupported Windows FPS preset {fps!r}; using 60 FPS.', flush=True)
          fps = '60'
-@@ -139,38 +216,43 @@ def main():
+@@ -102,6 +179,56 @@ def configure_frame_rate(env):
+     return fps
+ 
+ 
++def bridge_listening():
++    import socket
++    from online import BRIDGE_HOST, BRIDGE_PORT
++    try:
++        socket.create_connection((BRIDGE_HOST, BRIDGE_PORT), timeout=0.5).close()
++        return True
++    except OSError:
++        return False
++
++
++def start_bridge(data):
++    """The Hunter's Dream pool: starts bbbridge-cli (bbbridge/, MaskZeus, GPL-3.0-or-later) for
++    this launch and returns it, or None when a bridge already listens (bbbridge's own app)."""
++    from online import bridge_folder
++    if bridge_listening():
++        print("Co-op: The Hunter's Dream through the bbbridge already running", flush=True)
++        return None
++    cli = ROOT / 'bbbridge' / 'bbbridge-cli.exe'
++    if not cli.is_file():
++        sys.exit(f"The Hunter's Dream: {cli} is missing (reinstall the package).")
++    folder, config = bridge_folder(data)
++    log = folder / 'bbbridge.log'
++    process = subprocess.Popen([str(cli), '--config', str(config), '--log', str(log)], cwd=folder,
++                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
++                               stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
++    for _ in range(100):
++        if bridge_listening():
++            print(f"Co-op: The Hunter's Dream as {os.environ.get('BB_SHADNET_NPID')}, through bbbridge "
++                  f'(log: {log})', flush=True)
++            return process
++        if process.poll() is not None:
++            try:
++                tail = ''.join(log.read_text(encoding='utf-8', errors='replace').splitlines(True)[-5:])
++            except OSError:
++                tail = ''
++            sys.exit(f'bbbridge stopped at start (exit code {process.returncode}):\n{tail}')
++        time.sleep(0.1)
++    process.terminate()
++    sys.exit("bbbridge did not start listening within 10 s (see network/bbbridge/bbbridge.log).")
++
++
++def stop_bridge(process):
++    if process and process.poll() is None:
++        process.terminate()
++        try:
++            process.wait(timeout=5)
++        except subprocess.TimeoutExpired:
++            process.kill()
++
++
+ def main():
+     arguments = sys.argv[1:]
+     game = os.environ.get('BB_GAME_DIR')
+@@ -138,39 +265,45 @@ def main():
+                        '--config', os.environ.get('BB_MODS_CONFIG', data / 'mods.json'),
                         '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
      overlay = merged if merged.resolve() != original else None
++    bridge = None
      try:
 -        for script, extra in (('prepare.py', []), ('link_libc.py', []), ('link_modules.py', []),
 -                              ('content_profile.py', ['--sku', os.environ.get('BB_CONTENT_SKU', 'full')])):
@@ -24566,7 +24728,7 @@ index ea6daf1..ecbdbf3 100644
          # Sizes chosen below for the previous launch are recomputed after an in-game restart.
          if os.environ.get('BB_AUTO_RENDER_RES') == '1':
              for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
-@@ -192,14 +274,30 @@ def main():
+@@ -192,14 +325,30 @@ def main():
              print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
          elif scaled_output:
              os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
@@ -24599,7 +24761,18 @@ index ea6daf1..ecbdbf3 100644
          probe = ROOT / os.environ.get('BB_PROBE', out / 'bb-probe.exe')
          command = [probe, out / 'boot-linked.bin', '--content-profile', out / 'content.bin',
                     '--patches', out / 'patches.bin', '--app0', merged,
-@@ -219,7 +317,9 @@ def main():
+@@ -208,6 +357,10 @@ def main():
+         # MSYS2's DLLs (libc++, SDL3, FFmpeg, ...). System32 is searched before PATH, so the
+         # Vulkan loader stays the one installed with the GPU driver.
+         os.environ['PATH'] = os.pathsep.join([str(msys_root() / 'clang64/bin'), os.environ.get('PATH', '')])
++        # Started last, after the slow steps: an in-game restart runs this script again while the
++        # previous one is still stopping its bridge.
++        if os.environ.get('BB_BRIDGE') == '1':
++            bridge = start_bridge(data)
+         print('Starting:', ' '.join(shlex.quote(str(c)) for c in command), flush=True)
+         try:
+             status = subprocess.call(
+@@ -219,8 +372,11 @@ def main():
          except KeyboardInterrupt:
              status = 130
          print(f'bb-probe exited with code {status}', flush=True)
@@ -24608,8 +24781,10 @@ index ea6daf1..ecbdbf3 100644
 +        # 32-bit value the launcher reads, not -1.
 +        return status - (1 << 32) if status >= (1 << 31) else status
      finally:
++        stop_bridge(bridge)
          if overlay:
              remove_overlay(overlay)
+ 
 diff --git a/src/host_sync.h b/src/host_sync.h
 index bab54c6..7c90dfb 100644
 --- a/src/host_sync.h
@@ -27065,7 +27240,7 @@ index 0000000..89dd2e5
 +    return 0;
 +}
 diff --git a/tests/test_online.py b/tests/test_online.py
-index bf0d998..7a66466 100644
+index bf0d998..f34e29c 100644
 --- a/tests/test_online.py
 +++ b/tests/test_online.py
 @@ -6,7 +6,12 @@ import tempfile
@@ -27139,6 +27314,35 @@ index bf0d998..7a66466 100644
              'online_username':['','has space','x'*17,'é'*9],
              'online_p2p_port':['0','65536','bad']}.items():
              for value in values:
+@@ -64,6 +89,28 @@ class OnlineProfileTests(unittest.TestCase):
+         with self.assertRaises(ValueError): configure_online(self.settings,self.data,{})
+         self.assertFalse((self.data/'network').exists())
+ 
++    def test_hunters_dream_pool_goes_through_the_local_bridge(self):
++        settings = dict(online_enabled='1', online_connected='1', online_pool='huntersdream')
++        with self.assertRaises(ValueError):  # not signed in with Discord yet
++            configure_online(settings, self.data, {})
++        state = self.data / 'network/bbbridge/bbbridge_state.json'
++        state.parent.mkdir(parents=True)
++        state.write_text(json.dumps({'accounts': {'Hunter': {'token': 'x'}, 'Other': {}}}), encoding='utf-8')
++        env = {'UNRELATED': 'keep'}
++        path = configure_online(dict(settings, online_thd_account='Other'), self.data, env)
++        self.assertEqual(env['BB_SHADNET_SERVER'], '127.0.0.1:31313')
++        self.assertEqual(env['BB_SHADNET_NPID'], 'Other')
++        self.assertEqual((env['BB_BRIDGE'], env['SHADPS4_P2P_PORT'], env['SHADPS4_P2P_PORT_DEFAULT']),
++                         ('1', str(DEFAULT_P2P_PORT), '0'))
++        overrides = json.loads(Path(path).read_text(encoding='utf-8'))
++        self.assertEqual(overrides[GAME_STATUS_ORIGIN], 'http://127.0.0.1:31316')
++        # An account name no longer signed in: the first one there is.
++        configure_online(dict(settings, online_thd_account='Gone'), self.data, env)
++        self.assertEqual(env['BB_SHADNET_NPID'], 'Hunter')
++        # Back to shadNet: the bridge flag goes.
++        configure_online(self.settings, self.data, env)
++        self.assertNotIn('BB_BRIDGE', env)
++
+     def test_url_does_not_drop_port(self):
+         self.assertEqual(http_base('https://server.example:34443/api/'),'https://server.example:34443/api')
+         for url in ('http://server.example?x=1','http://server.example#x','http://server.example\n'):
 diff --git a/tests/test_patches.py b/tests/test_patches.py
 index b65009f..e60c0cb 100644
 --- a/tests/test_patches.py

@@ -26,7 +26,7 @@ namespace BloodborneLauncher.Core
         public static string ReleasesPage => $"https://github.com/{Repository}/releases";
 
         /// <summary>The engine build this launcher is made for (package.json "engine").</summary>
-        public const string EngineId = "bbhost-0.4.0-fps34";
+        public const string EngineId = "bbhost-0.4.0-fps35";
 
         private const string ExeName = "Bloodborne Launcher.exe";
         private const string PackageFile = "package.json";
