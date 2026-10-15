@@ -29,6 +29,7 @@ namespace BloodborneLauncher.Core
             ["patches_dir"] = "",
             ["language"] = "1",
             ["fullscreen"] = false,
+            ["display_device"] = "",
             ["present_mode"] = "Mailbox",
             ["fps_mode"] = "60",
             ["draw_pipe"] = "",
@@ -37,6 +38,7 @@ namespace BloodborneLauncher.Core
             ["gpu_profile"] = false,
             ["vk_validation"] = false,
             ["extra_env"] = "",
+            ["dlc_enabled"] = true,
             ["online_password"] = "",
             // This launcher.
             ["port_dir"] = "",
@@ -122,6 +124,13 @@ namespace BloodborneLauncher.Core
             get => Secret.Unprotect(Str("online_password"));
             // Should Windows refuse to encrypt it, it stays as typed rather than being lost.
             set => Set("online_password", Secret.Protect(value) is { Length: > 0 } encrypted ? encrypted : value);
+        }
+
+        /// <summary>The Hunter's Dream account token (its device link), encrypted like the password.</summary>
+        public string HuntersDreamToken
+        {
+            get => Secret.Unprotect(Str("hd_token"));
+            set => Set("hd_token", value.Length == 0 ? "" : Secret.Protect(value) is { Length: > 0 } encrypted ? encrypted : value);
         }
 
         public string Str(string key)
