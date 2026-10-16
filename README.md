@@ -6,8 +6,6 @@ Bloodborne on Windows: a launcher and my engine, built on bbport and shadPS4 and
 
 **No game files are included.** You need your own decrypted Bloodborne dump (CUSA03173) with update 1.09.
 
-Help, news and bug reports go to my [Discord](https://discord.gg/d3Uv3Cfr5x)
-
 ## Install
 
 1. Download `BloodbornePC-<version>-win64.zip` from [Releases](https://github.com/Awakenchan/BloodBorneButPc/releases) and extract it anywhere.
