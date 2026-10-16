@@ -1,10 +1,12 @@
 # Bloodborne PC
 
-Bloodborne on Windows: a launcher and my own engine, focused on performance.
+Bloodborne on Windows: a launcher and my engine, built on bbport and shadPS4 and reworked by me for performance.
+
+> **Note:** I'm keeping this going on my own, and updates are slower now because of the hate I've been getting. I'll keep working on it when I can.
 
 **No game files are included.** You need your own decrypted Bloodborne dump (CUSA03173) with update 1.09.
 
-Help, news and bug reports: [Discord](https://discord.gg/d3Uv3Cfr5x)
+Help, news and bug reports go to my [Discord](https://discord.gg/d3Uv3Cfr5x)
 
 ## Install
 
