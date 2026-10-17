@@ -1,4 +1,5 @@
 # Bloodborne PC
+<a href="https://trendshift.io/repositories/302591?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-302591" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/302591/daily?language=C%23" alt="Awakenchan%2FBloodBorneButPc | Trendshift" width="250" height="55"/></a>
 
 Bloodborne on Windows: a launcher and my engine, built on bbport and shadPS4 and reworked by me for performance.
 
