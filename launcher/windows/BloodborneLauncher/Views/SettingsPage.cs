@@ -487,7 +487,11 @@ namespace BloodborneLauncher.Views
 
         private void CopySettingsCode()
         {
-            Clipboard.SetText(SharedSettings.ToCode(SharedSettings.Take(Ini, S)));
+            if (!ClipboardText.Set(SharedSettings.ToCode(SharedSettings.Take(Ini, S))))
+            {
+                Ws.Log("Could not copy: another program is using the clipboard. Try again, or use Save settings file.", LogLevel.Warn);
+                return;
+            }
             Ws.Log("Settings code copied. Paste it in Discord; others import it in Settings › Share settings.", LogLevel.Good);
             Prompt.Tell("Settings code copied", "Paste it in Discord or anywhere else. Others use Import settings › Paste code.");
         }
@@ -509,7 +513,9 @@ namespace BloodborneLauncher.Views
 
         private void ImportSettingsCode()
         {
-            var clipboard = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+            string clipboard;
+            try { clipboard = Clipboard.ContainsText() ? Clipboard.GetText() : ""; }
+            catch (System.Runtime.InteropServices.ExternalException) { clipboard = ""; }
             var values = Prompt.Ask("Import settings", $"Paste the code someone shared (it starts with {SharedSettings.CodePrefix}).",
                 new Prompt.Field("Code", clipboard.Contains(SharedSettings.CodePrefix, StringComparison.OrdinalIgnoreCase) ? clipboard.Trim() : "",
                     SharedSettings.CodePrefix + "…", Multiline: true));

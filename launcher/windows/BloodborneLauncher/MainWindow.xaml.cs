@@ -195,8 +195,10 @@ namespace BloodborneLauncher
             {
                 try
                 {
-                    Clipboard.SetText(CrashReport.Build(ws.Settings, ws.Ini, code));
-                    ws.Log("Crash report copied to the clipboard.", LogLevel.Good);
+                    if (ClipboardText.Set(CrashReport.Build(ws.Settings, ws.Ini, code)))
+                        ws.Log("Crash report copied to the clipboard.", LogLevel.Good);
+                    else
+                        ws.Log("Could not copy the report: another program is using the clipboard.", LogLevel.Warn);
                 }
                 catch (Exception e)
                 {
