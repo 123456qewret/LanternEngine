@@ -38,6 +38,12 @@ namespace BloodborneLauncher.Views
                 () => ParseDouble(Ini.Get("sharpness"), 0.5), v => Ini.Set("sharpness", Fmt(v)));
             _sharpnessCard = (SettingRow)Body.Children[^1];
 
+            IniCombo(SymbolRegular.FastForward24, "Frame generation",
+                "Shows an extra frame between the game's own (2x smoother motion). Adds a little input lag. Off by default.",
+                Choices.FrameGeneration, "frame_gen");
+            IniToggle(SymbolRegular.Timer24, "Frame generation: game at half refresh rate",
+                "Every generated frame reaches the screen evenly (60 + 60 at 120 Hz). Off: the game runs faster, but the screen skips some generated frames", "frame_gen_cap");
+
             SettingCombo(SymbolRegular.BrainCircuit24, "DLSS model",
                 "Which NVIDIA model DLSS runs. Applied on the next launch", Choices.DlssModels, "dlss_preset");
             IniToggle(SymbolRegular.ArrowMove24, "Object motion vectors", "Less ghosting on characters; costs about 10% FPS", "object_motion");
