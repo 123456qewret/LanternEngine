@@ -62,6 +62,7 @@ namespace BloodborneLauncher
                 ApplyGlass();
             LauncherTheme.Apply(ws.Settings, glass: !SettingRow.Classic);
             ApplyWindowButtons();
+            ApplyIcon();
 
             var version = typeof(MainWindow).Assembly.GetName().Version;
             VersionText.Text = version == null ? "" : Updater.CurrentLabel;
@@ -332,6 +333,15 @@ namespace BloodborneLauncher
         /// buttons, on their usual side (macOS left, Windows right) or the other. Close stays on the
         /// outer edge; the title bar's own buttons move out of their way.
         /// </summary>
+        /// <summary>Settings › App icon: this window's, and the game window's from its next start.</summary>
+        public void ApplyIcon()
+        {
+            var choice = Workspace.Current.Settings.Str("app_icon");
+            AppIcon.Apply(this, choice);
+            if (Paths.DetectPortDir() is { } package)
+                AppIcon.SyncGameWindow(package, choice);
+        }
+
         public void ApplyWindowButtons()
         {
             var s = Workspace.Current.Settings;

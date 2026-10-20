@@ -106,6 +106,8 @@ namespace BloodborneLauncher.Views
             SettingCombo(SymbolRegular.Blur24, "Background blur", null,
                 new[] { new Choice("Strong", "strong"), new Choice("Light", "light"), new Choice("Off", "off") },
                 "ui_background_blur", changed: () => MainWindow.Instance?.ApplyBackdrop());
+            SettingCombo(SymbolRegular.Image24, "App icon", "The launcher's and the game window's icon. The game window takes it at its next start",
+                AppIcon.Choices, "app_icon", changed: () => MainWindow.Instance?.ApplyIcon());
             SettingCombo(SymbolRegular.Window24, "Window buttons", "macOS: the red, yellow and green dots. Windows: – □ ✕",
                 new[] { new Choice("macOS", "mac"), new Choice("Windows", "windows") },
                 "ui_window_buttons", changed: () => MainWindow.Instance?.ApplyWindowButtons());
