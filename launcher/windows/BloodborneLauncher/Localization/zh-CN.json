@@ -1382,5 +1382,11 @@
   "Dark red": "深红色",
   "Dark blue": "深蓝色",
   "FPS counter background opacity": "帧率计数器背景不透明度",
-  "FPS counter border": "帧率计数器边框"
+  "FPS counter border": "帧率计数器边框",
+  "New engine or the 0.9.33 one?": "使用新引擎，还是 0.9.33 的引擎？",
+  "This update brings a newer engine: a faster draw thread, quicker shader compiling and more VRAM for textures. Most players run faster with it. Legacy keeps the engine as 0.9.33 ran it.\n\nYou can change it any time under Graphics > Engine preset.": "此更新带来了更新的引擎：更快的绘制线程、更快的着色器编译，以及为纹理分配更多显存。大多数玩家使用新引擎时运行更快。旧版会保持 0.9.33 的引擎运行方式。\n\n你可以随时在“图形 > 引擎预设”中更改。",
+  "Stay on Legacy": "保持旧版",
+  "Use New (recommended)": "使用新引擎（推荐）",
+  "Engine preset: New": "引擎预设：新引擎",
+  "Engine preset: Legacy (0.9.33)": "引擎预设：旧版（0.9.33）"
 }
