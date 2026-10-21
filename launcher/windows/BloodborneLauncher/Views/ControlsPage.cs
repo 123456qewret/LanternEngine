@@ -56,6 +56,9 @@ namespace BloodborneLauncher.Views
                 () => Ini.Get("mouse_camera", "1") != "0", v => Ini.Set("mouse_camera", v ? "1" : "0"), mouse);
             ToggleRow(SymbolRegular.CursorHover24, L.T("Mouse in menus"), L.T("The mouse becomes a pointer in the game's menus: hover and click items"),
                 () => Ini.Get("mouse_menu", "1") != "0", v => Ini.Set("mouse_menu", v ? "1" : "0"), mouse);
+            ToggleRow(SymbolRegular.Run24, L.T("Move and look in menus"),
+                L.T("With a menu open in the world, the movement and look keys stay your character's and the arrow keys move through the menu. The mouse turns the camera while Mouse in menus is off. Whether the character can walk then is up to the game. Applied at the next start"),
+                () => Ini.Get("menu_move", "0") == "1", v => Ini.Set("menu_move", v ? "1" : "0"), mouse);
             SliderRow(SymbolRegular.Gauge24, L.T("Mouse sensitivity"), L.T("5 is the default"), 0, 10, 1,
                 () => ParseDouble(Ini.Get("mouse_sensitivity", "5"), 5), v => Ini.Set("mouse_sensitivity", ((int)v).ToString()), "0", mouse);
             IniToggle(SymbolRegular.ArrowSwap24, L.T("Invert horizontal"), null, "mouse_invert_x", mouse);

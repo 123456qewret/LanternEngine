@@ -54,7 +54,7 @@ namespace BloodborneLauncher.Core
         public const string Diagnostics = "Diagnostics and logs";
         public const string DirectVulkan = "Direct rendering";
 
-        public static readonly string[] Groups = { Graphics, Performance, Input, Sound, Fixes, DirectVulkan };
+        public static readonly string[] Groups = { Graphics, Performance, Input, Sound, Fixes };
 
         // ---------------------------------------------------------------- building the list
 
@@ -142,12 +142,9 @@ namespace BloodborneLauncher.Core
                 L.T("may crash, and the engine's patches and PC menus may not apply")),
 
 
-            // Off by default (beta 9.4): with it on in betas, two players' games stayed on a black
-            // screen before the first frame. Testers: BB_NATIVE_CALLS=verify, BB_GNM_CENSUS and
-            // BB_GNM_OBSERVE in Extra variables.
-            Toggle("BB_NATIVE_CALLS", DirectVulkan, L.T("Direct draw calls"),
-                L.T("Draw calls go straight to the renderer instead of through emulated PS4 GPU commands. Testing only: ") +
-                L.T("turn it off if the game stays on a black screen or something draws wrong"), on: false) with { AlwaysPass = true },
+            // bbport: BB_NATIVE_CALLS was here too (Direct draw calls, passed even at its default):
+            // passed after Engine features > Native draw calls, its 0 turned that setting off for
+            // everyone. That one setting is the switch now (GameEnvironment).
         };
 
         // ---------------------------------------------------------------- values

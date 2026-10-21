@@ -106,6 +106,12 @@ namespace BloodborneLauncher
                 // Once: the settings that suit this PC, shown before anything changes.
                 if (_directPlay)
                     _ = Dispatcher.BeginInvoke(async () => await PlayDirectAsync(), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                // The setup guide: with --setup, or once on a first start whose game folder is not
+                // ready (a game already set up never sees it). The settings for this PC follow it.
+                else if (Prompt.SnapshotPath == null && (Environment.GetCommandLineArgs().Contains("--setup") ||
+                         (!ws.Settings.Bool("setup_shown") && Paths.IsPortDir(Paths.PortDir) &&
+                          await Task.Run(() => GameCheck.Inspect(GameEnvironment.GameDir(ws.Settings)).Health) != Health.Good)))
+                    _ = Dispatcher.BeginInvoke(() => SetupGuide.Open(firstRun: true), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 else if (!ws.Settings.Bool("hardware_offered") && Prompt.SnapshotPath == null && Paths.IsPortDir(Paths.PortDir))
                     _ = Dispatcher.BeginInvoke(() => OfferBestSettings(firstRun: true), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 // Once, after updating from an older launcher (a new install starts on New): the
@@ -884,6 +890,20 @@ namespace BloodborneLauncher
                     ws.ResolvePort();
                     ws.SaveNow();
                 }
+            }
+
+            // No game folder with eboot.bin: the engine would only log "No eboot.bin". The setup
+            // guide says what is missing instead.
+            if (!GameRunner.Custom(s) && !System.IO.File.Exists(System.IO.Path.Combine(GameEnvironment.GameDir(s), "eboot.bin")))
+            {
+                if (Prompt.Choose(L.T("The game is not set up yet"),
+                        L.T("The launcher has no game folder with eboot.bin in it, so the game cannot start. The setup guide shows where your Bloodborne files go and checks them."),
+                        L.T("Cancel"), L.T("Open the setup guide")) == 1)
+                {
+                    ShowLauncher();
+                    SetupGuide.Open();
+                }
+                return;
             }
 
             // A patch that changes the game's region (Unlock Game Region) leaves the game without a

@@ -122,9 +122,18 @@ namespace BloodborneLauncher.Core
 
         private static readonly HashSet<string> MigratedDirs = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>An engine program's file name: name.exe, or name alone in the Linux package
+        /// (the Avalonia launcher there).</summary>
+        public static string Program(string name) =>
+#if AVALONIA
+            OperatingSystem.IsWindows() ? name + ".exe" : name;
+#else
+            name + ".exe";
+#endif
+
         /// <summary>A package's engine folder: its engine\, or the package itself (older layout).</summary>
         public static string EngineDirOf(string dir) =>
-            File.Exists(Path.Combine(dir, "engine", "out", "bb-probe.exe")) ||
+            File.Exists(Path.Combine(dir, "engine", "out", Program("bb-probe"))) ||
             File.Exists(Path.Combine(dir, "engine", "scripts", "run_windows.py"))
                 ? Path.Combine(dir, "engine")
                 : dir;
@@ -141,13 +150,13 @@ namespace BloodborneLauncher.Core
         {
             if (string.IsNullOrWhiteSpace(dir)) return false;
             var engine = EngineDirOf(dir);
-            return File.Exists(Path.Combine(engine, "out", "bb-probe.exe")) &&
-                   (File.Exists(Path.Combine(engine, "out", "bb-start.exe")) ||
+            return File.Exists(Path.Combine(engine, "out", Program("bb-probe"))) &&
+                   (File.Exists(Path.Combine(engine, "out", Program("bb-start"))) ||
                     File.Exists(Path.Combine(engine, "scripts", "run_windows.py")));
         }
 
         /// <summary>The native start (0.9.32 and later): the boot image, mods, patches, then the game.</summary>
-        public static string Start => Path.Combine(EngineDir, "out", "bb-start.exe");
+        public static string Start => Path.Combine(EngineDir, "out", Program("bb-start"));
 
         /// <summary>The Python an older engine started with (scripts\run_windows.py).</summary>
         public static string Python => Path.Combine(EngineDir, "tools", "python", "python.exe");
@@ -177,7 +186,7 @@ namespace BloodborneLauncher.Core
                 return Directory.GetDirectories(parent)
                     .Where(IsPortDir)
                     .OrderByDescending(dir => new[] { "bin", "out" }
-                        .Select(b => new FileInfo(Path.Combine(EngineDirOf(dir), b, "bb-probe.exe")))
+                        .Select(b => new FileInfo(Path.Combine(EngineDirOf(dir), b, Program("bb-probe"))))
                         .Where(f => f.Exists).Select(f => f.LastWriteTimeUtc).DefaultIfEmpty(DateTime.MinValue).Max())
                     .FirstOrDefault();
             }

@@ -18,12 +18,32 @@
             new(L.T("Off"), "off"),
         };
 
-        /// <summary>frame_gen in lantern.ini: a generated frame between the game's own (the engine's
-        /// vk_frame_generation.h). Off by default.</summary>
+        /// <summary>frame_gen in lantern.ini: generated frames between the game's own (the engine's
+        /// vk_frame_generation.h; DLSS through NVIDIA Streamline, vk_streamline.h). Off by default.</summary>
         public static readonly Choice[] FrameGeneration =
         {
             new(L.T("Off"), "off"),
             new("FSR 3.1 (2x)", "fsr3", L.T("Needs an upscaler. Not in menus, movies or with HDR output")),
+            new("DLSS (NVIDIA RTX 40/50)", "dlss",
+                L.T("NVIDIA's frame generation with Reflex: 2x on RTX 40, up to 6x on RTX 50. Needs an upscaler and Hardware-accelerated GPU scheduling. Applied when the game starts")),
+        };
+
+        /// <summary>frame_gen_frames: DLSS generated frames per real one (more than one: RTX 50).</summary>
+        public static readonly Choice[] FrameGenFrames =
+        {
+            new("2x", "1", L.T("One generated frame per real one (RTX 40 and 50)")),
+            new("3x", "2", L.T("RTX 50 only")),
+            new("4x", "3", L.T("RTX 50 only")),
+            new("5x", "4", L.T("RTX 50 only")),
+            new("6x", "5", L.T("RTX 50 only")),
+        };
+
+        /// <summary>reflex: NVIDIA Reflex low latency while DLSS Frame Generation is loaded.</summary>
+        public static readonly Choice[] Reflex =
+        {
+            new(L.T("On"), "on", L.T("Lower input lag. Always on while DLSS Frame Generation runs")),
+            new(L.T("On + Boost"), "boost", L.T("Also keeps the GPU clocks up: a little lower lag, more power")),
+            new(L.T("Off"), "off", L.T("Only while DLSS Frame Generation is off")),
         };
 
         public static readonly Choice[] Presets =
@@ -33,6 +53,7 @@
             new(L.T("Balanced (x1.7)"), "2"),
             new(L.T("Performance (x2)"), "3"),
             new(L.T("Ultra Performance (x3)"), "4"),
+            new(L.T("Custom (render scale below)"), "5"),
         };
 
         public static readonly Choice[] OutputResolutions =
@@ -128,7 +149,11 @@
         public static readonly Choice[] DlssModels =
         {
             new("Transformer (preset K)", "k", L.T("The newer model: steadier thin and moving objects (a weapon on the back, railings)")),
+            new("Transformer 2 (preset M)", "m", L.T("DLSS 4.5's model for Performance: sharper, a little heavier")),
+            new("Transformer 2 (preset L)", "l", L.T("DLSS 4.5's model for Ultra Performance")),
+            new("Transformer (preset J)", "j", L.T("Like K, slightly less ghosting and a little more flicker")),
             new("CNN (preset E)", "e", L.T("The older model: a little faster on RTX 20 and 30 cards, softer and more ghosting in motion")),
+            new("CNN (preset F)", "f", L.T("The older model for Ultra Performance and DLAA")),
             new(L.T("The DLL's default"), "default", L.T("Whatever the included DLSS version picks for each quality mode")),
         };
 

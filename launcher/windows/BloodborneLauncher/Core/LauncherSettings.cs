@@ -54,6 +54,7 @@ namespace BloodborneLauncher.Core
             ["memory_check_off"] = false,
             ["discord_hidden"] = false,
             ["hardware_offered"] = false,
+            ["setup_shown"] = false, // the setup guide opened once (Views/SetupGuide.cs)
             ["cheat_vials_amount"] = 20,
             ["cheat_bullets_amount"] = 20,
             ["update_channel"] = "", // empty: beta builds follow beta, others stable

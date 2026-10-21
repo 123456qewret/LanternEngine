@@ -202,8 +202,25 @@ namespace BloodborneLauncher.Core
 #endif
         // ---------------------------------------------------------------- recommendation
 
-        /// <summary>What would change to suit this PC; empty when the settings already do.</summary>
-        public List<Change> Recommend(LauncherSettings s, IniFile ini)
+        /// <summary>How the player wants the game to run (the setup guide's last choice): each style is
+        /// still sized to this PC. Balanced is what Recommend picks without a style.</summary>
+        public const string StyleQuality = "quality", StyleBalanced = "balanced", StyleSmooth = "smooth", StyleFps = "fps";
+
+        public static readonly Choice[] Styles =
+        {
+            new(L.T("Best picture"), StyleQuality,
+                L.T("The sharpest image: the game renders at or close to your screen's resolution, with the extra detail on, at 60 FPS. Best on strong graphics cards; a weaker one may drop frames in busy fights.")),
+            new(L.T("Balanced (recommended)"), StyleBalanced,
+                L.T("A good picture at a steady frame rate, picked for your graphics card and screen. The best start if you are not sure.")),
+            new(L.T("Smoother"), StyleSmooth,
+                L.T("A higher frame rate (90 or 120 FPS when your screen and processor can show it) for a slightly softer picture: the game renders further below your screen's resolution and the upscaler fills in the rest.")),
+            new(L.T("Maximum FPS"), StyleFps,
+                L.T("As many frames as possible: the game renders well below your screen's resolution, with less model detail and the extras off, up to what your screen can show. For weaker PCs or fast screens; the picture is softer.")),
+        };
+
+        /// <summary>What would change to suit this PC; empty when the settings already do. With a
+        /// style (Styles), the picture and frame rate lean that way and model detail is set too.</summary>
+        public List<Change> Recommend(LauncherSettings s, IniFile ini, string? style = null)
         {
             var changes = new List<Change>();
             void Ini(string label, string key, string to, IReadOnlyList<Choice>? names = null, string fallback = "")
@@ -245,16 +262,40 @@ namespace BloodborneLauncher.Core
                 (_, Tier.Mid) => 3,
                 _ => 4,
             };
+            preset = style switch
+            {
+                StyleQuality => Math.Max(0, preset - 1),
+                StyleSmooth => Math.Min(4, preset + 1),
+                StyleFps => Math.Min(4, Math.Max(3, preset + 2)),
+                _ => preset,
+            };
             Ini(L.T("Quality preset"), "preset", preset.ToString(), Choices.Presets, "0");
 
             // 120 needs a fast display, a mid or better GPU and a CPU with 12+ threads (the game's
             // render thread is the limit); 60 otherwise.
             var fps = RefreshHz >= 119 && tier != Tier.Low && Threads >= 12 ? "120" : "60";
+            // Best picture stays at 60; Smoother takes 90 where 120 is out of reach; Maximum FPS goes
+            // up to the display's own rate (the render thread may hold it lower on small CPUs).
+            fps = style switch
+            {
+                StyleQuality => "60",
+                StyleSmooth => fps == "120" ? "120" : RefreshHz >= 89 && Threads >= 8 ? "90" : "60",
+                StyleFps => RefreshHz >= 143 ? "144" : RefreshHz >= 119 ? "120" : RefreshHz >= 89 ? "90" : "60",
+                _ => fps,
+            };
             Setting(L.T("Frame rate"), "fps_mode", fps, Choices.FpsModes);
 
             // Character motion vectors cost about 10%: on for the biggest GPUs, off for the smallest.
-            if (tier == Tier.High) Ini(L.T("Object motion vectors"), "object_motion", "1", OnOff, "1");
-            if (tier == Tier.Low) Ini(L.T("Object motion vectors"), "object_motion", "0", OnOff, "1");
+            if (style == StyleQuality) Ini(L.T("Object motion vectors"), "object_motion", "1", OnOff, "1");
+            else if (style == StyleFps) Ini(L.T("Object motion vectors"), "object_motion", "0", OnOff, "1");
+            else if (tier == Tier.High) Ini(L.T("Object motion vectors"), "object_motion", "1", OnOff, "1");
+            else if (tier == Tier.Low || style == StyleSmooth) Ini(L.T("Object motion vectors"), "object_motion", "0", OnOff, "1");
+
+            // Model detail only with a style: Highest on strong GPUs for Best picture, Lower for
+            // Maximum FPS, the game's own otherwise.
+            if (style != null)
+                Ini(L.T("Model detail"), "model_lod", style == StyleQuality && tier == Tier.High ? "-2" : style == StyleFps ? "1" : "0",
+                    Choices.ModelLod, "0");
             return changes;
         }
 
