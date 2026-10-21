@@ -51606,7 +51606,7 @@ index a300d10..ae628fd 100644
      std::chrono::nanoseconds target_interval{};
      std::chrono::nanoseconds total_wait{};
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
-index 30de04f..bc93b31 100644
+index 30de04f..8f71b29 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
 +++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
 @@ -2,7 +2,9 @@
@@ -51647,7 +51647,18 @@ index 30de04f..bc93b31 100644
  #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
  #include "video_core/renderer_vulkan/vk_presenter.h"
-@@ -372,15 +384,142 @@ static void PrintMemory() {
+@@ -46,6 +58,10 @@ extern std::atomic<u64> g_bb_compile_ns;
+ extern std::atomic<u32> g_bb_compiles;
+ } // namespace Vulkan
+ 
++namespace AmdGpu {
++void OcclusionDumpCounts(u64& dumps, u64& in_order); // bbport: liverpool.cpp
++} // namespace AmdGpu
++
+ namespace Libraries::VideoOut {
+ 
+ constexpr static bool Is32BppPixelFormat(PixelFormat format) {
+@@ -372,15 +388,146 @@ static void PrintMemory() {
  #endif
  }
  
@@ -51689,6 +51700,7 @@ index 30de04f..bc93b31 100644
 +    struct Snapshot {
 +        u64 draws, dispatches, cpu_us, faults, tracker_faults, protects, protect_pages;
 +        u64 rw_found, rw_steps, sema_found, sema_steps, thread_found, thread_steps;
++        u64 zpass, zpass_in_order;
 +    };
 +    static Snapshot last{};
 +    Snapshot now{};
@@ -51701,6 +51713,7 @@ index 30de04f..bc93b31 100644
 +    now.tracker_faults = BbStats::tracker_faults.load(std::memory_order_relaxed);
 +    now.protects = BbStats::protect_calls.load(std::memory_order_relaxed);
 +    now.protect_pages = BbStats::protect_pages.load(std::memory_order_relaxed);
++    AmdGpu::OcclusionDumpCounts(now.zpass, now.zpass_in_order);
 +    u64 rwlocks = 0, semas = 0, made = 0, finished = 0;
 +    runtime_rwlock_census(&rwlocks, &now.rw_found, &now.rw_steps);
 +    runtime_sema_census(&semas, &now.sema_found, &now.sema_steps);
@@ -51719,7 +51732,7 @@ index 30de04f..bc93b31 100644
 +                "frame; CPU %.1f cores, %.0f page faults/s; write faults %.0f/s, protects %.0f/s "
 +                "(%.0f pages/s), hot pages %lld; threads %llu live of %llu, rwlocks %llu (%.1f "
 +                "steps, %.0f/s), semaphores %llu (%.1f steps), memory map %llu regions, heap "
-+                "growths %llu\n",
++                "growths %llu; occlusion dumps %.1f a frame (%.1f in order)\n",
 +                double(flips) / secs, static_cast<unsigned long long>(slow), worst_ms,
 +                first ? 0.0 : double(delta(now.draws, last.draws)) / frames,
 +                first ? 0.0 : double(delta(now.dispatches, last.dispatches)) / frames,
@@ -51733,7 +51746,9 @@ index 30de04f..bc93b31 100644
 +                per_s(now.rw_found, last.rw_found), static_cast<unsigned long long>(semas),
 +                steps(delta(now.sema_found, last.sema_found), delta(now.sema_steps, last.sema_steps)),
 +                static_cast<unsigned long long>(runtime_memory_regions()),
-+                static_cast<unsigned long long>(runtime_heap_growths()));
++                static_cast<unsigned long long>(runtime_heap_growths()),
++                first ? 0.0 : double(delta(now.zpass, last.zpass)) / frames,
++                first ? 0.0 : double(delta(now.zpass_in_order, last.zpass_in_order)) / frames);
 +    last = now;
 +}
 +
@@ -51790,7 +51805,7 @@ index 30de04f..bc93b31 100644
      // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
      static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
      if (frame_stats) {
-@@ -455,6 +594,17 @@ void VideoOutDriver::Flip(const Request& req) {
+@@ -455,6 +602,17 @@ void VideoOutDriver::Flip(const Request& req) {
                          (t_now[0] - last_t[0]) / 1e6, (t_now[1] - last_t[1]) / 1e6,
                          (t_now[2] - last_t[2]) / 1e6, (t_now[3] - last_t[3]) / 1e6,
                          (t_now[4] - last_t[4]) / 1e6, (t_now[5] - last_t[5]) / 1e6);
@@ -51808,7 +51823,7 @@ index 30de04f..bc93b31 100644
              std::printf("       GPU thread page faults %llu (process %llu), protection faults %llu; "
                          "protect calls %llu (%llu pages), of which write-revoking %llu (%llu pages)\n",
                          static_cast<unsigned long long>(minflt - last_minflt),
-@@ -587,6 +737,85 @@ void VideoOutDriver::Flip(const Request& req) {
+@@ -587,6 +745,85 @@ void VideoOutDriver::Flip(const Request& req) {
                          BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                          frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                          frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
@@ -51894,7 +51909,7 @@ index 30de04f..bc93b31 100644
              VideoCore::PageManager::ReportFaultSites();
              if (const u64 notes = BbStats::cpu_write_notes.exchange(0)) {
                  std::printf("Write notices: %.0f/s, %.2f MB/s (libc copies over pages the GPU side "
-@@ -695,8 +924,19 @@ void VideoOutDriver::Flip(const Request& req) {
+@@ -695,8 +932,19 @@ void VideoOutDriver::Flip(const Request& req) {
          }
      }
  
@@ -51915,7 +51930,7 @@ index 30de04f..bc93b31 100644
      {
          std::unique_lock lock{port->port_mutex};
          auto& flip_status = port->flip_status;
-@@ -722,14 +962,6 @@ void VideoOutDriver::Flip(const Request& req) {
+@@ -722,14 +970,6 @@ void VideoOutDriver::Flip(const Request& req) {
                                          (req.flip_arg << 16)));
          }
      }
@@ -51930,7 +51945,7 @@ index 30de04f..bc93b31 100644
  }
  
  void VideoOutDriver::DrawBlankFrame() {
-@@ -753,8 +985,18 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
+@@ -753,8 +993,18 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
      {
          std::unique_lock lock{port->port_mutex};
          if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -51951,7 +51966,7 @@ index 30de04f..bc93b31 100644
          }
  
          if (is_eop) {
-@@ -809,12 +1051,53 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -809,12 +1059,53 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
  
      // bbport: frame limit (see EmulatorSettings::GetFrameLimit). A request waits in the queue
      // until its slot; slots advance by one period (no drift) but never lag behind by more.
@@ -52010,7 +52025,7 @@ index 30de04f..bc93b31 100644
  
      const auto receive_request = [this] -> Request {
          std::scoped_lock lk{mutex};
-@@ -831,9 +1114,164 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -831,9 +1122,164 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
      // next vblank tick.
      const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
  
@@ -52175,7 +52190,7 @@ index 30de04f..bc93b31 100644
  
          if (DebugState.IsGuestThreadsPaused()) {
              DrawLastFrame();
-@@ -864,29 +1302,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+@@ -864,29 +1310,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
              }
          }
  
@@ -53500,7 +53515,7 @@ index c119b78..b6787f0 100644
                                    other.inputs.begin() + num_inputs);
      }
 diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.cpp b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
-index fa7e146..c490547 100644
+index fa7e146..3ba89de 100644
 --- a/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 +++ b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 @@ -17,6 +17,7 @@
@@ -53522,7 +53537,24 @@ index fa7e146..c490547 100644
  #include "video_core/renderer_vulkan/vk_rasterizer.h"
  
  extern "C" int runtime_memory_vma_info(uintptr_t address, int* prot, int* type, uintptr_t* end);
-@@ -120,8 +123,24 @@ void Liverpool::ProcessCommands() {
+@@ -88,8 +91,16 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
+     return span.subspan(offset);
+ }
+ 
++namespace {
++bool ZpassInOrder(); // bbport: BB_ZPASS_IN_ORDER (RunZpassDump)
++} // namespace
++
+ Liverpool::Liverpool() : guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
++    std::printf("Occlusion counts: %s\n",
++                ZpassInOrder() ? "the stand-in counts are written in order with the DMA that "
++                                 "clears each query (BB_ZPASS_IN_ORDER=0: at decode, as before)"
++                               : "written at decode (BB_ZPASS_IN_ORDER=0)");
+     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
+ }
+ 
+@@ -120,8 +131,24 @@ void Liverpool::ProcessCommands() {
      }
  }
  
@@ -53547,7 +53579,7 @@ index fa7e146..c490547 100644
      if (const int clock = BbPlatform::ThreadCpuClock(); clock != -1) {
          BbStats::gpu_thread_clock.store(clock);
      }
-@@ -167,7 +186,7 @@ void Liverpool::Process(std::stop_token stoken) {
+@@ -167,7 +194,7 @@ void Liverpool::Process(std::stop_token stoken) {
                  if (const char* env = std::getenv("BB_GPU_SPIN_US")) {
                      return std::max(0, std::atoi(env));
                  }
@@ -53556,7 +53588,7 @@ index fa7e146..c490547 100644
              }());
              if (spin_time.count() > 0) {
                  const auto spin_until = idle_start + spin_time;
-@@ -243,9 +262,41 @@ void Liverpool::Process(std::stop_token stoken) {
+@@ -243,9 +270,41 @@ void Liverpool::Process(std::stop_token stoken) {
              }
          }
  
@@ -53599,7 +53631,7 @@ index fa7e146..c490547 100644
                  // BB_PIPE_SIGNALS: the frame's cache work runs on the recording thread after the
                  // frame (this thread decodes the next one meanwhile instead of waiting for it).
                  static constexpr u8 none = 0;
-@@ -254,7 +305,7 @@ void Liverpool::Process(std::stop_token stoken) {
+@@ -254,7 +313,7 @@ void Liverpool::Process(std::stop_token stoken) {
                          r.OnSubmit();
                          r.Flush();
                      },
@@ -53608,7 +53640,7 @@ index fa7e146..c490547 100644
              } else if (rasterizer) {
                  rasterizer->OnSubmit();
                  rasterizer->Flush();
-@@ -263,6 +314,9 @@ void Liverpool::Process(std::stop_token stoken) {
+@@ -263,6 +322,9 @@ void Liverpool::Process(std::stop_token stoken) {
          }
          // BB_SUBMIT_LOCK=decode: a frame ended after its submissions were all decoded.
          SignalDecodedFrames();
@@ -53618,7 +53650,7 @@ index fa7e146..c490547 100644
  
          // bbport: the guest takes GPU idle (sceGnmSubmitDone) as its work being done and frees
          // the objects that hold its fence labels. The labels must be written before: the draw
-@@ -316,7 +370,7 @@ void Liverpool::Process(std::stop_token stoken) {
+@@ -316,7 +378,7 @@ void Liverpool::Process(std::stop_token stoken) {
                          r.SignalAfterGpu([idle] { idle.self->SignalGpuIdle(idle.generation); });
                          r.SubmitForSignals(); // at once if the GPU has run dry
                      },
@@ -53627,7 +53659,7 @@ index fa7e146..c490547 100644
                  continue;
              }
              rasterizer->SignalAfterGpu([this, generation] { SignalGpuIdle(generation); });
-@@ -341,6 +395,11 @@ namespace {
+@@ -341,6 +403,11 @@ namespace {
  /// work on earlier draws (register state, draws it hands over, nested buffers). Every other
  /// packet first waits for that thread to run dry (Rasterizer::DrainDrawPipe).
  bool PipelinedOpcode(PM4ItOpcode opcode) {
@@ -53639,7 +53671,7 @@ index fa7e146..c490547 100644
      switch (opcode) {
      case PM4ItOpcode::Nop:
      case PM4ItOpcode::ContextControl:
-@@ -466,12 +525,35 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
+@@ -466,12 +533,35 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
          BbCopy::AfterCopies([eop, seq] { SignalEop(eop, seq); });
      } else if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
          // The draw recording thread does not wait: the Vulkan recording thread signals the
@@ -53679,7 +53711,7 @@ index fa7e146..c490547 100644
          SignalEop(eop, seq);
      }
  }
-@@ -486,10 +568,26 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
+@@ -486,10 +576,26 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
      // With the new memory model, recorded as a GPU fill or copy (memory used in place, or
      // written by the GPU) it lands after the submission goes out, which is after those copies
      // and signals: no wait (~16 us each, ~900 a second of 4-byte counter copies).
@@ -53709,7 +53741,7 @@ index fa7e146..c490547 100644
      }
      if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
          rasterizer.FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
-@@ -503,19 +601,19 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
+@@ -503,19 +609,19 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
                 (dma_data->dst_sel == DmaDataDst::Memory ||
                  dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
          rasterizer.FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
@@ -53732,7 +53764,7 @@ index fa7e146..c490547 100644
      } else {
          UNREACHABLE_MSG("WriteData src_sel = {}, dst_sel = {}", u32(dma_data->src_sel),
                          u32(dma_data->dst_sel));
-@@ -523,7 +621,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
+@@ -523,7 +629,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
  }
  
  void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
@@ -53741,7 +53773,7 @@ index fa7e146..c490547 100644
      Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
  }
  
-@@ -541,10 +639,12 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
+@@ -541,10 +647,12 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
      // Copies deferred to the recording thread that read this range precede the write (the
      // command processor's writes do not wait for earlier draws: the game cannot take one for
      // a sign that the GPU is past them); fences deferred to it (RecorderFences) precede writes
@@ -53757,7 +53789,73 @@ index fa7e146..c490547 100644
      BbFreeCheck::Check(write_data->Address<u64>(), (header->type3.count.Value() - 2) * sizeof(u32),
                         write_data->data, BbFreeCheck::WriteData);
      BbWriteLog::Note(write_data->Address<u64>(), write_data->data,
-@@ -582,8 +682,8 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
+@@ -555,6 +663,65 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
+                                 (header->type3.count.Value() - 2) * sizeof(u32), true);
+ }
+ 
++// bbport: the stand-in occlusion counts (BB_OCCLUSION=0) in stream order. The game starts every
++// query (0x1077660) with a DMA_DATA that zeroes its 128-byte block, a WAIT_REG_MEM for the zero,
++// then the counter dump; it reads the query as done only when all 16 counters have bit 63
++// (0x216a3ca). With the draw pipe the DMA runs later, on the recording thread, but the dump was
++// written at once here: on a block that already read zero (a new one) the WAIT_REG_MEM passed,
++// the zeroing landed after the counts and the query never finished. The game polls its unfinished
++// queries every frame (0xec6970 hands them to GXRenderThread, 0xec6bf0) and makes new ones in
++// their place: FPS fell over a session (both players' logs, 2026-10-21), and when the game could
++// make no more, it began a query with no handle (null read at guest+0x2169edc).
++// BB_ZPASS_IN_ORDER=0: written at decode, as before.
++struct ZpassDump {
++    VAddr address;
++    u64 value;
++    u32 num_pairs;
++};
++
++std::atomic<u64> zpass_dumps{0}, zpass_dumps_in_order{0};
++
++bool ZpassInOrder() {
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_ZPASS_IN_ORDER");
++        return !env || env[0] != '0';
++    }();
++    return enabled;
++}
++
++void WriteZpassCounters(Vulkan::Rasterizer* rasterizer, const ZpassDump& dump, bool in_order) {
++    u64* results = reinterpret_cast<u64*>(dump.address);
++    const u64 size = u64(dump.num_pairs) * 2 * sizeof(u64);
++    bool waited = false;
++    for (u32 i = 0; i < dump.num_pairs; ++i, results += 2) {
++        const VAddr address = reinterpret_cast<VAddr>(results);
++        if (!in_order || !rasterizer) {
++            *results = dump.value;
++            if (rasterizer) {
++                rasterizer->NoteLateCommandWrite(address, results, sizeof(*results));
++            }
++            continue;
++        }
++        // As a WRITE_DATA: after the DMA before it, wherever that DMA wrote.
++        if (rasterizer->WriteDataOnGpu(address, &dump.value, sizeof(dump.value))) {
++            continue;
++        }
++        if (!waited) {
++            rasterizer->WaitHostCopiesFor(dump.address, size, BbStats::WaitWriteData);
++            rasterizer->WaitDeferredSignalsFor(BbStats::WaitWriteData, dump.address, size);
++            waited = true;
++        }
++        StoreLabel(results, dump.value, sizeof(dump.value));
++        rasterizer->NoteCommandWrite(address, &dump.value, sizeof(dump.value), true);
++    }
++}
++
++void RunZpassDump(Vulkan::Rasterizer& rasterizer, const u8* data) {
++    ZpassDump dump;
++    std::memcpy(&dump, data, sizeof(dump));
++    WriteZpassCounters(&rasterizer, dump, true);
++}
++
+ void WriteEosLabel(void* address, u64 value, u32 num_bytes) {
+     auto* memory = Core::Memory::Instance();
+     BbFreeCheck::Check(reinterpret_cast<u64>(address), num_bytes, &value, BbFreeCheck::Eos);
+@@ -582,8 +749,8 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
          return;
      }
      // Copies deferred to the recording thread precede writes the guest sees.
@@ -53768,7 +53866,20 @@ index fa7e146..c490547 100644
      rasterizer.ProcessDownloadImages();
      event_eos.SignalFence(&WriteEosLabel);
      if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
-@@ -856,6 +956,20 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
+@@ -599,6 +766,12 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
+ }
+ } // namespace
+ 
++// bbport: occlusion counter dumps so far, and those written in stream order (the Load: line).
++void OcclusionDumpCounts(u64& dumps, u64& in_order) {
++    dumps = zpass_dumps.load(std::memory_order_relaxed);
++    in_order = zpass_dumps_in_order.load(std::memory_order_relaxed);
++}
++
+ void Liverpool::NotePendingFences(const auto& event) {
+     const u64 position = rasterizer->DrawPipeHead();
+     while (!pending_fences.empty() && rasterizer->DrawPipeReached(pending_fences.front().position) &&
+@@ -856,6 +1029,20 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
          regs.num_indices = reinterpret_cast<const PM4CmdDrawIndexBufferSize*>(header)->num_indices;
          mark_field(regs.num_indices);
          break;
@@ -53789,7 +53900,7 @@ index fa7e146..c490547 100644
      case PM4ItOpcode::EventWrite: {
          const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
          if (event->event_type.Value() != EventType::SoVgtStreamoutFlush) {
-@@ -917,7 +1031,9 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
+@@ -917,7 +1104,9 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
              break;
          }
          const PM4ItOpcode op = header->type3.opcode;
@@ -53800,7 +53911,7 @@ index fa7e146..c490547 100644
              ++draws;
          } else if (op == PM4ItOpcode::DispatchDirect || op == PM4ItOpcode::DispatchIndirect) {
              ++dispatches;
-@@ -999,6 +1115,70 @@ void ReportBadPacket(uintptr_t base, std::size_t dwords, const u32* at, u64 seq,
+@@ -999,6 +1188,70 @@ void ReportBadPacket(uintptr_t base, std::size_t dwords, const u32* at, u64 seq,
      BbWriteLog::DumpRange(base, dwords * 4);
      std::fflush(stderr);
  }
@@ -53871,7 +53982,7 @@ index fa7e146..c490547 100644
  } // namespace
  
  Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
-@@ -1009,12 +1189,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1009,12 +1262,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
          seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
      if (draw_prep) {
          draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum);
@@ -53899,7 +54010,7 @@ index fa7e146..c490547 100644
  
      cblock.Reset();
  
-@@ -1041,11 +1236,23 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1041,11 +1309,23 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
              ReportBadPacket(base_addr, dcb_dwords, dcb.data(), seq, dcb_depth);
              UNREACHABLE_MSG("Wrong PM4 type {}", type);
              break;
@@ -53924,7 +54035,7 @@ index fa7e146..c490547 100644
          case 2:
              // Type-2 packet are used for padding purposes
              dcb = NextPacket(dcb, 1);
-@@ -1053,6 +1260,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1053,6 +1333,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
          case 3:
              const u32 count = header->type3.NumWords();
              const PM4ItOpcode opcode = header->type3.opcode;
@@ -53939,7 +54050,7 @@ index fa7e146..c490547 100644
              ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
              // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
              if (rasterizer && !PipelinedOpcode(opcode) &&
-@@ -1064,6 +1279,28 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1064,6 +1352,28 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
              }
              switch (opcode) {
              case PM4ItOpcode::Nop: {
@@ -53968,7 +54079,7 @@ index fa7e146..c490547 100644
                  const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
                  if (nop->header.count.Value() == 0) {
                      break;
-@@ -1077,7 +1314,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1077,7 +1387,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                      // may still be queued on the draw recording thread).
                      if (rasterizer) {
                          rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),
@@ -53978,7 +54089,7 @@ index fa7e146..c490547 100644
                      } else {
                          Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
                      }
-@@ -1209,6 +1447,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1209,6 +1520,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  break; // registers: ApplyGraphicsRegisterPacket
              }
              case PM4ItOpcode::SetPredication: {
@@ -53991,7 +54102,7 @@ index fa7e146..c490547 100644
                  LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
                  break;
              }
-@@ -1216,6 +1460,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1216,6 +1533,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  break; // registers: ApplyGraphicsRegisterPacket
              }
              case PM4ItOpcode::DrawIndex2: {
@@ -54002,7 +54113,7 @@ index fa7e146..c490547 100644
                  if (DebugState.DumpingCurrentReg()) {
                      DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                  }
-@@ -1229,6 +1477,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1229,6 +1550,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  break;
              }
              case PM4ItOpcode::DrawIndexOffset2: {
@@ -54013,7 +54124,7 @@ index fa7e146..c490547 100644
                  const auto* draw_index_off =
                      reinterpret_cast<const PM4CmdDrawIndexOffset2*>(header);
                  if (DebugState.DumpingCurrentReg()) {
-@@ -1245,6 +1497,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1245,6 +1570,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  break;
              }
              case PM4ItOpcode::DrawIndexAuto: {
@@ -54024,7 +54135,7 @@ index fa7e146..c490547 100644
                  const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndexAuto*>(header);
                  if (DebugState.DumpingCurrentReg()) {
                      DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
-@@ -1417,6 +1673,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1417,18 +1746,34 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
                      // registers: ApplyGraphicsRegisterPacket
                  } else if (event->event_index.Value() == EventIndex::ZpassDone) {
@@ -54039,7 +54150,34 @@ index fa7e146..c490547 100644
                      if (event->event_type.Value() == EventType::PixelPipeStatDump) {
                          static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                          static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
-@@ -1441,7 +1705,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+-                        u64* results = event->Address<u64*>();
+-                        for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
+-                            *results = pixel_counter | OcclusionCounterValidMask;
+-                            if (rasterizer) {
+-                                rasterizer->NoteLateCommandWrite(reinterpret_cast<VAddr>(results),
+-                                                                 results, sizeof(*results));
++                        const ZpassDump dump{event->Address<VAddr>(),
++                                             pixel_counter | OcclusionCounterValidMask,
++                                             num_counter_pairs};
++                        pixel_counter += OcclusionCounterStep;
++                        zpass_dumps.fetch_add(1, std::memory_order_relaxed);
++                        // bbport: in order with the DMA that zeroed the block (ZpassDump above).
++                        if (rasterizer && ZpassInOrder()) {
++                            if (rasterizer->RunInOrder(&RunZpassDump, &dump, sizeof(dump),
++                                                       BbToggle::PipelinedMemoryWrites, false,
++                                                       "ZpassDump")) {
++                                zpass_dumps_in_order.fetch_add(1, std::memory_order_relaxed);
++                                rasterizer->NotePendingGpuWrite(
++                                    dump.address, u64(dump.num_pairs) * 2 * sizeof(u64));
+                             }
++                        } else {
++                            WriteZpassCounters(rasterizer, dump, false);
+                         }
+-                        pixel_counter += OcclusionCounterStep;
+                     }
+                 }
+                 break;
+@@ -1441,7 +1786,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  }
                  if (rasterizer &&
                      rasterizer->RunInOrder(&RunEventWriteEos, event_eos, sizeof(*event_eos),
@@ -54048,7 +54186,7 @@ index fa7e146..c490547 100644
                      NotePendingFences(*event_eos);
                  }
                  break;
-@@ -1457,7 +1721,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1457,7 +1802,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  }
                  if (rasterizer) {
                      if (rasterizer->RunInOrder(&RunEventWriteEop, event_eop, sizeof(*event_eop),
@@ -54058,7 +54196,7 @@ index fa7e146..c490547 100644
                          NotePendingFences(*event_eop);
                      }
                  } else {
-@@ -1485,7 +1750,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1485,7 +1831,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                  dma_data->NumBytes());
                  }
                  if (rasterizer->RunInOrder(&RunDmaData, dma_data, sizeof(PM4DmaData),
@@ -54067,7 +54205,7 @@ index fa7e146..c490547 100644
                      (dma_data->dst_sel == DmaDataDst::Memory ||
                       dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
                      rasterizer->NotePendingGpuWrite(dma_data->DstAddress<VAddr>(),
-@@ -1507,7 +1772,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1507,7 +1853,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                             (count - 2) * sizeof(u32),
                                             BbWriteLog::WriteDataIntent);
                      if (rasterizer->RunInOrder(&RunWriteData, header, (count + 1) * sizeof(u32),
@@ -54077,7 +54215,7 @@ index fa7e146..c490547 100644
                          NotePendingWrite(*write_data, (count - 2) * sizeof(u32));
                          rasterizer->NotePendingGpuWrite(write_data->Address<VAddr>(),
                                                          (count - 2) * sizeof(u32));
-@@ -1578,6 +1844,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1578,6 +1925,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 !BbToggle::Disabled(BbToggle::PendingFenceWaits) &&
                                 PendingFenceValue(wait_reg_mem->Address<VAddr>(), value) &&
                                 wait_reg_mem->TestValue(value)) {
@@ -54089,7 +54227,7 @@ index fa7e146..c490547 100644
                      break;
                  }
                  // Else the value may come from a fence that thread has yet to write: let it
-@@ -1592,6 +1863,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1592,6 +1944,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                      if (rasterizer && rasterizer->HasUnsubmittedSignals()) {
                          rasterizer->Flush();
                      }
@@ -54101,7 +54239,7 @@ index fa7e146..c490547 100644
                      YIELD_GFX();
                  }
                  break;
-@@ -1616,7 +1892,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1616,7 +1973,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  break;
              }
              case PM4ItOpcode::WaitOnCeCounter: {
@@ -54112,7 +54250,7 @@ index fa7e146..c490547 100644
                      RESUME_GFX(ce_task);
                  }
                  break;
-@@ -1655,6 +1933,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+@@ -1655,6 +2014,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                  UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                                  static_cast<u32>(opcode), count);
              }
@@ -54130,7 +54268,7 @@ index fa7e146..c490547 100644
              dcb = NextPacket(dcb, header->type3.NumWords() + 1);
              break;
          }
-@@ -2125,7 +2414,7 @@ void Liverpool::SignalDecodedFrames() {
+@@ -2125,7 +2495,7 @@ void Liverpool::SignalDecodedFrames() {
                      [retired] { Libraries::GnmDriver::NoteFramesRetired(retired); });
                  self.Flush();
              },
@@ -96673,7 +96811,7 @@ index 9860c61..c0e5456 100644
      dp = next(p for p in ph if p['type'] == 2)
      dyn = []
 diff --git a/scripts/run_windows.py b/scripts/run_windows.py
-index ea6daf1..ea365c7 100644
+index ea6daf1..78144f6 100644
 --- a/scripts/run_windows.py
 +++ b/scripts/run_windows.py
 @@ -10,17 +10,24 @@ The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_
@@ -96891,7 +97029,7 @@ index ea6daf1..ea365c7 100644
      if not (game / 'eboot.bin').is_file():
          sys.exit(f'No eboot.bin in {game} (pass --game-dir or set BB_GAME_DIR).')
      original = game.resolve()
-@@ -138,39 +283,56 @@ def main():
+@@ -138,39 +283,60 @@ def main():
                         '--config', os.environ.get('BB_MODS_CONFIG', data / 'mods.json'),
                         '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
      overlay = merged if merged.resolve() != original else None
@@ -96924,9 +97062,17 @@ index ea6daf1..ea365c7 100644
 -                from engine_assets import prepare_mirror, verify_executable
 -                os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
 -                if settings_value(config, 'change_appearance') == '1':
--                    asset = prepare_mirror(merged, out / 'eboot.elf', data / 'engine-assets')
--                    os.environ['BB_DREAM_MIRROR_ASSET'] = str(asset)
--                    print(f'Engine: Dream mirror prepared locally: {asset}', flush=True)
++        # bbport: the engine's own features - picture tuning, cheats, trophies from a save, the
++        # online fixes - all check the executable first, so it is always verified (~0.1 s).
++        try:
++            from engine_assets import prepare_mirror, verify_executable
++            os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
++            if settings_value(config, 'change_appearance') == '1':
++                # A modded Hunter's Dream layout only costs the mirror, not the PC menus below.
++                try:
+                     asset = prepare_mirror(merged, out / 'eboot.elf', data / 'engine-assets')
+                     os.environ['BB_DREAM_MIRROR_ASSET'] = str(asset)
+                     print(f'Engine: Dream mirror prepared locally: {asset}', flush=True)
 -                if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
 -                    or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
 -                    from engine_assets import prepare_menu_assets
@@ -96941,15 +97087,8 @@ index ea6daf1..ea365c7 100644
 -                        print(f'Engine: native PC menus disabled: {error}', flush=True)
 -            except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
 -                print(f'Engine: enhancement preparation skipped: {error}', flush=True)
-+        # bbport: the engine's own features - picture tuning, cheats, trophies from a save, the
-+        # online fixes - all check the executable first, so it is always verified (~0.1 s).
-+        try:
-+            from engine_assets import prepare_mirror, verify_executable
-+            os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
-+            if settings_value(config, 'change_appearance') == '1':
-+                asset = prepare_mirror(merged, out / 'eboot.elf', data / 'engine-assets')
-+                os.environ['BB_DREAM_MIRROR_ASSET'] = str(asset)
-+                print(f'Engine: Dream mirror prepared locally: {asset}', flush=True)
++                except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
++                    print(f'Engine: Dream mirror skipped: {error}', flush=True)
 +            if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
 +                or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
 +                from engine_assets import prepare_menu_assets
@@ -96974,7 +97113,7 @@ index ea6daf1..ea365c7 100644
          # Sizes chosen below for the previous launch are recomputed after an in-game restart.
          if os.environ.get('BB_AUTO_RENDER_RES') == '1':
              for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
-@@ -192,14 +354,38 @@ def main():
+@@ -192,14 +358,38 @@ def main():
              print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
          elif scaled_output:
              os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
@@ -97015,7 +97154,7 @@ index ea6daf1..ea365c7 100644
          probe = ROOT / os.environ.get('BB_PROBE', out / 'bb-probe.exe')
          command = [probe, out / 'boot-linked.bin', '--content-profile', out / 'content.bin',
                     '--patches', out / 'patches.bin', '--app0', merged,
-@@ -219,7 +405,9 @@ def main():
+@@ -219,7 +409,9 @@ def main():
          except KeyboardInterrupt:
              status = 130
          print(f'bb-probe exited with code {status}', flush=True)
@@ -100496,10 +100635,10 @@ index 0000000..a08f13a
 +} // namespace start
 diff --git a/start/main.cpp b/start/main.cpp
 new file mode 100644
-index 0000000..3d4d767
+index 0000000..cafb99e
 --- /dev/null
 +++ b/start/main.cpp
-@@ -0,0 +1,524 @@
+@@ -0,0 +1,529 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bb-start.exe: starts Bloodborne PC natively (was scripts/run_windows.py and the scripts it ran).
 +//
@@ -100864,9 +101003,14 @@ index 0000000..3d4d767
 +    try {
 +        SetEnv("BB_ENGINE_IMAGE_SHA256", VerifyExecutable(out / "eboot.elf"));
 +        if (is_on("change_appearance")) {
-+            const fs::path asset = PrepareMirror(merged, out / "eboot.elf", data / "engine-assets");
-+            SetEnv("BB_DREAM_MIRROR_ASSET", Utf8(asset));
-+            Log("Engine: Dream mirror prepared locally: %s", Utf8(asset).c_str());
++            // A modded Hunter's Dream layout only costs the mirror, not the PC menus below.
++            try {
++                const fs::path asset = PrepareMirror(merged, out / "eboot.elf", data / "engine-assets");
++                SetEnv("BB_DREAM_MIRROR_ASSET", Utf8(asset));
++                Log("Engine: Dream mirror prepared locally: %s", Utf8(asset).c_str());
++            } catch (const std::exception& e) {
++                Log("Engine: Dream mirror skipped: %s", e.what());
++            }
 +        }
 +        if (is_on("change_appearance") || is_on("camera_controls") || is_on("rebirth") || is_on("graphics_controls") ||
 +            Setting(settings, "pc_controls") != "0" || Setting(settings, "widescreen") != "0") {
