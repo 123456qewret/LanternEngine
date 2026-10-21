@@ -124,6 +124,10 @@ namespace BloodborneLauncher.Core
             OnUnless0("BB_SOUND_HACK", Fixes, "Weapon sound save fix",
                 "Sets the flag in the game's save that some weapon and player sounds need (without it they never play), before " +
                 "the game reads the save. Off leaves saves untouched"),
+            Flag("BB_RED_ZONE_FUNCTIONS", Fixes, "Intel effect crash fix (test)",
+                "For crashes in effects on Intel 12th-14th gen CPUs (Ebrietas, Witch of Hemwick, One Reborn, the Cainhurst " +
+                "cutscene): the two effect ribbon writers keep their data where Windows can't overwrite it. Every effect stays " +
+                "drawn. Turn off the Effect trail crash fix with it, and post your log either way"),
             Flag("BB_INTEL_TONEMAP_FIX", Fixes, "Intel black tonemap fix",
                 "Adds the Intel Black Tonemap Fix patch: for Intel CPUs where the picture turns black or far too dark " +
                 "(the DLC areas most)"),

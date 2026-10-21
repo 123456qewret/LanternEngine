@@ -51,6 +51,24 @@ namespace BloodborneLauncher.Views
                 "Which NVIDIA model DLSS runs. Applied on the next launch", Choices.DlssModels, "dlss_preset");
             IniToggle(SymbolRegular.ArrowMove24, "Object motion vectors", "Less ghosting on characters; costs about 10% FPS", "object_motion");
             IniToggle(SymbolRegular.DataUsage24, "Show FPS", null, "show_fps");
+            // The FPS counter's look (live in game too: Insert or L3 + R3 › Other).
+            IniCombo(SymbolRegular.PositionToFront24, "FPS counter position", null, new Choice[]
+            {
+                new("Top right", "0"), new("Top left", "1"), new("Bottom right", "2"), new("Bottom left", "3"), new("Top centre", "4"),
+            }, "fps_position");
+            IniSlider(SymbolRegular.TextFontSize24, "FPS counter size", 0.75, 2.0, "fps_scale");
+            IniCombo(SymbolRegular.Color24, "FPS counter text colour", "Any colour in game: Insert or L3 + R3 › Other", new Choice[]
+            {
+                new("White", "#FFFFFF"), new("Yellow", "#FFD54A"), new("Green", "#7CFC8A"), new("Cyan", "#6FE3FF"),
+                new("Red", "#FF5A5A"), new("Orange", "#FFA040"), new("Pink", "#FF8AD8"), new("Black", "#000000"),
+            }, "fps_text_color");
+            IniSlider(SymbolRegular.Eye24, "FPS counter text opacity", 0.1, 1.0, "fps_text_opacity", fallback: 1.0);
+            IniCombo(SymbolRegular.ColorBackground24, "FPS counter background", null, new Choice[]
+            {
+                new("Dark grey", "#0F0F0F"), new("Black", "#000000"), new("Dark red", "#3A0A0A"), new("Dark blue", "#0A1A3A"), new("White", "#FFFFFF"),
+            }, "fps_bg_color");
+            IniSlider(SymbolRegular.Blur24, "FPS counter background opacity", 0.0, 1.0, "fps_bg_opacity", fallback: 0.5);
+            IniToggle(SymbolRegular.BorderAll24, "FPS counter border", null, "fps_border");
             // What the counter shows (on unless turned off), folded under the switch.
             var fpsParts = Advanced("What the FPS counter shows");
             foreach (var (icon, key, title) in new[]
@@ -120,8 +138,8 @@ namespace BloodborneLauncher.Views
             SettingToggle(SymbolRegular.FlashFlow24, "Background shader compiling",
                 "New shaders compile on helper threads instead of freezing the frame: much shorter hitches when you reach a new area. On by default",
                 "exp_async_pipelines", exp);
-            Feature(SymbolRegular.EyeOff24, "Occlusion culling",
-                "The game skips objects hidden behind walls instead of drawing them all: much higher FPS in dense areas. Turn it off if lamps or glare flicker",
+            SettingToggle(SymbolRegular.EyeOff24, "Occlusion culling",
+                "Off by default. The game skips objects hidden behind walls: higher FPS in dense areas, but objects and floors can appear late or flicker",
                 "exp_occlusion", exp);
             Feature(SymbolRegular.FastForward24, "Faster draw thread",
                 "Remembers texture and sampler lookups and hands the end of each frame to the draw thread: higher FPS in busy areas. New: turn it off if the game hangs or crashes",
