@@ -60,6 +60,13 @@ namespace BloodborneLauncher.Core
             }
             else
             {
+#if AVALONIA
+                // TODO(linux): start the engine's Linux build here once it exists (its start program with
+                // --game-dir and the same environment). Until then a custom command can start the game.
+                if (!OperatingSystem.IsWindows())
+                    return L.T("Starting the Lantern Engine on Linux is not available yet: the engine's Linux build is still to come. ") +
+                           L.T("Meanwhile Settings › Launch › Start the game with › Custom command can start the game another way.");
+#endif
                 if (!Paths.IsPortDir(Paths.PortDir))
                     return "The engine folder is not set. Choose it in Settings › Lantern Engine.";
                 if (!Writable(Path.Combine(Paths.EngineDir, "out")))

@@ -199,8 +199,10 @@ namespace BloodborneLauncher.Views
             Child = grid;
         }
 
-        /// <summary>"TAA (native anti-aliasing)" → "TAA": the full label is in the tooltip.</summary>
-        public static string Short(string label) => label.Split(" (")[0];
+        /// <summary>"TAA (native anti-aliasing)" → "TAA": the full label is in the tooltip. Full-width and
+        /// unspaced brackets count too, as Chinese and Korean write them.</summary>
+        public static string Short(string label) =>
+            label.IndexOfAny(new[] { '(', '（' }) is > 0 and var i ? label[..i].TrimEnd() : label;
 
         public void Select(int index, bool notify)
         {
@@ -407,7 +409,7 @@ namespace BloodborneLauncher.Views
         /// </summary>
         protected Panel Advanced(string title = "Advanced", Panel? into = null)
         {
-            var section = new AdvancedSection(title);
+            var section = new AdvancedSection(title == "Advanced" ? L.T("Advanced") : title);
             (into ?? Body).Children.Add(section);
             return section.Rows;
         }
@@ -649,8 +651,18 @@ namespace BloodborneLauncher.Views
                 VerticalContentAlignment = VerticalAlignment.Center,
                 ClearButtonEnabled = false,
                 Margin = new Thickness(10, 0, 0, 0),
-                ToolTip = L.F($"Type a value from {min.ToString(format, culture)} to {max.ToString(format, culture)} and press Enter"),
             };
+            // The range, shown at once when a typed value was outside it (it is then kept at the
+            // nearest end, e.g. 0 for an opacity typed as -0.5) instead of changing silently.
+            var rangeTip = new System.Windows.Controls.ToolTip
+            {
+                Content = L.F($"Type a value from {min.ToString(format, culture)} to {max.ToString(format, culture)} and press Enter"),
+                PlacementTarget = value,
+                Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
+            };
+            value.ToolTip = rangeTip;
+            var tipTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            tipTimer.Tick += (_, _) => { tipTimer.Stop(); rangeTip.IsOpen = false; };
             value.SetResourceReference(System.Windows.Controls.Control.FontFamilyProperty, "MonoFont");
             void Show() => value.Text = slider.Value.ToString(format, culture);
             void Commit()
@@ -661,6 +673,12 @@ namespace BloodborneLauncher.Views
                 {
                     Show(); // not a number: back to the current value
                     return;
+                }
+                if (typed < min || typed > max)
+                {
+                    rangeTip.IsOpen = true;
+                    tipTimer.Stop();
+                    tipTimer.Start();
                 }
                 typed = Math.Clamp(typed, min, max);
                 if (step > 0) typed = Math.Clamp(min + Math.Round((typed - min) / step) * step, min, max);

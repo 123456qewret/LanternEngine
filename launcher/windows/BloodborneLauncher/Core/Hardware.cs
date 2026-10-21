@@ -41,6 +41,14 @@ namespace BloodborneLauncher.Core
 
         private static Hardware Probe()
         {
+#if AVALONIA
+            return OperatingSystem.IsWindows() ? ProbeWindows() : ProbeLinux();
+        }
+
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+        private static Hardware ProbeWindows()
+        {
+#endif
             var (gpu, vendor, vram) = DetectGpu();
             var cpu = "CPU";
             try
@@ -57,6 +65,9 @@ namespace BloodborneLauncher.Core
             return new Hardware(gpu, vendor, vram, cpu, Environment.ProcessorCount, ram, w, h, Math.Max(hz, 1));
         }
 
+#if AVALONIA
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+#endif
         private static (string Name, string Vendor, long Vram) DetectGpu()
         {
             var best = ("GPU", "", 0L);
@@ -89,6 +100,106 @@ namespace BloodborneLauncher.Core
             return best;
         }
 
+#if AVALONIA
+        // ---------------------------------------------------------------- Linux
+
+        /// <summary>Linux: the CPU from /proc/cpuinfo, the GPUs from /sys/class/drm (named by lspci,
+        /// memory from amdgpu's sysfs file or nvidia-smi), the display from the launcher's screen.</summary>
+        private static Hardware ProbeLinux()
+        {
+            var cpu = "CPU";
+            try
+            {
+                var line = File.ReadLines("/proc/cpuinfo").FirstOrDefault(l => l.StartsWith("model name", StringComparison.Ordinal));
+                if (line?.Split(':', 2) is [_, var name] && name.Trim().Length > 0) cpu = name.Trim();
+            }
+            catch { /* unreadable: "CPU" */ }
+            var (gpu, vendor, vram) = DetectGpuLinux();
+            var ram = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            var (w, h, hz) = DisplayLinux();
+            return new Hardware(gpu, vendor, vram, cpu, Environment.ProcessorCount, ram, w, h, Math.Max(hz, 1));
+        }
+
+        private static (string Name, string Vendor, long Vram) DetectGpuLinux()
+        {
+            var best = ("GPU", "", 0L);
+            try
+            {
+                foreach (var card in Directory.GetDirectories("/sys/class/drm", "card*"))
+                {
+                    if (Path.GetFileName(card).Contains('-')) continue; // a connector (card0-DP-1), not a GPU
+                    var device = Path.Combine(card, "device");
+                    var id = ReadText(Path.Combine(device, "vendor")).ToLowerInvariant();
+                    if (id.Length == 0) continue;
+                    var vendor = id == "0x10de" ? "NVIDIA" : id == "0x1002" ? "AMD" : id == "0x8086" ? "Intel" : "";
+                    // The PCI slot (0000:01:00.0) names the card for lspci.
+                    var slot = new DirectoryInfo(device).LinkTarget is { } target ? Path.GetFileName(target) : "";
+                    var label = PciName(slot) ?? (vendor.Length > 0 ? vendor + " GPU" : "GPU");
+                    long memory = long.TryParse(ReadText(Path.Combine(device, "mem_info_vram_total")), out var amd) ? amd : 0;
+                    if (memory == 0 && vendor == "NVIDIA") memory = NvidiaMemory();
+                    if (memory > best.Item3 || best.Item1 == "GPU") best = (label, vendor, memory);
+                }
+            }
+            catch { /* no sysfs: unknown GPU */ }
+            return best;
+        }
+
+        private static string ReadText(string path)
+        {
+            try { return File.Exists(path) ? File.ReadAllText(path).Trim() : ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>"NVIDIA GeForce RTX 4070" from lspci -mm's vendor and device fields; null without lspci.</summary>
+        private static string? PciName(string slot)
+        {
+            if (slot.Length == 0 || Run("lspci", $"-mm -s {slot}") is not { Length: > 0 } output) return null;
+            var fields = System.Text.RegularExpressions.Regex.Matches(output, "\"([^\"]*)\"").Select(m => m.Groups[1].Value).ToList();
+            if (fields.Count < 3) return null;
+            var vendor = fields[1].Replace(" Corporation", "").Replace("Advanced Micro Devices, Inc. [AMD/ATI]", "AMD");
+            // "AD104 [GeForce RTX 4070]": the marketing name in brackets.
+            var device = System.Text.RegularExpressions.Regex.Match(fields[2], @"\[([^\]]+)\]") is { Success: true } m ? m.Groups[1].Value : fields[2];
+            return $"{vendor} {device}".Trim();
+        }
+
+        private static long NvidiaMemory() =>
+            Run("nvidia-smi", "--query-gpu=memory.total --format=csv,noheader,nounits")?.Split('\n')
+                .Select(l => long.TryParse(l.Trim(), out var mib) ? mib << 20 : 0).DefaultIfEmpty(0).Max() ?? 0;
+
+        /// <summary>The primary screen's size from the launcher's window, its refresh rate from xrandr.</summary>
+        private static (int W, int H, int Hz) DisplayLinux()
+        {
+            var screen = (Avalonia.Application.Current?.ApplicationLifetime as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime)
+                ?.MainWindow?.Screens.Primary;
+            var (w, h) = screen == null ? (0, 0) : (screen.Bounds.Width, screen.Bounds.Height);
+            var hz = 60;
+            if (Run("xrandr", "--current") is { } modes &&
+                System.Text.RegularExpressions.Regex.Match(modes, @"(\d+)x(\d+)\s+[^\n]*?(\d+(?:\.\d+)?)\*") is { Success: true } current)
+            {
+                if (w == 0) (w, h) = (int.Parse(current.Groups[1].Value), int.Parse(current.Groups[2].Value));
+                hz = (int)Math.Round(double.Parse(current.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture));
+            }
+            return (w, h, hz);
+        }
+
+        /// <summary>A tool's output, or null when it is not installed or fails.</summary>
+        private static string? Run(string tool, string args)
+        {
+            try
+            {
+                using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(tool, args)
+                    { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
+                if (process == null) return null;
+                var output = process.StandardOutput.ReadToEnd();
+                return process.WaitForExit(3000) && process.ExitCode == 0 ? output : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+#endif
         // ---------------------------------------------------------------- recommendation
 
         /// <summary>What would change to suit this PC; empty when the settings already do.</summary>

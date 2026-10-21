@@ -145,7 +145,7 @@ namespace BloodborneLauncher.Core
             if (s.Bool("fsr_profile")) env["BB_FSR4_PROFILE"] = "1";
             if (s.Bool("audio_stats")) env["BB_AUDIO_STATS"] = "1";
             if (s.Bool("load_profile")) env["BB_SAMPLE_THREADS"] = "load";
-            if (s.Bool("fsr4_balanced")) env["BB_FSR4_BALANCED"] = "1";
+            if (s.Bool("fsr4_balanced")) env["BB_FSR4_MODEL"] = "balanced";
             // Experimental engine features: on by default, each can be turned off.
             env["BB_PRECISE_PACING"] = s.Bool("exp_frame_pacing") ? "1" : "0";
             env["BB_IMAGE_WRITEBACK_GC"] = s.Bool("exp_vram_cleanup") ? "1" : "0";
@@ -191,7 +191,6 @@ namespace BloodborneLauncher.Core
             if (s.Bool("section_stats")) env["BB_SECTIONS"] = "1";
             if (s.Str("overlay_keys") is "insert" or "off") env["BB_OVERLAY_KEYS"] = s.Str("overlay_keys");
             if (s.Bool("legacy_shaders")) env["BB_NATIVE_SHADERS"] = "0";
-            if (s.Str("dlss_preset") is { Length: > 0 } dlss && dlss != "k") env["BB_DLSS_PRESET"] = dlss;
             if (s.Bool("shader_capture"))
             {
                 env["BB_SHADER_CAPTURE"] = "1";

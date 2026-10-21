@@ -323,13 +323,13 @@ namespace BloodborneLauncher
                         : new[] { "pic1.png", "pic0.png" }
                             .Select(n => System.IO.Path.Combine(game, "sce_sys", n))
                             .FirstOrDefault(System.IO.File.Exists);
+                    // No picture of our own: without the game's art the background stays plain.
+                    if (art == null) return null;
                     var bitmap = new System.Windows.Media.Imaging.BitmapImage();
                     bitmap.BeginInit();
                     bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
                     bitmap.DecodePixelWidth = width;
-                    bitmap.UriSource = art != null
-                        ? new Uri(art, UriKind.Absolute)
-                        : new Uri("pack://application:,,,/Assets/backdrop.jpg", UriKind.Absolute);
+                    bitmap.UriSource = new Uri(art, UriKind.Absolute);
                     bitmap.EndInit();
                     bitmap.Freeze(); // decoded here, usable on the UI thread
                     return bitmap;
@@ -998,6 +998,25 @@ namespace BloodborneLauncher
                 var choice = Prompt.Choose(L.T("Windows may run out of memory"), memory, L.T("Cancel"), L.T("Don't ask again"), L.T("Start anyway"));
                 if (choice <= 0) return;
                 if (choice == 1) s.Set("memory_check_off", true);
+            }
+
+            // bbport: the current profile has no saves, but saves were found elsewhere (a folder used
+            // before, or SaveGuard's safety copies): asked before the game starts a new one.
+            var savesRoot = GameEnvironment.SavesRoot(s);
+            var savesProfile = PlayerProfiles.Current(s);
+            var packageSaves = System.IO.Path.Combine(Paths.DataDir, "user");
+            var lost = await System.Threading.Tasks.Task.Run(() => SaveGuard.Elsewhere(savesRoot, savesProfile, new[] { packageSaves }));
+            if (lost.FirstOrDefault() is { } foundSaves)
+            {
+                var (start, changed) = SaveGuard.Ask(s, foundSaves, Prompt.Choose, Prompt.Tell);
+                if (changed)
+                {
+                    ws.SaveNow();
+                    ws.Log(foundSaves.Copy == null ? L.F($"Saves folder: {foundSaves.Root}")
+                                                   : L.T("Saves restored from the safety copy."), LogLevel.Good);
+                    ReloadPages();
+                }
+                if (!start) return;
             }
 
             var error = ws.StartGame();

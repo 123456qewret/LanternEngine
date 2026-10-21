@@ -48,7 +48,7 @@ namespace BloodborneLauncher.Views
             IniToggle(SymbolRegular.Timer24, L.T("Frame generation: game at half refresh rate"),
                 L.T("Every generated frame reaches the screen evenly (60 + 60 at 120 Hz). Off: the game runs faster, but the screen skips some generated frames"), "frame_gen_cap");
 
-            SettingCombo(SymbolRegular.BrainCircuit24, L.T("DLSS model"),
+            IniCombo(SymbolRegular.BrainCircuit24, L.T("DLSS model"),
                 L.T("Which NVIDIA model DLSS runs. Applied on the next launch"), Choices.DlssModels, "dlss_preset");
             IniToggle(SymbolRegular.ArrowMove24, L.T("Object motion vectors"), L.T("Less ghosting on characters; costs about 10% FPS"), "object_motion");
             IniToggle(SymbolRegular.DataUsage24, L.T("Show FPS"), null, "show_fps");
@@ -110,7 +110,7 @@ namespace BloodborneLauncher.Views
             IniSlider(SymbolRegular.ArrowMaximize24, L.T("Distance"), 0.5, 1.5, "camera_distance_scale");
             IniSlider(SymbolRegular.ArrowBidirectionalUpDown24, L.T("Height"), 0.5, 1.5, "camera_height_scale");
 
-            // Engine features from 0.9.4, each with a switch, as IFreemz's "Bloodborne - Experimental".
+            // Engine features from 0.9.4, each with a switch of its own.
             Group(L.T("Experimental"));
             // Engine preset: New or Legacy (0.9.33) turns the newer features below on or off at
             // once; a feature changed by hand shows Custom.

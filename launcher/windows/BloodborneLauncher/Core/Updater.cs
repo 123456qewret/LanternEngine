@@ -26,7 +26,7 @@ namespace BloodborneLauncher.Core
         public static string ReleasesPage => $"https://github.com/{Repository}/releases";
 
         /// <summary>The engine build this launcher is made for (package.json "engine").</summary>
-        public const string EngineId = "lantern-fps86";
+        public const string EngineId = "lantern-fps87";
 
         public const string ExeName = "Lantern Engine.exe";
         /// <summary>The launcher's name before 0.9.34 beta 8 (now a forwarder to ExeName).</summary>
@@ -345,6 +345,15 @@ namespace BloodborneLauncher.Core
         /// <summary>Copies a new package over this one, leaving the player's own files alone.</summary>
         private static void CopyPackage(string from, string to, string self, List<string> skipped)
         {
+            // The shader catalog is one set (its keys name its permutations by number): a game's
+            // catalog in the package replaces the old one whole, so no older catalog file stays.
+            var catalogs = Path.Combine(from, "engine", "shader-catalog");
+            if (Directory.Exists(catalogs))
+                foreach (var game in Directory.GetDirectories(catalogs))
+                {
+                    var old = Path.Combine(to, "engine", "shader-catalog", Path.GetFileName(game));
+                    try { if (Directory.Exists(old)) Directory.Delete(old, recursive: true); } catch (Exception) { }
+                }
             foreach (var file in Directory.GetFiles(from, "*", SearchOption.AllDirectories))
             {
                 var relative = Path.GetRelativePath(from, file);
@@ -402,6 +411,12 @@ namespace BloodborneLauncher.Core
             }
         }
 
+#if AVALONIA
+        /// <summary>Whether this launcher can update itself: releases carry the Windows package (Lantern
+        /// Engine.exe and the engine's .exe files), so only on Windows.</summary>
+        public static bool Supported => OperatingSystem.IsWindows();
+
+#endif
         /// <summary>Removes the exe an update moved aside (it was still running then).</summary>
         public static void CleanUp()
         {

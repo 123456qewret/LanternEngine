@@ -13,6 +13,53 @@ namespace BloodborneLauncher.Core
 
         public static void Play(int volumePercent, string customFile = "")
         {
+#if AVALONIA
+            if (!OperatingSystem.IsWindows())
+            {
+                PlayLinux(volumePercent, customFile);
+                return;
+            }
+            PlayWindows(volumePercent, customFile);
+        }
+
+        /// <summary>Linux: the .wav through the desktop's sound server (PipeWire, PulseAudio) or ALSA.</summary>
+        private static void PlayLinux(int volumePercent, string customFile)
+        {
+            try
+            {
+                var volume = Math.Clamp(volumePercent, 0, 100);
+                var file = customFile.Length > 0 && File.Exists(customFile) ? customFile : null;
+                if (file == null)
+                {
+                    file = Path.Combine(Path.GetTempPath(), $"lantern-chime-{volume}.wav");
+                    if (!File.Exists(file)) File.WriteAllBytes(file, Wave(volume / 100.0));
+                }
+                foreach (var player in new[] { "pw-play", "paplay", "aplay" })
+                {
+                    try
+                    {
+                        var info = new System.Diagnostics.ProcessStartInfo(player) { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true };
+                        if (player == "aplay") info.ArgumentList.Add("-q");
+                        info.ArgumentList.Add(file);
+                        System.Diagnostics.Process.Start(info)?.Dispose();
+                        return;
+                    }
+                    catch (System.ComponentModel.Win32Exception)
+                    {
+                        // Not installed: the next one.
+                    }
+                }
+            }
+            catch
+            {
+                // No audio: the notification still shows.
+            }
+        }
+
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+        private static void PlayWindows(int volumePercent, string customFile)
+        {
+#endif
             try
             {
                 if (customFile.Length > 0 && File.Exists(customFile))

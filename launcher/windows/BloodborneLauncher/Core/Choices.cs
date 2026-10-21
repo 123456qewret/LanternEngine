@@ -23,7 +23,7 @@
         public static readonly Choice[] FrameGeneration =
         {
             new(L.T("Off"), "off"),
-            new("FSR 3.1 (2x)", "fsr3", "Needs an upscaler. Not in menus, movies or with HDR output"),
+            new("FSR 3.1 (2x)", "fsr3", L.T("Needs an upscaler. Not in menus, movies or with HDR output")),
         };
 
         public static readonly Choice[] Presets =
@@ -57,7 +57,7 @@
             new("2560 × 1600 (16:10)", "2560x1600"),
             // Any other display: its own size, the camera and UI widened to fill it.
             new(L.T("Display (auto)"), "auto", L.T("Your display's own resolution, whatever its shape: the picture fills the screen")),
-            new("Custom", Custom, "Any width and height: set them below"),
+            new(L.T("Custom"), Custom, L.T("Any width and height: set them below")),
         };
 
         /// <summary>The Output resolution list's entry for a size it does not name.</summary>
@@ -102,8 +102,8 @@
 
         public static readonly Choice[] CameraTuning =
         {
-            new("Original (the game's camera)", "original", "As the game has it, at any frame rate"),
-            new("FPS++ retune", "fps++", "Kyo's 60 FPS++ camera: further back and slower to follow"),
+            new(L.T("Original (the game's camera)"), "original", L.T("As the game has it, at any frame rate")),
+            new(L.T("FPS++ retune"), "fps++", L.T("Kyo's 60 FPS++ camera: further back and slower to follow")),
         };
 
         public static readonly Choice[] ModelLod =
@@ -127,17 +127,17 @@
         /// <summary>The DLSS model (BB_DLSS_PRESET): NVIDIA's render presets.</summary>
         public static readonly Choice[] DlssModels =
         {
-            new("Transformer (preset K)", "k", "The newer model: steadier thin and moving objects (a weapon on the back, railings)"),
-            new("CNN (preset E)", "e", "The older model: a little faster on RTX 20 and 30 cards, softer and more ghosting in motion"),
-            new("The DLL's default", "default", "Whatever the included DLSS version picks for each quality mode"),
+            new("Transformer (preset K)", "k", L.T("The newer model: steadier thin and moving objects (a weapon on the back, railings)")),
+            new("CNN (preset E)", "e", L.T("The older model: a little faster on RTX 20 and 30 cards, softer and more ghosting in motion")),
+            new(L.T("The DLL's default"), "default", L.T("Whatever the included DLSS version picks for each quality mode")),
         };
 
         /// <summary>What opens the port's in-game settings menu (BB_OVERLAY_KEYS).</summary>
         public static readonly Choice[] OverlayKeys =
         {
-            new("Insert or L3 + R3", "both", "The keyboard's Insert key, or both sticks pressed on a controller"),
-            new("Insert only", "insert", "Pressing both sticks in a fight no longer opens it"),
-            new(L.T("Off"), "off", "The menu never opens; settings stay in the launcher and the game's PC menus"),
+            new(L.T("Insert or L3 + R3"), "both", L.T("The keyboard's Insert key, or both sticks pressed on a controller")),
+            new(L.T("Insert only"), "insert", L.T("Pressing both sticks in a fight no longer opens it")),
+            new(L.T("Off"), "off", L.T("The menu never opens; settings stay in the launcher and the game's PC menus")),
         };
 
         /// <summary>The port's in-game settings menu (Insert / L3+R3).</summary>
@@ -202,7 +202,7 @@
         /// <summary>pad_icons: the game's controller icons as they are (PlayStation's) or as an Xbox controller's buttons; automatic follows the controller in use.</summary>
         public static readonly Choice[] DiscordStatus =
         {
-            new(L.T("Off"), "off"), new("Lantern Engine", "lantern"), new("Custom", "custom"),
+            new(L.T("Off"), "off"), new("Lantern Engine", "lantern"), new(L.T("Custom"), "custom"),
         };
 
         public static readonly Choice[] PadIcons =

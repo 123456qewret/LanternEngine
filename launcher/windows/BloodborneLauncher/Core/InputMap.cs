@@ -1,6 +1,10 @@
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+#if AVALONIA
+using Avalonia.Input;
+#else
 using System.Windows.Input;
+#endif
 
 namespace BloodborneLauncher.Core
 {
@@ -231,6 +235,9 @@ namespace BloodborneLauncher.Core
 
         public static List<Pad> Detect()
         {
+#if AVALONIA
+            if (!OperatingSystem.IsWindows()) return DetectLinux();
+#endif
             var pads = new List<Pad>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var path in HidPaths())
@@ -258,6 +265,34 @@ namespace BloodborneLauncher.Core
             return pads;
         }
 
+#if AVALONIA
+        /// <summary>Linux: the input devices with a joystick handler (js0…) in /proc/bus/input/devices,
+        /// named by their known model or their own name; bus 0005 is Bluetooth.</summary>
+        private static List<Pad> DetectLinux()
+        {
+            var pads = new List<Pad>();
+            try
+            {
+                var text = File.ReadAllText("/proc/bus/input/devices");
+                foreach (var block in text.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (!Regex.IsMatch(block, @"^H: Handlers=.*\bjs\d+", RegexOptions.Multiline)) continue;
+                    var id = Regex.Match(block, @"^I: Bus=([0-9a-f]{4}) Vendor=([0-9a-f]{4}) Product=([0-9a-f]{4})", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+                    var own = Regex.Match(block, "^N: Name=\"(.*)\"", RegexOptions.Multiline).Groups[1].Value;
+                    var name = id.Success && Known.TryGetValue((Convert.ToInt32(id.Groups[2].Value, 16), Convert.ToInt32(id.Groups[3].Value, 16)), out var known)
+                        ? known
+                        : own.Length > 0 ? own : L.T("Game controller");
+                    pads.Add(new Pad(name, id.Success && id.Groups[1].Value == "0005"));
+                }
+            }
+            catch
+            {
+                // No /proc: nothing to show.
+            }
+            return pads;
+        }
+
+#endif
         // ---------------------------------------------------------------- HID
 
         [StructLayout(LayoutKind.Sequential)]

@@ -30,7 +30,7 @@ namespace BloodborneLauncher.Views
         {
             Group(L.T("Appearance"));
             ComboRow(SymbolRegular.LocalLanguage24, L.T("Launcher language"), L.T("Restart the launcher to apply the language."),
-                new[] { new Choice("English", "en"), new Choice("简体中文", "zh-CN") },
+                L.Languages.Select(l => new Choice(l.Name, l.Code)).ToArray(),
                 () => S.Str("ui_language"), v => S.Set("ui_language", v), changed: () =>
                 {
                     Ws.SaveNow();

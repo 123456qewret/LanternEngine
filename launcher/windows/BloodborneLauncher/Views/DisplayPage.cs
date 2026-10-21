@@ -134,7 +134,10 @@ namespace BloodborneLauncher.Views
                 10, 500, 1, () => ParseDouble(Ini.Get("hdr_paper_white", "200"), 200),
                 v => Ini.Set("hdr_paper_white", v.ToString("0", System.Globalization.CultureInfo.InvariantCulture)),
                 format: L.T("0' nits'"), valueWidth: 82);
-            SliderRow(SymbolRegular.WeatherSunny24, L.T("Peak brightness"), L.T("Your display's peak brightness, in nits. Range: 10–4000"),
+            ToggleRow(SymbolRegular.Desktop24, L.T("Peak brightness from the display"),
+                L.T("The peak Windows reports for the display the game is on (the Windows HDR Calibration app's, once it has run). Off: the value below"),
+                () => Ini.Get("hdr_peak_auto", "1") != "0", v => Ini.Set("hdr_peak_auto", v ? "1" : "0"));
+            SliderRow(SymbolRegular.WeatherSunny24, L.T("Peak brightness"), L.T("Your display's peak brightness, in nits, when it is not taken from the display. Range: 10–4000"),
                 10, 4000, 10, () => ParseDouble(Ini.Get("hdr_peak", "1000"), 1000),
                 v => Ini.Set("hdr_peak", v.ToString("0", System.Globalization.CultureInfo.InvariantCulture)),
                 format: L.T("0' nits'"), valueWidth: 82);

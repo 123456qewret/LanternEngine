@@ -222,7 +222,7 @@ namespace BloodborneLauncher.Views
                 var icon = new SymbolIcon { Symbol = SymbolRegular.Trophy24, Filled = true, FontSize = 18, Foreground = GradeBrush(grade) };
                 var value = Text($"{earned} / {all.Count}", "StatValue");
                 value.Margin = new Thickness(8, 0, 0, 0);
-                var label = Text(grade.ToString(), "StatLabel");
+                var label = Text(Trophy.GradeName(grade), "StatLabel");
                 var col = new StackPanel();
                 col.Children.Add(label);
                 col.Children.Add(Row(icon, value));
@@ -253,7 +253,7 @@ namespace BloodborneLauncher.Views
                     ? GradeBrush(trophy.Grade)
                     : (Brush)FindResource("TextFillColorTertiaryBrush");
                 row.Opacity = earned ? 1 : 0.62;
-                row.ToolTip = L.F($"{trophy.Grade} · {trophy.Points} points");
+                row.ToolTip = L.F($"{Trophy.GradeName(trophy.Grade)} · {trophy.Points} points");
                 _list.Children.Add(row);
             }
             if (_list.Children.Count == 0)
