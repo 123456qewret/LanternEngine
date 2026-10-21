@@ -18,7 +18,7 @@
             new(L.T("Off"), "off"),
         };
 
-        /// <summary>frame_gen in bbport.ini: a generated frame between the game's own (the engine's
+        /// <summary>frame_gen in lantern.ini: a generated frame between the game's own (the engine's
         /// vk_frame_generation.h). Off by default.</summary>
         public static readonly Choice[] FrameGeneration =
         {

@@ -3,7 +3,7 @@ using System.IO;
 namespace BloodborneLauncher.Core
 {
     /// <summary>
-    /// bbport.ini: the port's own settings (upscaler, preset, controls, ...), also edited by the
+    /// lantern.ini: the port's own settings (upscaler, preset, controls, ...), also edited by the
     /// in-game menu. The edited keys are rewritten in place, missing ones
     /// appended, comments and unknown keys kept, and a key set to null is removed (a control
     /// binding back to its default).
@@ -95,7 +95,7 @@ namespace BloodborneLauncher.Core
             }
 
             if (_lines.Count == 0)
-                output.Add("# bbport settings (in-game menu: Insert / L3+R3)");
+                output.Add("# Lantern Engine settings (in-game menu: Insert / L3+R3)");
             foreach (var (key, value) in _values)
                 if (!written.Contains(key) && value != null)
                     output.Add($"{key}={value}");

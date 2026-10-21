@@ -3,7 +3,7 @@
 namespace BloodborneLauncher.Core
 {
     /// <summary>
-    /// The environment run_windows.py gets from the launcher. Most settings travel in bbport.ini
+    /// The environment run_windows.py gets from the launcher. Most settings travel in lantern.ini
     /// (graphics, controls, online); these are the ones the engine takes from the environment.
     /// </summary>
     public static class GameEnvironment

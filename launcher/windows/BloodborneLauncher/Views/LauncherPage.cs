@@ -291,7 +291,7 @@ namespace BloodborneLauncher.Views
     /// <summary>
     /// A settings page: groups of compact rows, each group one rounded box (Sectionize puts the
     /// rows of a group into it once the page is built). The helpers bind a control straight to a
-    /// settings.json or bbport.ini key and save on change.
+    /// settings.json or lantern.ini key and save on change.
     /// </summary>
     public abstract class LauncherPage : Page
     {

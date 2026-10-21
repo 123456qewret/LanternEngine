@@ -1,7 +1,7 @@
 namespace BloodborneLauncher.Core
 {
     /// <summary>
-    /// Controller remapping. The engine reads pad.&lt;input&gt;=&lt;buttons&gt; from bbport.ini: each PS4
+    /// Controller remapping. The engine reads pad.&lt;input&gt;=&lt;buttons&gt; from lantern.ini: each PS4
     /// input the game sees (cross, r1, …) is driven by the listed physical buttons, named as SDL
     /// names them (a b x y leftshoulder righttrigger dpup …). Assigning a button that another
     /// input uses swaps the two, so every button keeps doing exactly one thing.

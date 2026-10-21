@@ -5,15 +5,33 @@ namespace BloodborneLauncher.Core
 {
     /// <summary>
     /// Where things live. The package folder (PortDir) holds the launcher, Bloodborne.exe and the
-    /// player's files - bbport.ini, mods.json, patches.json, user, mods, logs (its data folder,
+    /// player's files - lantern.ini, mods.json, patches.json, user, mods, logs (its data folder,
     /// BB_DATA_DIR) - and the engine in engine\: out\bb-probe.exe, scripts\run_windows.py and a
     /// bundled Python. Older packages had the engine at the top (EngineDirOf handles both).
-    /// Launcher settings are per-user, in %APPDATA%\bbport-launcher\settings.json.
+    /// Launcher settings are per-user, in %APPDATA%\Lantern Engine\settings.json.
     /// </summary>
     public static class Paths
     {
-        public static readonly string ConfigDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "bbport-launcher");
+        public static readonly string ConfigDir = MigratedConfigDir();
+
+        /// <summary>%APPDATA%\Lantern Engine; it was %APPDATA%\bbport-launcher before 0.9.37 beta 2
+        /// and is moved once (the old folder stays in use if it cannot be moved).</summary>
+        private static string MigratedConfigDir()
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var dir = Path.Combine(appData, "Lantern Engine");
+            var old = Path.Combine(appData, "bbport-launcher");
+            if (!Directory.Exists(dir) && Directory.Exists(old))
+            {
+                try
+                {
+                    Directory.Move(old, dir);
+                }
+                catch (IOException) { return old; }
+                catch (UnauthorizedAccessException) { return old; }
+            }
+            return dir;
+        }
 
         public static readonly string ConfigFile = Path.Combine(ConfigDir, "settings.json");
 
@@ -26,7 +44,27 @@ namespace BloodborneLauncher.Core
         public static string IniPath =>
             Environment.GetEnvironmentVariable("BB_CONFIG") is { Length: > 0 } path
                 ? path
-                : Path.Combine(DataDir, "bbport.ini");
+                : Migrated(DataDir);
+
+        /// <summary>Settings were bbport.ini before 0.9.37 beta 2: renamed once per folder.</summary>
+        private static string Migrated(string dir)
+        {
+            var path = Path.Combine(dir, "lantern.ini");
+            if (dir.Length != 0 && MigratedDirs.Add(dir))
+            {
+                try
+                {
+                    var old = Path.Combine(dir, "bbport.ini");
+                    if (!File.Exists(path) && File.Exists(old))
+                        File.Move(old, path);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            return path;
+        }
+
+        private static readonly HashSet<string> MigratedDirs = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>A package's engine folder: its engine\, or the package itself (older layout).</summary>
         public static string EngineDirOf(string dir) =>

@@ -7,9 +7,7 @@ namespace BloodborneLauncher
 {
     public partial class App : Application
     {
-        private static readonly string CrashLog = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "bbport-launcher", "crash.log");
+        private static readonly string CrashLog = Path.Combine(Core.Paths.ConfigDir, "crash.log");
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -52,7 +50,7 @@ namespace BloodborneLauncher
         {
             try
             {
-                var ini = Path.Combine(package, "bbport.ini");
+                var ini = Path.Combine(package, "lantern.ini");
                 if (!File.Exists(ini)) return;
                 var lines = File.ReadAllLines(ini);
                 var lockOn = Array.FindIndex(lines, l => l.Trim() == "bind.lock_on=Mouse3");

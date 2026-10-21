@@ -17,7 +17,7 @@ namespace BloodborneLauncher.Views
         private bool _syncing;
 
         public GraphicsPage() : base(L.T("Graphics"),
-            L.T("Stored in bbport.ini; the upscaler can also be changed in game (Insert or L3 + R3)."))
+            L.T("Stored in lantern.ini; the upscaler can also be changed in game (Insert or L3 + R3)."))
         {
             Add(Card(SymbolRegular.Gauge24, L.T("Best settings for this PC"), Hardware.Detect().Summary,
                 SmallButton(L.T("Recommend…"), SymbolRegular.Sparkle24, (_, _) => MainWindow.Instance!.OfferBestSettings(firstRun: false)), out _));

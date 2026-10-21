@@ -7,7 +7,7 @@ using Button = Wpf.Ui.Controls.Button;
 namespace BloodborneLauncher.Views
 {
     /// <summary>
-    /// Online play with The Hunter's Dream. The engine reads these from bbport.ini (online_*,
+    /// Online play with The Hunter's Dream. The engine reads these from lantern.ini (online_*,
     /// scripts/online.py); only the password stays out of it and is passed when the game starts.
     /// </summary>
     public sealed class OnlinePage : LauncherPage

@@ -26,7 +26,7 @@ namespace BloodborneLauncher.Core
         public static string ReleasesPage => $"https://github.com/{Repository}/releases";
 
         /// <summary>The engine build this launcher is made for (package.json "engine").</summary>
-        public const string EngineId = "bbhost-0.4.0-fps85";
+        public const string EngineId = "lantern-fps86";
 
         public const string ExeName = "Lantern Engine.exe";
         /// <summary>The launcher's name before 0.9.34 beta 8 (now a forwarder to ExeName).</summary>
@@ -34,7 +34,7 @@ namespace BloodborneLauncher.Core
         private const string PackageFile = "package.json";
 
         /// <summary>Files and folders of the player's that a package update never touches.</summary>
-        private static readonly string[] Kept = { "bbport.ini", "mods.json", "patches.json", "user", "mods", "logs", "network", "engine-assets" };
+        private static readonly string[] Kept = { "lantern.ini", "bbport.ini", "mods.json", "patches.json", "user", "mods", "logs", "network", "engine-assets" };
 
         public sealed record Release(Version Version, int Beta, string Tag, string Name, string Notes, string Page,
             string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize, DateTime Published = default)
@@ -253,7 +253,7 @@ namespace BloodborneLauncher.Core
             var folder = Path.GetDirectoryName(self)!;
             // A folder of its own each time: one an antivirus still holds a file in (from an earlier
             // attempt) cannot be deleted, and must not stop this one.
-            var parent = Path.Combine(Path.GetTempPath(), "bbport-launcher-update");
+            var parent = Path.Combine(Path.GetTempPath(), "lantern-engine-update");
             if (Directory.Exists(parent))
             {
                 foreach (var old in Directory.GetDirectories(parent).Append(parent))

@@ -13,7 +13,7 @@ namespace BloodborneLauncher.Views
 {
     /// <summary>
     /// The engine's PC controls: mouse camera and menu pointer, profiles, and the 29 actions, each
-    /// bound to one key and one mouse input (bbport.ini bind.*, the same records the in-game
+    /// bound to one key and one mouse input (lantern.ini bind.*, the same records the in-game
     /// System › Key Bindings menu edits). Clicking an action listens for the next key, mouse button
     /// or wheel step: a key replaces the key, a mouse input the mouse input. × removes one,
     /// right-click unbinds the action. Inputs used twice, and the port's Insert key, are flagged.

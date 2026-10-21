@@ -5,7 +5,7 @@ using System.Windows.Input;
 namespace BloodborneLauncher.Core
 {
     /// <summary>
-    /// One game action the engine binds (bbport.ini bind.&lt;name&gt;): one keyboard key and one mouse
+    /// One game action the engine binds (lantern.ini bind.&lt;name&gt;): one keyboard key and one mouse
     /// input at most. Pad is the controller button that does it (shown for reference).
     /// </summary>
     public sealed record ControlDef(string Name, string Label, string Group, string Hint, string Default, string? Pad);
@@ -166,7 +166,7 @@ namespace BloodborneLauncher.Core
         }
     }
 
-    /// <summary>The bindings in bbport.ini (bind.&lt;action&gt;), as the engine and its own menu keep them.</summary>
+    /// <summary>The bindings in lantern.ini (bind.&lt;action&gt;), as the engine and its own menu keep them.</summary>
     public static class Bindings
     {
         public static string IniKey(ControlDef c) => "bind." + c.Name;

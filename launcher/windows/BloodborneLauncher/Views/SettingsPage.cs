@@ -176,7 +176,7 @@ namespace BloodborneLauncher.Views
             Group(L.T("Files"));
             Add(Card(SymbolRegular.DocumentSettings20, L.T("Launcher settings"), Paths.ConfigFile,
                 IconButton(SymbolRegular.Open24, L.T("Open in Explorer"), (_, _) => Paths.OpenFolder(Paths.ConfigDir)), out _));
-            Add(Card(SymbolRegular.DocumentSettings20, L.T("Port settings (bbport.ini)"), Paths.IniPath,
+            Add(Card(SymbolRegular.DocumentSettings20, L.T("Port settings (lantern.ini)"), Paths.IniPath,
                 IconButton(SymbolRegular.Open24, L.T("Open in Explorer"), (_, _) => Paths.OpenFolder(Path.GetDirectoryName(Paths.IniPath)!)), out _));
             Add(Card(SymbolRegular.Broom24, L.T("Shader cache"),
                 L.T("The game's compiled shaders, kept between starts (a new engine version clears them itself). Clear them if ") +

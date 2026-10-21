@@ -6,9 +6,9 @@ namespace BloodborneLauncher.Core
     public enum LogLevel { Info, Step, Good, Warn, Bad }
 
     /// <summary>
-    /// The launcher's shared state: settings, bbport.ini, the game process and its output, and the
+    /// The launcher's shared state: settings, lantern.ini, the game process and its output, and the
     /// activity log. Every edit calls SaveSoon, so nothing waits for the window to close and an
-    /// in-game change to bbport.ini is only overwritten by a change made here.
+    /// in-game change to lantern.ini is only overwritten by a change made here.
     /// </summary>
     public sealed class Workspace
     {
@@ -232,7 +232,7 @@ namespace BloodborneLauncher.Core
                 else if (!_iniWarned)
                 {
                     _iniWarned = true;
-                    Log("bbport.ini not written: the engine folder is not set (Settings › Lantern Engine).", LogLevel.Warn);
+                    Log("lantern.ini not written: the engine folder is not set (Settings › Lantern Engine).", LogLevel.Warn);
                 }
                 Saved?.Invoke();
             }
