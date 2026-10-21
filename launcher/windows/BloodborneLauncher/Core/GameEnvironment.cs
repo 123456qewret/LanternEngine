@@ -179,6 +179,11 @@ namespace BloodborneLauncher.Core
             if (output == "directsound_large") env["SDL_AUDIO_DEVICE_SAMPLE_FRAMES"] = "2048";
             if (s.Bool("exp_fast_loading")) env["BB_FAST_LOADING"] = "1";
             if (s.Bool("exp_hot_pages")) env["BB_HOT_PAGES"] = "2";
+            // The PC memory model (the GPU reads the game's memory in place; the engine checks the
+            // GPU first and keeps copying where it cannot) and the game's draw calls handed over
+            // directly: on since 0.9.37 beta 4.
+            if (s.Bool("exp_guest_in_place")) env["BB_GUEST_IN_PLACE"] = "1";
+            if (s.Bool("exp_native_calls")) env["BB_NATIVE_CALLS"] = "1";
             if (s.Bool("exp_sfx_workaround")) env["BB_SFX_WORKAROUND"] = "1";
             if (s.Bool("exp_camera_easing")) env["BB_CAMERA_FIX"] = "1";
             if (s.Bool("borderless_fullscreen")) env["BB_EXCLUSIVE_FULLSCREEN"] = "0";
@@ -201,6 +206,8 @@ namespace BloodborneLauncher.Core
                 // Safe mode (after a crash, one run): every experimental engine option and the mods off.
                 env.Remove("BB_FAST_LOADING");
                 env.Remove("BB_HOT_PAGES");
+                env.Remove("BB_GUEST_IN_PLACE");
+                env.Remove("BB_NATIVE_CALLS");
                 env.Remove("BB_CAMERA_FIX");
                 env["BB_PRECISE_PACING"] = "0";
                 env["BB_IMAGE_WRITEBACK_GC"] = "0";
