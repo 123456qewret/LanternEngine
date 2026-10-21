@@ -3798,10 +3798,10 @@ index 0000000..4e0a474
 +} // namespace BbThd
 diff --git a/gpu/bbnet/thd/thd_net.cpp b/gpu/bbnet/thd/thd_net.cpp
 new file mode 100644
-index 0000000..e48fb3e
+index 0000000..f91a844
 --- /dev/null
 +++ b/gpu/bbnet/thd/thd_net.cpp
-@@ -0,0 +1,1252 @@
+@@ -0,0 +1,1293 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// The Hunter's Dream backend: sceNet and sceNetCtl. P2P sockets share one UDP port with the PS4
 +// kernel's vport header as bbhost writes it ([ff][c3][src][dst] for one-byte vports), the relay of
@@ -4010,6 +4010,32 @@ index 0000000..e48fb3e
 +}
 +
 +bool trace_now(int& count) { return Trace() || ++count <= 64; }
++
++// P2P datagrams in both directions, logged once a minute while they flow (the per-datagram trace
++// stops after 64): a co-op desync log then says whether datagrams were lost or failed to send.
++struct P2pCounts {
++    std::atomic<std::uint64_t> sent{0}, sent_bytes{0}, send_failed{0}, received{0}, received_bytes{0};
++};
++P2pCounts g_p2p_counts;
++
++void p2p_counts_log() {
++    using clock = std::chrono::steady_clock;
++    static clock::time_point last = clock::now();
++    static std::uint64_t was[5] = {};
++    const clock::time_point now = clock::now();
++    if (now - last < std::chrono::seconds(60)) return;
++    const std::uint64_t is[5] = {g_p2p_counts.sent.load(), g_p2p_counts.sent_bytes.load(),
++                                 g_p2p_counts.send_failed.load(), g_p2p_counts.received.load(),
++                                 g_p2p_counts.received_bytes.load()};
++    const double seconds = std::chrono::duration<double>(now - last).count();
++    last = now;
++    if (is[0] == was[0] && is[3] == was[3]) return;
++    Log("net: last %.0f s: sent %llu datagrams (%llu KiB, %llu failed), received %llu (%llu KiB)", seconds,
++        static_cast<unsigned long long>(is[0] - was[0]), static_cast<unsigned long long>((is[1] - was[1]) / 1024),
++        static_cast<unsigned long long>(is[2] - was[2]), static_cast<unsigned long long>(is[3] - was[3]),
++        static_cast<unsigned long long>((is[4] - was[4]) / 1024));
++    std::memcpy(was, is, sizeof(was));
++}
 +
 +// ---- STUN -------------------------------------------------------------------------------------------
 +
@@ -4238,6 +4264,7 @@ index 0000000..e48fb3e
 +    std::uint8_t buf[2048];
 +    int logs = 0;
 +    while (!port->stop.load(std::memory_order_relaxed)) {
++        p2p_counts_log();
 +        if (sock_poll(port->fd, POLLIN, 200) <= 0) continue;
 +        sockaddr_in sa{};
 +        socklen_type sl = sizeof(sa);
@@ -4295,6 +4322,8 @@ index 0000000..e48fb3e
 +        dg.addr = sa.sin_addr.s_addr;
 +        dg.port = sa.sin_port;
 +        dg.vport = src;
++        g_p2p_counts.received.fetch_add(1, std::memory_order_relaxed);
++        g_p2p_counts.received_bytes.fetch_add(dg.data.size(), std::memory_order_relaxed);
 +        if (trace_now(logs)) {
 +            char ip[32];
 +            write_ipv4(ip, sizeof(ip), sa.sin_addr.s_addr);
@@ -4321,6 +4350,14 @@ index 0000000..e48fb3e
 +        if (!sock_ok(port->fd)) return nullptr;
 +#ifdef _WIN32
 +        sock_setopt_int(port->fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1);
++        // An ICMP "port unreachable" (a punch probe to a peer's old or LAN address) would make the
++        // next recvfrom fail with WSAECONNRESET; the port keeps receiving instead.
++        {
++            BOOL report = FALSE;
++            DWORD bytes = 0;
++            ::WSAIoctl(port->fd, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &report, sizeof(report),
++                       nullptr, 0, &bytes, nullptr, nullptr);
++        }
 +#endif
 +        sockaddr_in sa{};
 +        sa.sin_family = AF_INET;
@@ -4466,6 +4503,10 @@ index 0000000..e48fb3e
 +        if (n >= 0) n -= static_cast<ssize_type>(kRelayHeader);
 +    } else {
 +        n = sock_sendto(fd, pkt, hdr + static_cast<std::size_t>(len), dontwait, &sa);
++    }
++    if (sock.p2p) {
++        (n < 0 ? g_p2p_counts.send_failed : g_p2p_counts.sent).fetch_add(1, std::memory_order_relaxed);
++        if (n >= 0) g_p2p_counts.sent_bytes.fetch_add(len, std::memory_order_relaxed);
 +    }
 +    static int logs = 0;
 +    if (trace_now(logs)) {
@@ -57761,7 +57802,7 @@ index a66e3d4..7d912fc 100644
  
  } // namespace Vulkan::UiComposition
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
-index e0fb9f4..456c0e2 100644
+index e0fb9f4..13c06fe 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
 @@ -1,6 +1,9 @@
@@ -57948,7 +57989,7 @@ index e0fb9f4..456c0e2 100644
      const char* env = std::getenv("BB_BREADCRUMBS");
      if (env && env[0] == '0') {
          return;
-@@ -274,9 +435,84 @@ void Report(const char* title, const char* where);
+@@ -274,9 +435,89 @@ void Report(const char* title, const char* where);
  
  void ReportDeviceLost(const char* where) {
      static std::atomic_flag reported = ATOMIC_FLAG_INIT;
@@ -57964,6 +58005,11 @@ index e0fb9f4..456c0e2 100644
 +        std::printf("Device lost with OptiScaler loaded (as %s, compatibility mode %s): it hooks "
 +                    "submissions and runs DLSS itself; to rule it out, remove %s and try again\n",
 +                    opti.module.c_str(), OptiScaler::Compat() ? "on" : "off", opti.module.c_str());
++        if (!opti.frame_generation.empty()) {
++            std::printf("OptiScaler's frame generation was on (FGOutput=%s): it runs through a D3D12 "
++                        "bridge on Vulkan; set it to none in OptiScaler's menu first\n",
++                        opti.frame_generation.c_str());
++        }
 +        std::fflush(stdout);
 +    }
 +}
@@ -61867,18 +61913,23 @@ index 0000000..c607d38
 +
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
-index 23d52b9..462244c 100644
+index 23d52b9..7e91426 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,12 @@
  // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
 +#include <cstdio>
++#include <cstring>
++#include <thread>
++#if defined(__x86_64__)
++#include <cpuid.h>
++#endif
  #include <boost/container/static_vector.hpp>
  #include <fmt/format.h>
  #include <fmt/ranges.h>
-@@ -12,7 +13,10 @@
+@@ -12,7 +18,10 @@
  #include "sdl_window.h"
  #include "video_core/renderer_vulkan/liverpool_to_vk.h"
  #include "bbport_toggles.h"
@@ -61889,7 +61940,42 @@ index 23d52b9..462244c 100644
  #include "video_core/renderer_vulkan/vk_platform.h"
  
  #include <vk_mem_alloc.h>
-@@ -179,6 +183,9 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
+@@ -21,6 +30,34 @@ namespace Vulkan {
+ 
+ namespace {
+ 
++/// bbport: the CPU in the session log (crash reports came without it). XCR0 says which extended
++/// state Windows saves below rsp on a fault: the Intel effect crash (notes/intel-sfx-crash.md).
++void PrintCpu() {
++#if defined(__x86_64__)
++    unsigned a = 0, b = 0, c = 0, d = 0;
++    char brand[49] = {};
++    if (__get_cpuid(0x80000000, &a, &b, &c, &d) && a >= 0x80000004) {
++        for (unsigned leaf = 0; leaf < 3; ++leaf) {
++            unsigned r[4];
++            __get_cpuid(0x80000002 + leaf, &r[0], &r[1], &r[2], &r[3]);
++            std::memcpy(brand + leaf * 16, r, 16);
++        }
++    }
++    const char* name = brand;
++    while (*name == ' ') {
++        ++name;
++    }
++    unsigned long long xcr0 = 0;
++    if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 27))) { // OSXSAVE
++        unsigned lo = 0, hi = 0;
++        asm volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
++        xcr0 = (static_cast<unsigned long long>(hi) << 32) | lo;
++    }
++    std::printf("CPU: %s, %u hardware threads, XSAVE state 0x%llx\n", *name ? name : "(unknown)",
++                std::thread::hardware_concurrency(), xcr0);
++#endif
++}
++
+ std::vector<vk::PhysicalDevice> EnumeratePhysicalDevices(vk::UniqueInstance& instance) {
+     auto [devices_result, devices] = instance->enumeratePhysicalDevices();
+     ASSERT_MSG(devices_result == vk::Result::eSuccess, "Failed to enumerate physical devices: {}",
+@@ -179,6 +216,9 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
                 VK_VERSION_MAJOR(properties.apiVersion), VK_VERSION_MINOR(properties.apiVersion));
  
      CreateDevice();
@@ -61899,7 +61985,7 @@ index 23d52b9..462244c 100644
      CollectPhysicalMemoryInfo();
      CollectImageFormatInfo();
      CollectToolingInfo();
-@@ -220,7 +227,10 @@ bool Instance::CreateDevice() {
+@@ -220,7 +260,10 @@ bool Instance::CreateDevice() {
          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
          vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
          vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
@@ -61911,7 +61997,7 @@ index 23d52b9..462244c 100644
      features = feature_chain.get().features;
  
      const vk::StructureChain properties_chain = physical_device.getProperties2<
-@@ -238,7 +248,7 @@ bool Instance::CreateDevice() {
+@@ -238,7 +281,7 @@ bool Instance::CreateDevice() {
          return false;
      }
  
@@ -61920,7 +62006,7 @@ index 23d52b9..462244c 100644
      const auto add_extension = [&](std::string_view extension) -> bool {
          const auto result =
              std::find_if(available_extensions.begin(), available_extensions.end(),
-@@ -278,6 +288,13 @@ bool Instance::CreateDevice() {
+@@ -278,6 +321,13 @@ bool Instance::CreateDevice() {
      maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
      // bbport: GPU breadcrumbs (vk_breadcrumbs.h).
      buffer_marker = add_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
@@ -61934,7 +62020,7 @@ index 23d52b9..462244c 100644
      attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
      if (attachment_feedback_loop) {
          attachment_feedback_loop =
-@@ -308,19 +325,33 @@ bool Instance::CreateDevice() {
+@@ -308,19 +358,33 @@ bool Instance::CreateDevice() {
          LOG_INFO(Render_Vulkan, "- primitiveTopologyPatchListRestart: {}",
                   list_restart_features.primitiveTopologyPatchListRestart);
      }
@@ -61974,7 +62060,7 @@ index 23d52b9..462244c 100644
      shader_atomic_float = add_extension(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
      shader_atomic_float2 = add_extension(VK_EXT_SHADER_ATOMIC_FLOAT_2_EXTENSION_NAME);
      if (shader_atomic_float2) {
-@@ -392,6 +423,19 @@ bool Instance::CreateDevice() {
+@@ -392,6 +456,19 @@ bool Instance::CreateDevice() {
      }
      const bool calibrated_timestamps =
          TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
@@ -61994,7 +62080,7 @@ index 23d52b9..462244c 100644
  
      const auto family_properties = physical_device.getQueueFamilyProperties();
      if (family_properties.empty()) {
-@@ -444,6 +488,37 @@ bool Instance::CreateDevice() {
+@@ -444,6 +521,37 @@ bool Instance::CreateDevice() {
      const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
      vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
      vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
@@ -62032,7 +62118,7 @@ index 23d52b9..462244c 100644
      vk::StructureChain device_chain = {
          vk::DeviceCreateInfo{
              .queueCreateInfoCount = queue_info_count,
-@@ -469,11 +544,15 @@ bool Instance::CreateDevice() {
+@@ -469,11 +577,15 @@ bool Instance::CreateDevice() {
                  .wideLines = features.wideLines,
                  .multiViewport = features.multiViewport,
                  .samplerAnisotropy = features.samplerAnisotropy,
@@ -62048,7 +62134,7 @@ index 23d52b9..462244c 100644
                  // bbport: required by the FSR 3 accumulate shaders (vk_temporal_upscaler).
                  .shaderStorageImageWriteWithoutFormat =
                      features.shaderStorageImageWriteWithoutFormat,
-@@ -497,6 +576,9 @@ bool Instance::CreateDevice() {
+@@ -497,6 +609,9 @@ bool Instance::CreateDevice() {
              .shaderSharedInt64Atomics = vk12_features.shaderSharedInt64Atomics,
              .shaderFloat16 = vk12_features.shaderFloat16,
              .shaderInt8 = vk12_features.shaderInt8,
@@ -62058,7 +62144,7 @@ index 23d52b9..462244c 100644
              .scalarBlockLayout = vk12_features.scalarBlockLayout,
              .uniformBufferStandardLayout = vk12_features.uniformBufferStandardLayout,
              .separateDepthStencilLayouts = vk12_features.separateDepthStencilLayouts,
-@@ -607,6 +689,18 @@ bool Instance::CreateDevice() {
+@@ -607,6 +722,18 @@ bool Instance::CreateDevice() {
              .shaderFloat8 = true,
              .shaderFloat8CooperativeMatrix = true,
          },
@@ -62077,7 +62163,7 @@ index 23d52b9..462244c 100644
      };
  
      if (!custom_border_color) {
-@@ -639,6 +733,12 @@ bool Instance::CreateDevice() {
+@@ -639,6 +766,12 @@ bool Instance::CreateDevice() {
      if (!maintenance_8) {
          device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
      }
@@ -62090,7 +62176,7 @@ index 23d52b9..462244c 100644
      if (!attachment_feedback_loop) {
          device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT>();
          device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT>();
-@@ -670,6 +770,10 @@ bool Instance::CreateDevice() {
+@@ -670,6 +803,10 @@ bool Instance::CreateDevice() {
      if (!shader_float8) {
          device_chain.unlink<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
      }
@@ -62101,10 +62187,11 @@ index 23d52b9..462244c 100644
  
      auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
      if (device_result != vk::Result::eSuccess) {
-@@ -800,6 +904,10 @@ void Instance::CollectDeviceParameters() {
+@@ -800,6 +937,11 @@ void Instance::CollectDeviceParameters() {
      const std::string api_version = GetReadableVersion(properties.apiVersion);
      const std::string extensions = fmt::format("{}", fmt::join(available_extensions, ", "));
  
++    PrintCpu();
 +    std::printf("GPU: %s%s, driver %s (%s), Vulkan %s\n", model_name.c_str(),
 +                IsIntegrated() ? " (integrated)" : "", driver_version.c_str(), vendor_name.c_str(),
 +                api_version.c_str());
@@ -62962,16 +63049,18 @@ index 0000000..bb04853
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_optiscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_optiscaler.cpp
 new file mode 100644
-index 0000000..a7261b4
+index 0000000..65f3648
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_optiscaler.cpp
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,201 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
++#include <cctype>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cwctype>
 +#include <filesystem>
++#include <fstream>
 +#include <vector>
 +
 +#ifdef _WIN32
@@ -63032,6 +63121,49 @@ index 0000000..a7261b4
 +    return version;
 +}
 +
++std::string Lower(std::string text) {
++    for (auto& c : text) {
++        c = char(std::tolower(static_cast<unsigned char>(c)));
++    }
++    return text;
++}
++
++std::string Trim(const std::string& text) {
++    const auto first = text.find_first_not_of(" \t\r");
++    const auto last = text.find_last_not_of(" \t\r");
++    return first == std::string::npos ? std::string{} : text.substr(first, last - first + 1);
++}
++
++/// Its frame generation from OptiScaler.ini's [FrameGen]: FGOutput (v10: dlssg, fsrfg, xefg, ...)
++/// or FGType (0.9: optifg, nukems). Empty when it is off (nofg) or left to its default (auto).
++std::string FrameGeneration(const std::filesystem::path& ini) {
++    std::ifstream file(ini);
++    std::string line, section, output, type;
++    while (std::getline(file, line)) {
++        line = Trim(line);
++        if (line.empty() || line[0] == ';' || line[0] == '#') {
++            continue;
++        }
++        if (line[0] == '[') {
++            section = Lower(Trim(line.substr(1, line.find(']') - 1)));
++            continue;
++        }
++        const auto eq = line.find('=');
++        if (section != "framegen" || eq == std::string::npos) {
++            continue;
++        }
++        const std::string key = Lower(Trim(line.substr(0, eq)));
++        const std::string value = Lower(Trim(line.substr(eq + 1)));
++        if (key == "fgoutput") {
++            output = value;
++        } else if (key == "fgtype") {
++            type = value;
++        }
++    }
++    const std::string fg = output.empty() ? type : output;
++    return fg == "nofg" || fg == "auto" ? std::string{} : fg;
++}
++
 +/// OptiScaler exports the NGX entry points under a proxy name (winmm.dll, dxgi.dll, version.dll,
 +/// ...) and keeps OptiScaler.ini beside itself. The driver's own NGX core (_nvngx.dll / nvngx.dll)
 +/// exports them too and counts only with that ini.
@@ -63053,8 +63185,8 @@ index 0000000..a7261b4
 +            continue;
 +        }
 +        std::error_code ec;
-+        const bool ini = std::filesystem::exists(
-+            std::filesystem::path(entry.szExePath).parent_path() / L"OptiScaler.ini", ec);
++        const auto ini_path = std::filesystem::path(entry.szExePath).parent_path() / L"OptiScaler.ini";
++        const bool ini = std::filesystem::exists(ini_path, ec);
 +        const bool ngx_core = name == L"_nvngx.dll" || name == L"nvngx.dll";
 +        if (ngx_core && !ini) {
 +            continue;
@@ -63062,6 +63194,9 @@ index 0000000..a7261b4
 +        info.loaded = true;
 +        info.module = Narrow(entry.szModule);
 +        info.version = FileVersion(entry.szExePath);
++        if (ini) {
++            info.frame_generation = FrameGeneration(ini_path);
++        }
 +    }
 +    CloseHandle(snapshot);
 +    return info;
@@ -63083,10 +63218,20 @@ index 0000000..a7261b4
 +                        found.version.empty() ? "(version unknown)" : found.version.c_str(),
 +                        found.module.c_str(),
 +                        EnvOn("BB_OPTISCALER_COMPAT")
-+                            ? "on - submissions from one thread (BB_OPTISCALER_SYNC_SUBMIT), "
-+                              "NGX calls under the queue lock (BB_OPTISCALER_NGX_LOCK); "
++                            ? "on - submissions from one thread while its frame generation is on "
++                              "(BB_OPTISCALER_SYNC_SUBMIT), NGX calls under the queue lock "
++                              "(BB_OPTISCALER_NGX_LOCK); "
 +                              "BB_OPTISCALER_COMPAT=0 turns it off"
 +                            : "off (BB_OPTISCALER_COMPAT=0)");
++            if (!found.frame_generation.empty()) {
++                // Its Vulkan frame generation runs on a D3D12 device of its own (Vulkan w/Dx12),
++                // created when the first upscaled frame arrives; device losses follow it.
++                std::printf("OptiScaler: its frame generation is on (FGOutput=%s in OptiScaler.ini): "
++                            "on this Vulkan engine it goes through a D3D12 bridge that can lose the "
++                            "GPU; set Frame Generation to none in OptiScaler's menu and use the "
++                            "launcher's frame generation instead\n",
++                            found.frame_generation.c_str());
++            }
 +        }
 +        return found;
 +    }();
@@ -63102,13 +63247,19 @@ index 0000000..a7261b4
 +    return Compat() && EnvOn(name);
 +}
 +
++bool SyncSubmit() {
++    const char* env = std::getenv("BB_OPTISCALER_SYNC_SUBMIT");
++    return Part("BB_OPTISCALER_SYNC_SUBMIT") &&
++           (!Detect().frame_generation.empty() || (env && env[0] == '1'));
++}
++
 +} // namespace Vulkan::OptiScaler
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_optiscaler.h b/gpu/shadps4/video_core/renderer_vulkan/vk_optiscaler.h
 new file mode 100644
-index 0000000..f6a5394
+index 0000000..a75d100
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_optiscaler.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,31 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: OptiScaler (a DLL players drop next to the executable, often as winmm.dll) hooks
 +// vkCreateDevice, vkGetDeviceProcAddr, vkQueueSubmit and takes over the NGX entry points: our
@@ -63126,6 +63277,7 @@ index 0000000..f6a5394
 +    bool loaded = false;
 +    std::string module;  ///< the file name it was loaded as (winmm.dll, dxgi.dll, ...)
 +    std::string version; ///< from its version resource, empty when it has none
++    std::string frame_generation; ///< its frame generation output from OptiScaler.ini, empty when off
 +};
 +
 +/// Looks once for a loaded OptiScaler and prints one line about it and the compatibility mode.
@@ -63134,6 +63286,9 @@ index 0000000..f6a5394
 +bool Compat();
 +/// Compat() and the part's own switch (`name`, e.g. "BB_OPTISCALER_SYNC_SUBMIT") is not 0.
 +bool Part(const char* name);
++/// One submit thread: Part("BB_OPTISCALER_SYNC_SUBMIT") with its frame generation on, or the
++/// switch set to 1.
++bool SyncSubmit();
 +
 +} // namespace Vulkan::OptiScaler
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_cache.cpp
@@ -67421,7 +67576,7 @@ index e5a656b..8333b19 100644
      bool debug = false; ///< BB_SCENE_DEBUG frame: print resolves and fills
  private:
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
-index 06eadfd..0e08863 100644
+index 06eadfd..0343cbb 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 @@ -17,6 +17,7 @@
@@ -67440,16 +67595,17 @@ index 06eadfd..0e08863 100644
  #include "video_core/renderer_vulkan/vk_scheduler.h"
  #include "bbport_threads.h"
  
-@@ -162,6 +164,8 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
+@@ -162,6 +164,9 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
      if (!workers.empty()) {
          const char* async = std::getenv("BB_ASYNC_SUBMIT");
          async_submit = !async || async[0] != '0';
-+        // OptiScaler loaded: one thread submits (its submit hooks keep global state).
-+        async_submit = async_submit && !OptiScaler::Part("BB_OPTISCALER_SYNC_SUBMIT");
++        // OptiScaler's frame generation on: one thread submits (its submit hooks keep global
++        // state). Upscaling alone keeps async submit (0.9.33 ran it so at full FPS); =1 forces it.
++        async_submit = async_submit && !OptiScaler::SyncSubmit();
          if (async_submit) {
              std::printf("GPU: submissions go out from the recording threads (BB_ASYNC_SUBMIT)\n");
          }
-@@ -322,37 +326,165 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
+@@ -322,37 +327,165 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
      return chunk;
  }
  
@@ -67637,7 +67793,7 @@ index 06eadfd..0e08863 100644
  }
  
  namespace {
-@@ -386,7 +518,7 @@ void Scheduler::NoteHostCopySource(u64 address, u64 size) {
+@@ -386,7 +519,7 @@ void Scheduler::NoteHostCopySource(u64 address, u64 size) {
      }
  }
  
@@ -67646,7 +67802,7 @@ index 06eadfd..0e08863 100644
      {
          std::scoped_lock lk{host_copy_sources_mutex};
          bool overlap = host_copy_big_seq > host_copy_sources_done;
-@@ -405,10 +537,10 @@ void Scheduler::WaitHostCopiesFor(u64 address, u64 size) {
+@@ -405,10 +538,10 @@ void Scheduler::WaitHostCopiesFor(u64 address, u64 size) {
              return;
          }
      }
@@ -67659,7 +67815,7 @@ index 06eadfd..0e08863 100644
      u64 sources_seen;
      {
          std::scoped_lock lk{host_copy_sources_mutex};
-@@ -423,13 +555,15 @@ void Scheduler::WaitHostCopies() {
+@@ -423,13 +556,15 @@ void Scheduler::WaitHostCopies() {
              s.host_copy_sources_done = std::max(s.host_copy_sources_done, seen);
          }
      } forget{*this, sources_seen};
@@ -67679,7 +67835,7 @@ index 06eadfd..0e08863 100644
      }
      BbStats::WaitTimer timer{BbStats::copy_threads_wait_ns};
      BbCopy::WaitAsync();
-@@ -449,7 +583,7 @@ void Scheduler::KickRecording(bool force) {
+@@ -449,7 +584,7 @@ void Scheduler::KickRecording(bool force) {
          MaybeSplit();
      }
      // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
@@ -67688,7 +67844,7 @@ index 06eadfd..0e08863 100644
          return;
      }
      HandOver();
-@@ -461,7 +595,7 @@ void Scheduler::MaybeSplit() {
+@@ -461,7 +596,7 @@ void Scheduler::MaybeSplit() {
          return;
      }
      // Cutting inside a render pass closes and reopens it: only after a longer stretch.
@@ -67697,7 +67853,7 @@ index 06eadfd..0e08863 100644
      if (bytes < (is_rendering ? 2 * split_bytes : split_bytes)) {
          return;
      }
-@@ -510,6 +644,11 @@ void Scheduler::HandOver() {
+@@ -510,6 +645,11 @@ void Scheduler::HandOver() {
      if (!commands && !ordered) {
          return;
      }
@@ -67709,7 +67865,7 @@ index 06eadfd..0e08863 100644
      Worker& worker = *workers[current_segment % workers.size()];
      bool wake = false;
      {
-@@ -521,11 +660,12 @@ void Scheduler::HandOver() {
+@@ -521,11 +661,12 @@ void Scheduler::HandOver() {
                  worker.queue.push_back(std::move(chunk));
                  ++batch->handed[current_segment];
              }
@@ -67727,7 +67883,7 @@ index 06eadfd..0e08863 100644
                  ++batch->handed[current_segment];
              }
              worker.queued.store(worker.queue.size(), std::memory_order_release);
-@@ -542,8 +682,9 @@ void Scheduler::HandOver() {
+@@ -542,8 +683,9 @@ void Scheduler::HandOver() {
              for (auto& chunk : ordered_full) {
                  queue(std::move(chunk));
              }
@@ -67739,7 +67895,7 @@ index 06eadfd..0e08863 100644
              }
              ordered_queued.store(ordered_queue.size(), std::memory_order_release);
              // Any thread may run them; the current segment's thread is woken for them (when it
-@@ -622,7 +763,7 @@ void Scheduler::EnterDirectMode() {
+@@ -622,7 +764,7 @@ void Scheduler::EnterDirectMode() {
          }
          // A segment nothing was handed to yet is not begun: it becomes the direct one.
          const bool untouched =
@@ -67748,7 +67904,7 @@ index 06eadfd..0e08863 100644
          if (!untouched) {
              // Its recording thread ends the segment's command buffer (the pool is that thread's).
              Record([](vk::CommandBuffer cmdbuf) { Check(cmdbuf.end()); });
-@@ -675,6 +816,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
+@@ -675,6 +817,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
          std::snprintf(name, sizeof(name), "bb:VkRecorder%u", index);
          Common::SetCurrentThreadName(name);
      }
@@ -67756,7 +67912,7 @@ index 06eadfd..0e08863 100644
      Worker& worker = *workers[index];
      std::vector<std::unique_ptr<RecordChunk>> ordered;
      const auto has_work = [&] {
-@@ -687,7 +829,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
+@@ -687,7 +830,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
          // take time from guest threads. The others sleep until a new segment reaches them.
          if (active_worker.load(std::memory_order_relaxed) == index) {
              static const auto spin_time =
@@ -68566,7 +68722,7 @@ index f777aac..2c6202e 100644
          // Apply found buffer base.
          const auto vk_copies = std::span{copies}.subspan(batch_start, batch_end - batch_start);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-index ed0b5ca..c07d7e5 100644
+index ed0b5ca..ee6b80b 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 @@ -2,24 +2,55 @@
@@ -68807,7 +68963,7 @@ index ed0b5ca..c07d7e5 100644
          break;
      }
  
-@@ -147,6 +281,12 @@ bool Swapchain::Present() {
+@@ -147,7 +281,16 @@ bool Swapchain::Present() {
      auto result = instance.GetPresentQueue().presentKHR(present_info);
      if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
          needs_recreation = true;
@@ -68818,9 +68974,13 @@ index ed0b5ca..c07d7e5 100644
 +        surface_lost = result == vk::Result::eErrorSurfaceLostKHR;
 +        needs_recreation = true;
      } else {
++        if (result == vk::Result::eErrorDeviceLost) {
++            Breadcrumbs::ReportDeviceLost("present");
++        }
          ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                     vk::to_string(result));
-@@ -158,20 +298,13 @@ bool Swapchain::Present() {
+     }
+@@ -158,20 +301,13 @@ bool Swapchain::Present() {
  }
  
  void Swapchain::FindPresentFormat() {
@@ -68848,7 +69008,7 @@ index ed0b5ca..c07d7e5 100644
  
      // If there is a single undefined surface format, the device doesn't care, so we'll just use
      // RGBA sRGB.
-@@ -181,24 +314,62 @@ void Swapchain::FindPresentFormat() {
+@@ -181,24 +317,62 @@ void Swapchain::FindPresentFormat() {
          return;
      }
  
@@ -68923,7 +69083,7 @@ index ed0b5ca..c07d7e5 100644
      if (modes_result != vk::Result::eSuccess) {
          LOG_ERROR(Render, "Failed to query available present modes, falling back to Fifo as "
                            "guaranteed supported option.");
-@@ -211,6 +382,9 @@ void Swapchain::FindPresentMode() {
+@@ -211,6 +385,9 @@ void Swapchain::FindPresentMode() {
          present_mode = vk::PresentModeKHR::eMailbox;
      } else if (requested_mode == "Fifo") {
          present_mode = vk::PresentModeKHR::eFifo;
@@ -68933,7 +69093,7 @@ index ed0b5ca..c07d7e5 100644
      } else if (requested_mode == "Immediate") {
          present_mode = vk::PresentModeKHR::eImmediate;
      } else {
-@@ -228,11 +402,31 @@ void Swapchain::FindPresentMode() {
+@@ -228,11 +405,31 @@ void Swapchain::FindPresentMode() {
      }
  }
  
@@ -68970,7 +69130,7 @@ index ed0b5ca..c07d7e5 100644
  
      extent = capabilities.currentExtent;
      if (capabilities.currentExtent.width == std::numeric_limits<u32>::max()) {
-@@ -243,7 +437,7 @@ void Swapchain::SetSurfaceProperties() {
+@@ -243,7 +440,7 @@ void Swapchain::SetSurfaceProperties() {
      }
  
      // Select number of images in swap chain, we prefer one buffer in the background to work on
@@ -68979,7 +69139,7 @@ index ed0b5ca..c07d7e5 100644
      if (capabilities.maxImageCount > 0) {
          image_count = std::min(image_count, capabilities.maxImageCount);
      }
-@@ -259,23 +453,41 @@ void Swapchain::SetSurfaceProperties() {
+@@ -259,23 +456,41 @@ void Swapchain::SetSurfaceProperties() {
      if (!(capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque)) {
          composite_alpha = vk::CompositeAlphaFlagBitsKHR::eInherit;
      }
@@ -69024,7 +69184,7 @@ index ed0b5ca..c07d7e5 100644
      }
  
      for (const auto& sem : image_acquired) {
-@@ -329,7 +541,7 @@ void Swapchain::SetupImages() {
+@@ -329,7 +544,7 @@ void Swapchain::SetupImages() {
          auto [im_view_result, im_view] = device.createImageView(vk::ImageViewCreateInfo{
              .image = images[i],
              .viewType = vk::ImageViewType::e2D,
@@ -96189,7 +96349,7 @@ index b0a76bd..4176044 100644
  
  if __name__ == '__main__':
 diff --git a/scripts/mods.py b/scripts/mods.py
-index d6818eb..4b5d2a4 100644
+index d6818eb..6860f84 100644
 --- a/scripts/mods.py
 +++ b/scripts/mods.py
 @@ -19,6 +19,10 @@ GAME_FOLDERS = {'action', 'chr', 'event', 'facegen', 'font', 'map', 'menu', 'mov
@@ -96292,7 +96452,7 @@ index d6818eb..4b5d2a4 100644
  def is_link(path):
      return path.is_symlink() or (WINDOWS and path.is_junction())
  
-@@ -166,10 +219,31 @@ def expand(directory):
+@@ -166,20 +219,58 @@ def expand(directory):
          directory.mkdir(exist_ok=True)
  
  
@@ -96309,6 +96469,17 @@ index d6818eb..4b5d2a4 100644
 +                pass
 +
 +
++GAMEPLAY_FOLDERS = ('dvdroot_ps4/param/', 'dvdroot_ps4/event/', 'dvdroot_ps4/script/',
++                    'dvdroot_ps4/map/mapstudio/', 'dvdroot_ps4/action/')
++
++
++def changes_gameplay(key):
++    """A mod file the other players of a co-op session read too (parameters, map layouts, events,
++    AI and talk scripts, actions, character animations): different ones on each side desync enemies."""
++    return key.startswith(GAMEPLAY_FOLDERS) or (
++        key.startswith('dvdroot_ps4/chr/') and ('.anibnd' in key or '.behbnd' in key))
++
++
 +def build_overlay(game, out, mods, update=None):
      game = Path(game).resolve(strict=True)
 +    out = overlay_base(game, out)
@@ -96322,10 +96493,26 @@ index d6818eb..4b5d2a4 100644
 +            owners[relative.as_posix().casefold()] = Path(update).name
 +            replacements.append((relative, source))
 +        print(f'Game update: {Path(update).name}: {len(files)} files over the game', file=sys.stderr)
++    gameplay = 0
      for name, root in mods:
          count = 0
          for relative, source in mod_files(root):
-@@ -235,7 +309,7 @@ def main():
+             key = relative.as_posix().casefold()
++            gameplay += changes_gameplay(key)
+             if key in owners:
+                 print(f'Mods: {relative}: {owners[key]} -> {name}', file=sys.stderr)
+             owners[key] = name
+             replacements.append((relative, source))
+             count += 1
+         print(f'Mods: {name}: {count} files', file=sys.stderr)
++    if gameplay:
++        print(f'Mods: {gameplay} of these files change gameplay (parameters, map layouts, events, AI, '
++              'animations): co-op partners need the same files, or enemies and items desync between you',
++              file=sys.stderr)
+     if not replacements:
+         return game
+     out = Path(out).resolve()
+@@ -235,7 +326,7 @@ def main():
          else:
              for name in selected(args.mods_dir, args.config):
                  layers.append((name, args.mods_dir / name))
@@ -101495,10 +101682,10 @@ index 0000000..cafb99e
 +}
 diff --git a/start/mods.cpp b/start/mods.cpp
 new file mode 100644
-index 0000000..d5c868c
+index 0000000..75f7340
 --- /dev/null
 +++ b/start/mods.cpp
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,416 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "mods.h"
 +#include "elf.h"
@@ -101802,6 +101989,17 @@ index 0000000..d5c868c
 +    throw Error("cannot create a mod overlay in " + Utf8(out));
 +}
 +
++// A mod file the other players of a co-op session read too: parameters, map layouts, events, AI
++// and talk scripts, actions and character animations. With different ones on each side, enemies
++// and items desync (killed for one player, alive for the other).
++bool ChangesGameplay(const std::wstring& key) {
++    for (const wchar_t* folder : {L"dvdroot_ps4/param/", L"dvdroot_ps4/event/", L"dvdroot_ps4/script/",
++                                  L"dvdroot_ps4/map/mapstudio/", L"dvdroot_ps4/action/"})
++        if (key.rfind(folder, 0) == 0) return true;
++    return key.rfind(L"dvdroot_ps4/chr/", 0) == 0 &&
++           (key.find(L".anibnd") != std::wstring::npos || key.find(L".behbnd") != std::wstring::npos);
++}
++
 +fs::path BuildOverlay(fs::path game, const fs::path& out_base, const std::vector<std::pair<std::wstring, fs::path>>& mods,
 +                      const std::optional<fs::path>& update) {
 +    game = fs::canonical(game);
@@ -101819,10 +102017,12 @@ index 0000000..d5c868c
 +        }
 +        Log("Game update: %s: %zu files over the game", Utf8(update->filename()).c_str(), files.size());
 +    }
++    std::size_t gameplay = 0;
 +    for (const auto& [name, root] : mods) {
 +        std::size_t count = 0;
 +        for (const auto& [relative, source] : ModFiles(root)) {
 +            const std::wstring key = Fold(relative.generic_wstring());
++            gameplay += ChangesGameplay(key);
 +            if (const auto it = owners.find(key); it != owners.end())
 +                Log("Mods: %s: %s -> %s", Utf8(relative).c_str(), Utf8(it->second).c_str(), Utf8(name).c_str());
 +            owners[key] = name;
@@ -101831,6 +102031,10 @@ index 0000000..d5c868c
 +        }
 +        Log("Mods: %s: %zu files", Utf8(name).c_str(), count);
 +    }
++    if (gameplay)
++        Log("Mods: %zu of these files change gameplay (parameters, map layouts, events, AI, animations): "
++            "co-op partners need the same files, or enemies and items desync between you",
++            gameplay);
 +    if (replacements.empty()) return game;
 +    fs::create_directories(out);
 +    out = fs::canonical(out);
@@ -106300,7 +106504,7 @@ index 0000000..d15f7f5
 +    return 0;
 +}
 diff --git a/tests/test_mods.py b/tests/test_mods.py
-index 795f2f7..7ac21ac 100644
+index 795f2f7..8e0074c 100644
 --- a/tests/test_mods.py
 +++ b/tests/test_mods.py
 @@ -33,6 +33,24 @@ class ModTests(unittest.TestCase):
@@ -106387,6 +106591,21 @@ index 795f2f7..7ac21ac 100644
          for name in layouts:
              with self.subTest(name=name):
                  result = mods.build_overlay(self.game, self.root / 'out',
+@@ -158,3 +195,14 @@ class ModTests(unittest.TestCase):
+         self.assertEqual(mounted['content'], 'mod')
+         self.assertFalse(Path(mounted['path']).exists())
+         self.assertEqual((self.assets/'a.dcx').read_bytes(), b'original')
++
++
++class GameplayFiles(unittest.TestCase):
++    def test_files_both_players_read_are_gameplay(self):
++        for key in ('dvdroot_ps4/param/gameparam/gameparam.parambnd.dcx',
++                    'dvdroot_ps4/map/mapstudio/m24_00_00_00.msb.dcx', 'dvdroot_ps4/event/m24_00_00_00.emevd.dcx',
++                    'dvdroot_ps4/script/aicommon.luabnd.dcx', 'dvdroot_ps4/chr/c2500.anibnd.dcx'):
++            self.assertTrue(mods.changes_gameplay(key), key)
++        for key in ('dvdroot_ps4/chr/c2500.chrbnd.dcx', 'dvdroot_ps4/parts/wp_a_6010.partsbnd.dcx',
++                    'dvdroot_ps4/sfx/frpg_sfxbnd_m24.ffxbnd.dcx', 'dvdroot_ps4/map/m24/m24_9999.tpf.dcx'):
++            self.assertFalse(mods.changes_gameplay(key), key)
 diff --git a/tests/test_motion_history.cpp b/tests/test_motion_history.cpp
 index fd23704..8e8274a 100644
 --- a/tests/test_motion_history.cpp
@@ -107258,10 +107477,10 @@ index 0000000..b14cae2
 +}
 diff --git a/tests/test_redzone.py b/tests/test_redzone.py
 new file mode 100644
-index 0000000..b7ddf6c
+index 0000000..5134f01
 --- /dev/null
 +++ b/tests/test_redzone.py
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,184 @@
 +"""Red-zone-safe trampolines for guest stores (link_modules.protect_red_zones).
 +
 +Where Windows saves extended state in the compact XSAVE layout (Intel 12th gen and later), a
@@ -107272,12 +107491,13 @@ index 0000000..b7ddf6c
 +"""
 +from paths import ROOT
 +import ctypes
++import hashlib
 +import json
 +import os
 +import struct
 +import unittest
 +import xml.etree.ElementTree as ET
-+from link_modules import LEA_DOWN, LEA_UP, protect_red_zones
++from link_modules import LEA_DOWN, LEA_UP, protect_red_zones, rewrite_red_zone_functions
 +
 +SENTINEL = 0x1122334455667788
 +STORE = 30  # offset of the faulting store in leaf()
@@ -107339,6 +107559,53 @@ index 0000000..b7ddf6c
 +        for offset, original, _ in self.sites:
 +            end = offset + len(original) // 2
 +            self.assertFalse(any(offset - 8 < p < end for p in patched), hex(offset))
++
++
++def red_zone_function():
++    """sub rsp,0x20; mov [rsp-0x40],rax; mov [rsp+0x70],rax; je +7; lea rax,[rip+0x10];
++    add rsp,0x20; ret, and its recipe (tools/redzone_functions.py's format)."""
++    code = bytes.fromhex('4883ec20' '48894424c0' '4889442470' '7407' '488d0510000000' '4883c420' 'c3')
++    insns = [[4, 4], [5, 1, 2, 4, 1], [5, 1, 2, 4, 1], [2, 3, 4, 23], [7, 2, 3], [4, 5], [1]]
++    return code, {'offset': 0, 'size': len(code), 'sha256': hashlib.sha256(code).hexdigest(), 'insns': insns}
++
++
++class WholeFunctions(unittest.TestCase):
++    """rewrite_red_zone_functions (BB_RED_ZONE_FUNCTIONS=1): the copy keeps nothing below rsp."""
++
++    def test_copy_runs_with_rsp_lower_and_operands_moved(self):
++        code, recipe = red_zone_function()
++        image = bytearray(code)
++        copy, applied = rewrite_red_zone_functions(image, [recipe], 0x100)
++        self.assertEqual(applied, 1)
++        self.assertEqual(image[:5], b'\xe9' + struct.pack('<i', 0x100 - 5))
++        expected = (bytes.fromhex('4883ec20') + LEA_DOWN +
++                    bytes.fromhex('4889442440') +            # -0x40 + 0x80, still disp8
++                    bytes.fromhex('48898424f0000000'))       # 0x70 + 0x80: disp32
++        self.assertEqual(copy[:len(expected)], expected)
++        at = len(expected)
++        self.assertEqual(copy[at:at + 2], b'\x0f\x84')    # je, as rel32
++        lea = at + 6
++        epilogue = lea + 7
++        self.assertEqual(struct.unpack_from('<i', copy, at + 2)[0], epilogue - (at + 6))
++        rip = struct.unpack_from('<i', copy, lea + 3)[0]
++        self.assertEqual(0x100 + lea + 7 + rip, 16 + 7 + 0x10)  # the old target
++        self.assertEqual(copy[epilogue:epilogue + len(LEA_UP) + 5], LEA_UP + bytes.fromhex('4883c420c3'))
++        self.assertEqual(len(copy) % 16, 0)
++
++    def test_changed_bytes_or_relocations_leave_the_function_alone(self):
++        code, recipe = red_zone_function()
++        changed = bytearray(code)
++        changed[8] = 0xb8
++        self.assertEqual(rewrite_red_zone_functions(changed, [recipe], 0x100), (b'', 0))
++        image = bytearray(code)
++        self.assertEqual(rewrite_red_zone_functions(image, [recipe], 0x100, skip=[16]), (b'', 0))
++        self.assertEqual(image, code)
++
++    def test_shipped_recipes_are_complete(self):
++        functions = json.loads((ROOT / 'patches' / 'redzone_functions.json').read_text())['functions']
++        self.assertEqual(sorted(f['offset'] for f in functions), [0x28ce7b0, 0x28ceec0])
++        for f in functions:
++            self.assertEqual(sum(i[0] for i in f['insns']), f['size'], hex(f['offset']))
 +
 +
 +@unittest.skipUnless(os.name == 'nt', 'Windows exception dispatch')

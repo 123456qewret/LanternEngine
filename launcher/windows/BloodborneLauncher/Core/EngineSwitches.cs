@@ -128,8 +128,8 @@ namespace BloodborneLauncher.Core
                 L.T("Sets the flag in the game's save that some weapon and player sounds need (without it they never play), before ") +
                 L.T("the game reads the save. Off leaves saves untouched")),
             OnUnless0("BB_OPTISCALER_COMPAT", Fixes, L.T("OptiScaler compatibility"),
-                L.T("Only when OptiScaler is installed: one thread sends the GPU work, and DLSS calls wait for the GPU queue, ") +
-                L.T("so OptiScaler's hooks don't crash. Costs a little FPS. Off: the engine runs as without OptiScaler")),
+                L.T("Only when OptiScaler is installed: DLSS calls wait for the GPU queue, and one thread sends the GPU work while its frame generation is on, ") +
+                L.T("so OptiScaler's hooks don't crash. Costs a little FPS with its frame generation. Off: the engine runs as without OptiScaler")),
             Flag("BB_RED_ZONE_FUNCTIONS", Fixes, L.T("Intel effect crash fix (test)"),
                 L.T("For crashes in effects on Intel 12th-14th gen CPUs (Ebrietas, Witch of Hemwick, One Reborn, the Cainhurst " +
                     "cutscene): the two effect ribbon writers keep their data where Windows can't overwrite it. Every effect stays " +
