@@ -5,7 +5,9 @@ Lantern Engine runs your own copy of Bloodborne on Windows and Linux: a launcher
 
 > **Note:** I'm keeping this going on my own, and updates are slower now because of the hate I've been getting. I'll keep working on it when I can.
 
-**No game files are included.** You need your own decrypted Bloodborne dump (CUSA03173) with update 1.09.
+**No game files are included.** You need your own legal copy of Bloodborne (CUSA03173) with update 1.09, dumped from your own PS4.
+
+**Help:** [Help & FAQ](https://lantern-engine.netlify.app): setup, a graphics settings guide, fixes for common problems and the beta guide. Bug reports go to the `#issues` forum on the [Discord](https://discord.gg/d3Uv3Cfr5x).
 
 ## Install
 
@@ -17,7 +19,7 @@ Lantern Engine runs your own copy of Bloodborne on Windows and Linux: a launcher
 
 1. Download `LanternEngine-<version>-linux-x64.tar.gz` from [Releases](https://github.com/Awakenchan/LanternEngine/releases) and unpack it (`tar xzf LanternEngine-*-linux-x64.tar.gz`).
 2. Run `Lantern Engine` in the unpacked folder, pick your game folder and press **Play**. From a terminal: `./lantern.sh /path/to/CUSA03173`.
-3. It needs a Vulkan driver (Mesa or NVIDIA), Python 3 and glibc 2.38 or newer (Ubuntu 24.04, Fedora 39, Arch, SteamOS 3.6, Bazzite). DLSS is Windows only for now, and the launcher does not update itself on Linux yet.
+3. It needs a Vulkan driver (Mesa or NVIDIA), Python 3 and glibc 2.38 or newer (Ubuntu 24.04, Fedora 39, Arch, SteamOS 3.6, Bazzite). From 0.9.37 beta 7 the launcher updates itself on Linux too, and DLSS Super Resolution works on RTX cards with NVIDIA's driver (DLSS Frame Generation is Windows only).
 
 ## Credits
 
@@ -42,3 +44,5 @@ Lantern Engine runs your own copy of Bloodborne on Windows and Linux: a launcher
 ## License
 
 The launcher is GPL-2.0-or-later (see [LICENSE](LICENSE)). The engine is GPL-3.0-or-later; its licenses are in the package's `licenses/` folder.
+
+Source: the engine's full source is in [`engine/`](engine) (0.9.37 beta 7 on), the launchers' in [`launcher/windows/`](launcher/windows), and the Help & FAQ page in [`faq/`](faq).

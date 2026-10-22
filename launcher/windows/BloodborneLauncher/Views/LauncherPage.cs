@@ -125,6 +125,43 @@ namespace BloodborneLauncher.Views
             Child = grid;
         }
 
+        /// <summary>A picture in the icon's place (a trophy's own), <paramref name="size"/> pixels
+        /// square; grey when <paramref name="grey"/>.</summary>
+        public void SetPicture(string file, double size, bool grey)
+        {
+            if (Icon.Parent is not Grid grid || Picture(file, (int)(size * 2), grey) is not { } source) return;
+            var image = new System.Windows.Controls.Image
+            {
+                Source = source, Width = size, Height = size, Margin = Icon.Margin, VerticalAlignment = VerticalAlignment.Center,
+            };
+            RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
+            grid.Children.Add(image);
+            Icon.Visibility = Visibility.Collapsed;
+        }
+
+        /// <summary>A picture file decoded at <paramref name="pixels"/> wide, frozen; null if it cannot be read.</summary>
+        public static ImageSource? Picture(string file, int pixels, bool grey = false)
+        {
+            try
+            {
+                var bitmap = new System.Windows.Media.Imaging.BitmapImage();
+                bitmap.BeginInit();
+                bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bitmap.DecodePixelWidth = pixels;
+                bitmap.UriSource = new Uri(file);
+                bitmap.EndInit();
+                bitmap.Freeze();
+                if (!grey) return bitmap;
+                var gray = new System.Windows.Media.Imaging.FormatConvertedBitmap(bitmap, PixelFormats.Gray8, null, 0);
+                gray.Freeze();
+                return gray;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         /// <summary>A card in Classic; nothing in Modern, where the group's glass box shows through.</summary>
         private void PlainBackground()
         {

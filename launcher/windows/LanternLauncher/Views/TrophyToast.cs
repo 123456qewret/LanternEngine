@@ -98,6 +98,13 @@ namespace BloodborneLauncher.Views
                 },
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            // The trophy's own picture from the game dump, as the PS4 shows it.
+            if (TrophyIcons.For(Workspace.Current.Settings, trophy.Id) is { } file &&
+                SettingRow.Picture(file, 92) is { } picture)
+            {
+                tile.Background = Brushes.Black;
+                tile.Child = new Image { Source = picture, Stretch = Stretch.UniformToFill };
+            }
 
             var cup = new SymbolIcon(SymbolRegular.Trophy24)
             {

@@ -12,7 +12,7 @@ namespace BloodborneLauncher.Views
         private readonly TextBlock _upscalerHint, _dlssHint, _frameGenHint;
         private TextBlock? _motionBlurHint;
         private readonly SettingRow _presetCard, _renderScaleCard, _sharpenCard, _sharpnessCard, _mipBiasCard;
-        private readonly SettingRow _frameGenFramesCard, _reflexCard, _frameGenCapCard;
+        private readonly SettingRow _frameGenFramesCard, _frameGenDynamicCard, _reflexCard, _frameGenCapCard;
 
         public GraphicsPage() : base(L.T("Graphics"),
             L.T("Stored in lantern.ini; the upscaler can also be changed in game (Insert or L3 + R3)."))
@@ -71,6 +71,9 @@ namespace BloodborneLauncher.Views
                 L.T("Frames shown per frame the game renders. More than 2x needs an RTX 50 GPU; the engine keeps to what the GPU allows"),
                 Choices.FrameGenFrames, "frame_gen_frames");
             _frameGenFramesCard = (SettingRow)Body.Children[^1];
+            IniToggle(SymbolRegular.TopSpeed24, L.T("DLSS dynamic frame generation"),
+                L.T("RTX 50: the driver picks 2x, 3x or 4x moment by moment to reach your refresh rate, up to the generated frames above. Fewer generated frames when the game is fast: less lag, fewer artifacts. Also in game, with a target FPS"), "frame_gen_dynamic");
+            _frameGenDynamicCard = (SettingRow)Body.Children[^1];
             IniCombo(SymbolRegular.Flash24, L.T("NVIDIA Reflex"),
                 L.T("Keeps the GPU's queue short for lower input lag. Always on while DLSS Frame Generation runs"),
                 Choices.Reflex, "reflex");
@@ -138,7 +141,7 @@ namespace BloodborneLauncher.Views
         public override void OnShown() => UpdateUpscaler();
 
         private static bool DlssFound() =>
-            File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll")); // the engine has DLSS built in; NVIDIA's runtime sits beside it
+            Paths.DlssRuntime != null; // the engine has DLSS built in; NVIDIA's runtime sits beside it
 
         private void UpdateUpscaler()
         {
@@ -171,6 +174,7 @@ namespace BloodborneLauncher.Views
             // Frame generation: DLSS's own rows only with DLSS chosen.
             var frameGen = Ini.Get("frame_gen", "off");
             _frameGenFramesCard.IsEnabled = frameGen == "dlss";
+            _frameGenDynamicCard.IsEnabled = frameGen == "dlss";
             _reflexCard.IsEnabled = frameGen == "dlss";
             _frameGenCapCard.IsEnabled = frameGen != "off";
             SetHint(_frameGenHint, frameGen switch
@@ -192,10 +196,10 @@ namespace BloodborneLauncher.Views
                     ? L.T("With an upscaler at an output other than 1920x1080 the blur can smear. More > Engine > No motion blur smear with upscalers leaves it out there")
                     : null);
 
-            var ngx = Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll");
-            SetHint(_dlssHint, DlssFound()
-                ? L.F($"NVIDIA DLSS {System.Diagnostics.FileVersionInfo.GetVersionInfo(ngx).FileVersion} is included (out\\nvngx_dlss.dll). Choose it as the upscaler above")
-                : L.T("out\\nvngx_dlss.dll is missing from the engine folder"));
+            var ngx = Paths.DlssRuntime;
+            SetHint(_dlssHint, ngx != null
+                ? L.F($"NVIDIA DLSS {Paths.DlssVersion(ngx)} is included ({Path.Combine("out", Path.GetFileName(ngx))}). Choose it as the upscaler above")
+                : L.F($"{Path.Combine("out", "nvngx_dlss.dll")} is missing from the engine folder"));
         }
 
         /// <summary>The fsr4vk provider the package ships (FSR 4.1.1 on any GPU, vk_fsr4vk.cpp).</summary>

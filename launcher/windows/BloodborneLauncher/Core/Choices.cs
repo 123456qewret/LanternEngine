@@ -148,6 +148,7 @@
         /// <summary>The DLSS model (BB_DLSS_PRESET): NVIDIA's render presets.</summary>
         public static readonly Choice[] DlssModels =
         {
+            new(L.T("Auto (per quality)"), "auto", L.T("NVIDIA's DLSS 4.5 pairing: K for DLAA, Quality and Balanced, M for Performance, L for Ultra Performance")),
             new("Transformer (preset K)", "k", L.T("The newer model: steadier thin and moving objects (a weapon on the back, railings)")),
             new("Transformer 2 (preset M)", "m", L.T("DLSS 4.5's model for Performance: sharper, a little heavier")),
             new("Transformer 2 (preset L)", "l", L.T("DLSS 4.5's model for Ultra Performance")),

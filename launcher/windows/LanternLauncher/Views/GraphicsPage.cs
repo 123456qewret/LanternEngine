@@ -219,7 +219,7 @@ namespace BloodborneLauncher.Views
         public override void OnShown() => UpdateUpscaler();
 
         private static bool DlssFound() =>
-            File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll")); // the engine has DLSS built in; NVIDIA's runtime sits beside it
+            Paths.DlssRuntime != null; // the engine has DLSS built in; NVIDIA's runtime sits beside it
 
         private void UpdateUpscaler()
         {
@@ -254,10 +254,12 @@ namespace BloodborneLauncher.Views
                     ? L.T("With an upscaler at an output other than 1920x1080 the blur can smear. More > Engine > No motion blur smear with upscalers leaves it out there")
                     : null);
 
-            var ngx = Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll");
-            SetHint(_dlssHint, DlssFound()
-                ? L.F($"NVIDIA DLSS {System.Diagnostics.FileVersionInfo.GetVersionInfo(ngx).FileVersion} is included (out\\nvngx_dlss.dll). Choose it as the upscaler above")
-                : L.T("out\\nvngx_dlss.dll is missing from the engine folder"));
+            // Linux: libnvidia-ngx-dlss.so.<version>, DLSS Super Resolution only (Streamline's frame
+            // generation is Windows only).
+            var ngx = Paths.DlssRuntime;
+            SetHint(_dlssHint, ngx != null
+                ? L.F($"NVIDIA DLSS {Paths.DlssVersion(ngx)} is included ({Path.Combine("out", Path.GetFileName(ngx))}). Choose it as the upscaler above")
+                : L.F($"{Path.Combine("out", OperatingSystem.IsWindows() ? "nvngx_dlss.dll" : "libnvidia-ngx-dlss.so")} is missing from the engine folder"));
         }
 
         /// <summary>The fsr4vk provider the package ships (FSR 4.1.1 on any GPU, vk_fsr4vk.cpp).</summary>

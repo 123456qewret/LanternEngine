@@ -127,6 +127,31 @@ namespace BloodborneLauncher.Views
             Child = grid;
         }
 
+        /// <summary>A picture in the icon's place (a trophy's own), <paramref name="size"/> pixels square.</summary>
+        public void SetPicture(string file, double size)
+        {
+            if (Icon.Parent is not Grid grid || Picture(file, (int)(size * 2)) is not { } source) return;
+            grid.Children.Add(new Image
+            {
+                Source = source, Width = size, Height = size, Margin = Icon.Margin, VerticalAlignment = VerticalAlignment.Center,
+            });
+            Icon.IsVisible = false;
+        }
+
+        /// <summary>A picture file decoded at <paramref name="pixels"/> wide; null if it cannot be read.</summary>
+        public static Avalonia.Media.Imaging.Bitmap? Picture(string file, int pixels)
+        {
+            try
+            {
+                using var stream = System.IO.File.OpenRead(file);
+                return Avalonia.Media.Imaging.Bitmap.DecodeToWidth(stream, pixels);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         /// <summary>A long tooltip as a wrapped block, not one line across the screen.</summary>
         public static TextBlock Wrapped(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 };
 

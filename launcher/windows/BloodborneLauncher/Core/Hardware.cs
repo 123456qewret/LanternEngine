@@ -237,7 +237,7 @@ namespace BloodborneLauncher.Core
             }
 
             var tier = GpuTier;
-            var dlss = File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll"));
+            var dlss = Paths.DlssRuntime != null;
             Ini(L.T("Upscaler"), "upscaler", Rtx && dlss ? "dlss" : Rdna4 ? "fsr4" : "fsr3", Choices.Upscalers);
 
             // The output: the display's own size, by name where it is one of the choices, else

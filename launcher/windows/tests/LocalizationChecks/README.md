@@ -31,4 +31,4 @@ language**.
 For visual review, select the language there and restart. Check both layouts,
 the window buttons, settings search, dialogs, and **Display > Language >
 In-game settings menu language**. The game menu uses `zh_CN` for Chinese; its
-font and build steps are documented in `engine/README.md`.
+font and build steps are documented in `engine/docs/history/bbport-README.md`.

@@ -89,7 +89,7 @@ namespace BloodborneLauncher.Views
             SettingToggle(SymbolRegular.Speaker224, L.T("Play a sound"), null, "trophy_sound");
             SliderRow(SymbolRegular.Speaker124, L.T("Volume"), null, 0, 100, 5, () => S.Int("trophy_volume"),
                 v => S.Set("trophy_volume", (int)v), "0");
-            Add(Card(SymbolRegular.MusicNote224, L.T("Sound file"), L.T("A .wav of your own; empty uses the built-in chime"), Row(
+            Add(Card(SymbolRegular.MusicNote224, L.T("Sound file"), L.T("A sound of your own (WAV, MP3, MP4/M4A); empty uses the built-in chime"), Row(
                 SmallButton(L.T("Choose…"), SymbolRegular.FolderOpen24, (_, _) => ChooseSound()),
                 IconButton(SymbolRegular.ArrowUndo24, L.T("Use the built-in chime"), (_, _) =>
                 {
@@ -249,6 +249,9 @@ namespace BloodborneLauncher.Views
                 if (earned) symbol.Foreground = GradeBrush(trophy.Grade);
                 else symbol.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorTertiaryBrush");
                 row.Opacity = earned ? 1 : 0.62;
+                // The trophy's own picture from the game dump (dimmed with the row until earned).
+                if (TrophyIcons.For(S, trophy.Id) is { } picture)
+                    row.SetPicture(picture, 36);
                 row.SetTip(L.F($"{Trophy.GradeName(trophy.Grade)} · {trophy.Points} points"));
                 _list.Children.Add(row);
             }
@@ -270,7 +273,7 @@ namespace BloodborneLauncher.Views
 
         private void ChooseSound()
         {
-            var file = Ui.OpenFile(L.T("Trophy sound"), L.T("WAV sound|*.wav"));
+            var file = Ui.OpenFile(L.T("Trophy sound"), L.T("Sound files|*.wav;*.mp3;*.mp4;*.m4a;*.aac;*.wma"));
             if (file == null) return;
             S.Set("trophy_sound_file", file);
             Ws.SaveSoon();
