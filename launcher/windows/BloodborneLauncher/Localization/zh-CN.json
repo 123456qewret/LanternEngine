@@ -1611,5 +1611,7 @@
   "{0} applied: ": "已应用“{0}”：",
   "{0} is set. Press Next.": "已设为“{0}”。请按“下一步”。",
   "Move and look in menus": "菜单中移动和转动视角",
-  "With a menu open in the world, the movement and look keys stay your character's and the arrow keys move through the menu. The mouse turns the camera while Mouse in menus is off. Whether the character can walk then is up to the game. Applied at the next start": "在游戏世界中打开菜单时，移动键和视角键仍控制角色，方向键用于在菜单中移动。关闭“在菜单中使用鼠标”时，鼠标仍可转动镜头。角色此时能否行走取决于游戏本身。下次启动时生效"
+  "With a menu open in the world, the movement and look keys stay your character's and the arrow keys move through the menu. The mouse turns the camera while Mouse in menus is off. Whether the character can walk then is up to the game. Applied at the next start": "在游戏世界中打开菜单时，移动键和视角键仍控制角色，方向键用于在菜单中移动。关闭“在菜单中使用鼠标”时，鼠标仍可转动镜头。角色此时能否行走取决于游戏本身。下次启动时生效",
+  "As in the world": "与游戏中相同",
+  "The controller button that does this in the game's menus, whatever it does in the world (Circle moved to L2 for sprinting still goes back here). Not set: menus use the buttons as in the world. Click, then press a button on the pad.": "在游戏菜单中执行此操作的手柄按键，不论它在游戏世界中做什么（为了冲刺把圆圈键改到 L2 后，这里仍可用来返回）。未设置时：菜单中的按键与游戏世界中相同。点击后在手柄上按下一个按键。"
 }

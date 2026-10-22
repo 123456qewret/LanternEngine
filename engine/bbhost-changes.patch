@@ -52872,6 +52872,24 @@ index f6c2aed..4a8c626 100644
          paths.insert_or_assign(shad_path, new_path);
      };
  
+diff --git a/gpu/shadps4/common/serdes.h b/gpu/shadps4/common/serdes.h
+index 8366799..46d046d 100644
+--- a/gpu/shadps4/common/serdes.h
++++ b/gpu/shadps4/common/serdes.h
+@@ -90,8 +90,11 @@ private:
+ struct Writer {
+     template <typename T>
+     void Write(const T* ptr, size_t size) {
+-        if (ar.offset + size >= ar.container.size()) {
+-            ar.Grow(size);
++        // bbport: grown by what is missing only. Growing by `size` past room an earlier Grow left
++        // kept that room as zero bytes after the record (a vertex shader's, after its fetch shader
++        // data), which the reader took for one more part of it.
++        if (ar.offset + size > ar.container.size()) {
++            ar.Grow(ar.offset + size - ar.container.size());
+         }
+         std::memcpy(ar.CurrPtr(), reinterpret_cast<const void*>(ptr), size);
+         ar.Advance(size);
 diff --git a/gpu/shadps4/common/slot_vector.h b/gpu/shadps4/common/slot_vector.h
 index 2f693fb..fe68939 100644
 --- a/gpu/shadps4/common/slot_vector.h
@@ -66194,7 +66212,7 @@ index 0000000..307b26a
 +
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
-index 23d52b9..ac59452 100644
+index 23d52b9..b6c890d 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 @@ -1,6 +1,12 @@
@@ -66363,12 +66381,24 @@ index 23d52b9..ac59452 100644
      // bbport: FSR 4 v07 INT8 (vk_temporal_upscaler): quad derivatives in compute shaders.
      compute_shader_derivatives = add_extension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
      // bbport: FSR 4.1.1 passes (dot2 of halves accumulated in float, as vkd3d-proton translates them).
-@@ -392,6 +465,19 @@ bool Instance::CreateDevice() {
+@@ -392,6 +465,31 @@ bool Instance::CreateDevice() {
      }
      const bool calibrated_timestamps =
          TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 +    // bbport: HDR output (vk_swapchain.cpp): the display's luminance for the HDR swapchain.
 +    hdr_metadata = add_extension(VK_EXT_HDR_METADATA_EXTENSION_NAME);
++    // bbport (0.9.37 beta 6): NVIDIA's low latency extension for its boost hint alone (Swapchain:
++    // GPU clocks held up while the engine leaves the GPU idle between its waits; an RTX 3070 ran
++    // 45-59 FPS without it and 106 with Reflex Boost through Streamline). Streamline adds and
++    // drives the extension itself when it is loaded, and OptiScaler hooks the device's creation
++    // (it may add Reflex's extensions too). BB_NV_BOOST=0: not used.
++    if (!Streamline::Loaded() && !OptiScaler::Detect().loaded &&
++        !(std::getenv("BB_NV_BOOST") && std::getenv("BB_NV_BOOST")[0] == '0') &&
++        std::ranges::find(available_extensions, std::string{VK_NV_LOW_LATENCY_2_EXTENSION_NAME}) !=
++            available_extensions.end()) {
++        low_latency_boost = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
++                            add_extension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
++    }
 +    // bbport (Windows): BB_EXCLUSIVE_FULLSCREEN=0 keeps the swapchain from ever becoming
 +    // exclusive fullscreen (vk_swapchain.cpp), so a driver cannot switch Windows HDR off for an
 +    // SDR image. Off by default: the driver's exclusive mode has the lowest latency and keeps
@@ -66383,7 +66413,7 @@ index 23d52b9..ac59452 100644
  
      const auto family_properties = physical_device.getQueueFamilyProperties();
      if (family_properties.empty()) {
-@@ -444,6 +530,37 @@ bool Instance::CreateDevice() {
+@@ -444,6 +542,37 @@ bool Instance::CreateDevice() {
      const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
      vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
      vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
@@ -66421,7 +66451,7 @@ index 23d52b9..ac59452 100644
      vk::StructureChain device_chain = {
          vk::DeviceCreateInfo{
              .queueCreateInfoCount = queue_info_count,
-@@ -469,11 +586,15 @@ bool Instance::CreateDevice() {
+@@ -469,11 +598,15 @@ bool Instance::CreateDevice() {
                  .wideLines = features.wideLines,
                  .multiViewport = features.multiViewport,
                  .samplerAnisotropy = features.samplerAnisotropy,
@@ -66437,7 +66467,7 @@ index 23d52b9..ac59452 100644
                  // bbport: required by the FSR 3 accumulate shaders (vk_temporal_upscaler).
                  .shaderStorageImageWriteWithoutFormat =
                      features.shaderStorageImageWriteWithoutFormat,
-@@ -497,6 +618,9 @@ bool Instance::CreateDevice() {
+@@ -497,6 +630,9 @@ bool Instance::CreateDevice() {
              .shaderSharedInt64Atomics = vk12_features.shaderSharedInt64Atomics,
              .shaderFloat16 = vk12_features.shaderFloat16,
              .shaderInt8 = vk12_features.shaderInt8,
@@ -66447,7 +66477,7 @@ index 23d52b9..ac59452 100644
              .scalarBlockLayout = vk12_features.scalarBlockLayout,
              .uniformBufferStandardLayout = vk12_features.uniformBufferStandardLayout,
              .separateDepthStencilLayouts = vk12_features.separateDepthStencilLayouts,
-@@ -607,6 +731,18 @@ bool Instance::CreateDevice() {
+@@ -607,6 +743,18 @@ bool Instance::CreateDevice() {
              .shaderFloat8 = true,
              .shaderFloat8CooperativeMatrix = true,
          },
@@ -66466,7 +66496,7 @@ index 23d52b9..ac59452 100644
      };
  
      if (!custom_border_color) {
-@@ -639,6 +775,12 @@ bool Instance::CreateDevice() {
+@@ -639,6 +787,12 @@ bool Instance::CreateDevice() {
      if (!maintenance_8) {
          device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
      }
@@ -66479,7 +66509,7 @@ index 23d52b9..ac59452 100644
      if (!attachment_feedback_loop) {
          device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT>();
          device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT>();
-@@ -670,15 +812,27 @@ bool Instance::CreateDevice() {
+@@ -670,15 +824,27 @@ bool Instance::CreateDevice() {
      if (!shader_float8) {
          device_chain.unlink<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
      }
@@ -66510,7 +66540,7 @@ index 23d52b9..ac59452 100644
  
      graphics_queue = device->getQueue(queue_family_index, 0);
      present_queue = device->getQueue(queue_family_index, 0);
-@@ -800,6 +954,11 @@ void Instance::CollectDeviceParameters() {
+@@ -800,6 +966,11 @@ void Instance::CollectDeviceParameters() {
      const std::string api_version = GetReadableVersion(properties.apiVersion);
      const std::string extensions = fmt::format("{}", fmt::join(available_extensions, ", "));
  
@@ -66523,7 +66553,7 @@ index 23d52b9..ac59452 100644
      LOG_INFO(Render_Vulkan, "GPU_Model: {}", model_name);
      LOG_INFO(Render_Vulkan, "GPU_Integrated: {}", IsIntegrated() ? "Yes" : "No");
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
-index f1f48b6..44d6ee5 100644
+index f1f48b6..19d52f4 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 @@ -102,6 +102,10 @@ public:
@@ -66592,7 +66622,7 @@ index f1f48b6..44d6ee5 100644
      /// The Vulkan extensions required by NVIDIA NGX are enabled.
      bool IsDlssCapable() const { return dlss_extensions; }
  
-@@ -329,6 +367,17 @@ public:
+@@ -329,6 +367,22 @@ public:
          return shader_clock && shader_clock_features.shaderSubgroupClock;
      }
  
@@ -66607,10 +66637,15 @@ index f1f48b6..44d6ee5 100644
 +        return hdr_metadata;
 +    }
 +
++    /// bbport: VK_NV_low_latency2 is enabled for its boost hint (Swapchain), without Streamline.
++    bool IsLowLatencyBoostEnabled() const {
++        return low_latency_boost;
++    }
++
      /// Returns the vendor ID of the physical device
      u32 GetVendorID() const {
          return properties.vendorID;
-@@ -384,6 +433,11 @@ public:
+@@ -384,6 +438,11 @@ public:
          return properties.limits.minUniformBufferOffsetAlignment;
      }
  
@@ -66622,7 +66657,7 @@ index f1f48b6..44d6ee5 100644
      /// Returns the minimum required alignment for storage buffers
      vk::DeviceSize StorageMinAlignment() const {
          return properties.limits.minStorageBufferOffsetAlignment;
-@@ -399,6 +453,16 @@ public:
+@@ -399,6 +458,16 @@ public:
          return vk11_props.subgroupSize;
      }
  
@@ -66639,7 +66674,7 @@ index f1f48b6..44d6ee5 100644
      /// Returns the maximum size of compute shared memory.
      u32 MaxComputeSharedMemorySize() const {
          return properties.limits.maxComputeSharedMemorySize;
-@@ -563,12 +627,14 @@ private:
+@@ -563,12 +632,14 @@ private:
      vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR compute_shader_derivatives_features;
      vk::DriverIdKHR driver_id;
      vk::UniqueDebugUtilsMessengerEXT debug_callback{};
@@ -66654,7 +66689,7 @@ index f1f48b6..44d6ee5 100644
      u32 readback_family_index = NoFamily;
      std::vector<vk::PhysicalDevice> physical_devices;
      std::vector<std::string> available_extensions;
-@@ -597,13 +663,18 @@ private:
+@@ -597,13 +668,19 @@ private:
      bool maintenance_5{};
      bool maintenance_8{};
      bool buffer_marker{};
@@ -66670,6 +66705,7 @@ index f1f48b6..44d6ee5 100644
      bool dlss_extensions{};         // bbport: VK_NVX_binary_import + VK_NVX_image_view_handle
 +    bool full_screen_exclusive{};   // bbport: VK_EXT_full_screen_exclusive (Windows)
 +    bool hdr_metadata{};            // bbport: VK_EXT_hdr_metadata
++    bool low_latency_boost{};       // bbport: VK_NV_low_latency2 (+ VK_KHR_present_id), boost hint
      bool cooperative_matrix{};      // bbport: VK_KHR_cooperative_matrix (FSR 4.1.1 FP8 variant)
      bool shader_float8{};           // bbport: VK_EXT_shader_float8 with FP8 matrices (RDNA4)
      bool supports_memory_budget{};
@@ -68128,7 +68164,7 @@ index ff89b44..60d7693 100644
  };
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
-index 21188ff..a39a4d0 100644
+index 21188ff..892a689 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
 @@ -1,11 +1,20 @@
@@ -68379,7 +68415,7 @@ index 21188ff..a39a4d0 100644
  }
  
  bool Info::Deserialize(Serialization::Archive& ar) {
-@@ -527,9 +702,84 @@ bool Info::Deserialize(Serialization::Archive& ar) {
+@@ -527,12 +702,93 @@ bool Info::Deserialize(Serialization::Archive& ar) {
      info.Read(this, sizeof(Shader::InfoPersistent));
      info.Read(flattened_ud_buf);
  
@@ -68392,6 +68428,13 @@ index 21188ff..a39a4d0 100644
 +    table_plan = {};
 +    uses_tone_curve = false;
 +    while (!ar.IsEoS()) {
++        // bbport: zero bytes to the end are room the writer left after a vertex shader's fetch
++        // shader data (up to 0.9.37 beta 5): not a part. Taken for one, they left every such shader
++        // out of the start's warm-up (308 of 387 pipelines on the dev cache compiled in play).
++        const u8* rest = ar.CurrPtr();
++        if (std::all_of(rest, rest + ar.Remaining(), [](u8 byte) { return byte == 0; })) {
++            break;
++        }
 +        if (ar.Remaining() < sizeof(u32)) {
 +            return false;
 +        }
@@ -68422,8 +68465,8 @@ index 21188ff..a39a4d0 100644
 +    plan.Write(entries);
 +    plan.Write(ops);
 +    plan.Write(table_dwords);
-+}
-+
+ }
+ 
 +bool TablePlan::Deserialize(Serialization::Archive& ar) {
 +    Serialization::Reader plan{ar};
 +    u32 magic{};
@@ -68458,13 +68501,16 @@ index 21188ff..a39a4d0 100644
 +        valid = valid && (entry.expr_len == 0 || depth == 1);
 +    }
 +    return true;
- }
- 
++}
++
 +} // namespace Native
 +
  void Gcn::FetchShaderData::Serialize(Serialization::Archive& ar) const {
      Serialization::Writer fetch{ar};
-     ar.Grow(6 + attributes.size() * sizeof(VertexAttribute));
+-    ar.Grow(6 + attributes.size() * sizeof(VertexAttribute));
+ 
+     fetch.Write(size);
+     fetch.Write(vertex_offset_sgpr);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.h b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.h
 index 0a12441..36c3ac9 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.h
@@ -74969,7 +75015,7 @@ index 0000000..76becea
 +
 +} // namespace Vulkan::Streamline
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-index ed0b5ca..98f004c 100644
+index ed0b5ca..d2f654d 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 @@ -2,24 +2,55 @@
@@ -75048,7 +75094,7 @@ index ed0b5ca..98f004c 100644
      if (extent.width == 0 || extent.height == 0) {
          zero_extent = true;
          needs_recreation = true;
-@@ -58,8 +98,22 @@ void Swapchain::Create(u32 width_, u32 height_) {
+@@ -58,8 +98,30 @@ void Swapchain::Create(u32 width_, u32 height_) {
      const u32 queue_family_indices_count = exclusive ? 1u : 2u;
      const vk::SharingMode sharing_mode =
          exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
@@ -75067,12 +75113,20 @@ index ed0b5ca..98f004c 100644
 +    }
 +    const auto format = needs_hdr ? SURFACE_FORMAT_HDR : hdr_output ? hdr_format : surface_format;
 +    view_format = format.format;
-     const vk::SwapchainCreateInfoKHR swapchain_info = {
++    // bbport: a swapchain the NVIDIA boost hint is set on (Instance::IsLowLatencyBoostEnabled).
++    const vk::SwapchainLatencyCreateInfoNV latency_info = {
 +        .pNext = FullScreenExclusiveDisallowed(full_screen_exclusive),
++        .latencyModeEnable = true,
++    };
++    const bool boost = instance.IsLowLatencyBoostEnabled() &&
++                       BbSettings::Get().reflex.load() != BbSettings::ReflexOff;
+     const vk::SwapchainCreateInfoKHR swapchain_info = {
++        .pNext = boost ? static_cast<const void*>(&latency_info)
++                       : FullScreenExclusiveDisallowed(full_screen_exclusive),
          .surface = surface,
          .minImageCount = image_count,
          .imageFormat = format.format,
-@@ -79,12 +133,82 @@ void Swapchain::Create(u32 width_, u32 height_) {
+@@ -79,12 +141,101 @@ void Swapchain::Create(u32 width_, u32 height_) {
      };
  
      auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
@@ -75087,6 +75141,25 @@ index ed0b5ca..98f004c 100644
 +        return;
 +    }
      swapchain = chain;
++    if (boost && VULKAN_HPP_DEFAULT_DISPATCHER.vkSetLatencySleepModeNV) {
++        // bbport (0.9.37 beta 6): the driver keeps the GPU's clocks up (Reflex Boost) instead of
++        // lowering them whenever the GPU waits for the engine: half the frame rate on an RTX 3070
++        // without it. Low latency mode itself (its sleep and markers) is Streamline's.
++        const VkLatencySleepModeInfoNV mode{
++            .sType = VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV,
++            .lowLatencyMode = VK_FALSE,
++            .lowLatencyBoost = VK_TRUE,
++            .minimumIntervalUs = 0,
++        };
++        const VkResult result = VULKAN_HPP_DEFAULT_DISPATCHER.vkSetLatencySleepModeNV(
++            instance.GetDevice(), swapchain, &mode);
++        static bool logged = false;
++        if (!logged || result != VK_SUCCESS) {
++            logged = true;
++            std::printf("GPU: NVIDIA boost clocks %s (Reflex setting; BB_NV_BOOST=0: off)\n",
++                        result == VK_SUCCESS ? "on" : vk::to_string(vk::Result(result)).c_str());
++        }
++    }
  
      SetupImages();
      RefreshSemaphores();
@@ -75157,7 +75230,7 @@ index ed0b5ca..98f004c 100644
  }
  
  void Swapchain::Recreate(u32 width_, u32 height_) {
-@@ -98,11 +222,7 @@ void Swapchain::SetHDR(bool hdr) {
+@@ -98,11 +249,7 @@ void Swapchain::SetHDR(bool hdr) {
          return;
      }
  
@@ -75170,7 +75243,7 @@ index ed0b5ca..98f004c 100644
  
      needs_hdr = hdr;
      Recreate(width, height);
-@@ -111,6 +231,10 @@ void Swapchain::SetHDR(bool hdr) {
+@@ -111,6 +258,10 @@ void Swapchain::SetHDR(bool hdr) {
  }
  
  bool Swapchain::AcquireNextImage() {
@@ -75181,7 +75254,7 @@ index ed0b5ca..98f004c 100644
      vk::Device device = instance.GetDevice();
      vk::Result result =
          device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
-@@ -120,15 +244,25 @@ bool Swapchain::AcquireNextImage() {
+@@ -120,15 +271,25 @@ bool Swapchain::AcquireNextImage() {
      case vk::Result::eSuccess:
          break;
      case vk::Result::eSuboptimalKHR:
@@ -75210,7 +75283,7 @@ index ed0b5ca..98f004c 100644
          break;
      }
  
-@@ -147,7 +281,16 @@ bool Swapchain::Present() {
+@@ -147,7 +308,16 @@ bool Swapchain::Present() {
      auto result = instance.GetPresentQueue().presentKHR(present_info);
      if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
          needs_recreation = true;
@@ -75227,7 +75300,7 @@ index ed0b5ca..98f004c 100644
          ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                     vk::to_string(result));
      }
-@@ -158,20 +301,13 @@ bool Swapchain::Present() {
+@@ -158,20 +328,13 @@ bool Swapchain::Present() {
  }
  
  void Swapchain::FindPresentFormat() {
@@ -75255,7 +75328,7 @@ index ed0b5ca..98f004c 100644
  
      // If there is a single undefined surface format, the device doesn't care, so we'll just use
      // RGBA sRGB.
-@@ -181,24 +317,66 @@ void Swapchain::FindPresentFormat() {
+@@ -181,24 +344,66 @@ void Swapchain::FindPresentFormat() {
          return;
      }
  
@@ -75334,7 +75407,7 @@ index ed0b5ca..98f004c 100644
      if (modes_result != vk::Result::eSuccess) {
          LOG_ERROR(Render, "Failed to query available present modes, falling back to Fifo as "
                            "guaranteed supported option.");
-@@ -211,6 +389,9 @@ void Swapchain::FindPresentMode() {
+@@ -211,6 +416,9 @@ void Swapchain::FindPresentMode() {
          present_mode = vk::PresentModeKHR::eMailbox;
      } else if (requested_mode == "Fifo") {
          present_mode = vk::PresentModeKHR::eFifo;
@@ -75344,7 +75417,7 @@ index ed0b5ca..98f004c 100644
      } else if (requested_mode == "Immediate") {
          present_mode = vk::PresentModeKHR::eImmediate;
      } else {
-@@ -228,11 +409,31 @@ void Swapchain::FindPresentMode() {
+@@ -228,11 +436,31 @@ void Swapchain::FindPresentMode() {
      }
  }
  
@@ -75381,7 +75454,7 @@ index ed0b5ca..98f004c 100644
  
      extent = capabilities.currentExtent;
      if (capabilities.currentExtent.width == std::numeric_limits<u32>::max()) {
-@@ -243,7 +444,7 @@ void Swapchain::SetSurfaceProperties() {
+@@ -243,7 +471,7 @@ void Swapchain::SetSurfaceProperties() {
      }
  
      // Select number of images in swap chain, we prefer one buffer in the background to work on
@@ -75390,7 +75463,7 @@ index ed0b5ca..98f004c 100644
      if (capabilities.maxImageCount > 0) {
          image_count = std::min(image_count, capabilities.maxImageCount);
      }
-@@ -259,23 +460,41 @@ void Swapchain::SetSurfaceProperties() {
+@@ -259,23 +487,51 @@ void Swapchain::SetSurfaceProperties() {
      if (!(capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque)) {
          composite_alpha = vk::CompositeAlphaFlagBitsKHR::eInherit;
      }
@@ -75417,6 +75490,16 @@ index ed0b5ca..98f004c 100644
 +    surface = CreateSurface(instance.GetInstance(), window);
 +    surface_lost = false;
 +    std::printf("Display: the window's surface was lost; created again\n");
++    // bbport: on Wayland the compositor usually ended the game's connection with it, which no new
++    // surface brings back (0.9.37 beta 5 report: NVIDIA 615.78 with KDE Plasma; 580.178 ran clean).
++    static bool hinted = false;
++    if (!hinted && window.GetWindowInfo().type == Frontend::WindowSystemType::Wayland) {
++        hinted = true;
++        std::printf("Display: on Wayland a lost surface usually means the compositor closed the "
++                    "game's connection (a driver and compositor mismatch: NVIDIA 615 drivers on KDE "
++                    "Plasma did). Another NVIDIA driver (580 ran clean), or SDL_VIDEODRIVER=x11 "
++                    "(XWayland), avoids it\n");
++    }
 +}
 +
 +void Swapchain::Destroy() {
@@ -75435,7 +75518,7 @@ index ed0b5ca..98f004c 100644
      }
  
      for (const auto& sem : image_acquired) {
-@@ -329,7 +548,7 @@ void Swapchain::SetupImages() {
+@@ -329,7 +585,7 @@ void Swapchain::SetupImages() {
          auto [im_view_result, im_view] = device.createImageView(vk::ImageViewCreateInfo{
              .image = images[i],
              .viewType = vk::ImageViewType::e2D,
@@ -90208,9 +90291,18 @@ index 4c925df..4948ff9 100644
  
  #include <cstddef>
 diff --git a/gpu/shim/input/compat.h b/gpu/shim/input/compat.h
-index deefd94..ccce7d7 100644
+index deefd94..7f9d788 100644
 --- a/gpu/shim/input/compat.h
 +++ b/gpu/shim/input/compat.h
+@@ -40,7 +40,7 @@ struct PadState {
+     uint32_t menu_buttons=0;
+ };
+ enum class InputDevice { KeyboardMouse,Pad };
+-struct HostSettings {bool mouse_menu;};
++struct HostSettings {bool mouse_menu; bool menu_move;};
+ HostSettings host_settings();
+ InputDevice host_input_device();
+ PadState host_pad_state();
 @@ -57,6 +57,8 @@ void menu_pointer_click();
  uint32_t menu_pointer_take_press();
  uint64_t menu_pointer_tick();
@@ -90221,9 +90313,18 @@ index deefd94..ccce7d7 100644
  uint32_t menu_confirm_button();
  uint32_t menu_back_button();
 diff --git a/gpu/shim/input/input.cpp b/gpu/shim/input/input.cpp
-index 30fdc4f..fb64e04 100644
+index 30fdc4f..f2fce0a 100644
 --- a/gpu/shim/input/input.cpp
 +++ b/gpu/shim/input/input.cpp
+@@ -38,7 +38,7 @@ bool input_prologue_hook(ElfImage* i,uint64_t at,const uint8_t* bytes,size_t n,B
+         i->mem.size,at-i->mem.slide,std::span<const uint8_t>(bytes,n),fn))return false;
+     BbEngine::Commit(std::span<BbEngine::Hook>(&hook,1));return true;
+ }
+-HostSettings host_settings() {return {BbSettings::Get().mouse_menu.load()};}
++HostSettings host_settings() {return {BbSettings::Get().mouse_menu.load(),BbSettings::Get().menu_move.load()};}
+ std::uint32_t input_delivered_buttons() {return host_pad_state().buttons;}
+ InputDevice host_input_device() {return device.load();}
+ PadState host_pad_state() {std::lock_guard lock(state_lock);return snapshot;}
 @@ -54,7 +54,7 @@ bool host_mouse_stage_position(float& x,float& y) {
      // Presenter fits the output; Scaleform fits its native 1920x1080 stage.
      const auto& s=BbSettings::Get();
@@ -90251,7 +90352,20 @@ index 30fdc4f..fb64e04 100644
      return true;
  }
  void Tick() {
-@@ -146,7 +146,12 @@ extern "C" int bbgpu_pc_input(BbPcPad* d,const bool* keys,int nkeys,int gamepad_
+@@ -137,6 +137,12 @@ void Pump(SDL_Window* w,bool editing) {
+ }
+ }
+ 
++extern "C" int bbgpu_menu_buttons(uint32_t* confirm,uint32_t* back) {
++    if(!active)return 0;
++    *confirm=menu_confirm_button();*back=menu_back_button();
++    return menu_pointer_navigating()?1:0;
++}
++
+ extern "C" int bbgpu_pc_input(BbPcPad* d,const bool* keys,int nkeys,int gamepad_present) {
+     if(!active || !BbSettings::Get().pc_controls){wanted_relative=false;return 0;}
+     auto& s=BbSettings::Get();
+@@ -146,7 +152,12 @@ extern "C" int bbgpu_pc_input(BbPcPad* d,const bool* keys,int nkeys,int gamepad_
      p.touch_count=std::min<uint8_t>(d->touch_count,2);
      for(int i=0;i<p.touch_count;i++)p.touch[i]={d->touch[i].x,d->touch[i].y,d->touch[i].id,true};
      const bool menu=menu_pointer_in_menu();
@@ -90265,7 +90379,7 @@ index 30fdc4f..fb64e04 100644
      wanted_relative=camera && device==InputDevice::KeyboardMouse;
      mouse_camera_publish(s.mouse_sensitivity,s.mouse_invert_x,s.mouse_invert_y,
          camera && device==InputDevice::KeyboardMouse && !s.mouse_auto_rotation);
-@@ -162,31 +167,67 @@ extern "C" int bbgpu_pc_input(BbPcPad* d,const bool* keys,int nkeys,int gamepad_
+@@ -162,31 +173,67 @@ extern "C" int bbgpu_pc_input(BbPcPad* d,const bool* keys,int nkeys,int gamepad_
              if(p.lx==128)p.lx=127;if(p.ly==128)p.ly=127;
              if(p.rx==128)p.rx=127;if(p.ry==128)p.ry=127;
          }
@@ -90345,13 +90459,17 @@ index 30fdc4f..fb64e04 100644
      {std::lock_guard lock(state_lock);snapshot=p;}
      d->buttons=p.buttons;d->lx=p.lx;d->ly=p.ly;d->rx=p.rx;d->ry=p.ry;d->l2=p.l2;d->r2=p.r2;
 diff --git a/gpu/shim/input/input.h b/gpu/shim/input/input.h
-index d4f3a31..5716e3f 100644
+index d4f3a31..9227e91 100644
 --- a/gpu/shim/input/input.h
 +++ b/gpu/shim/input/input.h
-@@ -23,6 +23,12 @@ typedef struct {
+@@ -23,6 +23,16 @@ typedef struct {
      struct { uint16_t x,y;uint8_t id; } touch[2];
  } BbPcPad;
  int bbgpu_pc_input(BbPcPad*,const bool* keys,int nkeys,int gamepad_present);
++/* bbport: whether a game menu has the screen now (menu_pointer_navigating: the front end, an open
++ * menu, a list with focus in the last few frames), and the game's confirm and back buttons in it
++ * (scePad bits; the game's region decides which is which). For pad.menu_confirm / pad.menu_back. */
++int bbgpu_menu_buttons(uint32_t* confirm,uint32_t* back);
 +/* src/runtime_pad.c, for the game's button icons (engine/key_prompts.cpp): the gamepad in use's
 + * SDL_GamepadType (SDL_GAMEPAD_TYPE_UNKNOWN without one), and the gamepad button bound to a PS4
 + * button (its scePad bit; the touchpad's right side with right_side): an SDL_GamepadButton,
@@ -90362,10 +90480,23 @@ index d4f3a31..5716e3f 100644
  }
  #endif
 diff --git a/gpu/shim/input/menu_pointer.cpp b/gpu/shim/input/menu_pointer.cpp
-index 93a179a..d702ad4 100644
+index 93a179a..694f061 100644
 --- a/gpu/shim/input/menu_pointer.cpp
 +++ b/gpu/shim/input/menu_pointer.cpp
-@@ -843,6 +843,10 @@ std::uint32_t menu_pointer_take_press() { return g_press.exchange(0); }
+@@ -508,6 +508,12 @@ bool direction_held() {
+     if (p.buttons & 0xf0u) {
+         return true;
+     }
++    // bbport (0.9.37 beta 6): with "Move and look in menus" the left stick of a menu opened in the
++    // world is the character's (input.cpp free_move), not a direction given to the menu: walking
++    // with W held left the pointer unable to hover or click until the key was let go.
++    if (host_settings().menu_move && !front_end()) {
++        return false;
++    }
+     const auto off = [](std::uint8_t v) { return v < 64 || v > 192; };
+     return off(p.lx) || off(p.ly);
+ }
+@@ -843,6 +849,10 @@ std::uint32_t menu_pointer_take_press() { return g_press.exchange(0); }
  
  std::uint64_t menu_pointer_tick() { return g_tick.load(std::memory_order_relaxed); }
  
@@ -90376,7 +90507,7 @@ index 93a179a..d702ad4 100644
  bool menu_pointer_in_menu() {
      // DS3 keeps the pointer while any UI state owns the screen. Here that is
      // the front end as a whole - between its menus no list has focus for a
-@@ -858,3 +862,14 @@ bool menu_pointer_in_menu() {
+@@ -858,3 +868,14 @@ bool menu_pointer_in_menu() {
      // few frames means none has.
      return menu_open() || now_ms() - g_focus_ms.load(std::memory_order_relaxed) < 400;
  }
@@ -90673,7 +90804,7 @@ index 91c20ba..eae1a86 100644
      std::string text, text_prompt, base_title;
      void UpdateTextTitle();
 diff --git a/gpu/shim/window.cpp b/gpu/shim/window.cpp
-index f475c39..4ec7adb 100644
+index f475c39..b3abb60 100644
 --- a/gpu/shim/window.cpp
 +++ b/gpu/shim/window.cpp
 @@ -1,10 +1,13 @@
@@ -90796,7 +90927,20 @@ index f475c39..4ec7adb 100644
      SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
      SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
      SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
-@@ -98,6 +191,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
+@@ -91,6 +184,12 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
+         window_info.type = WindowSystemType::Wayland;
+         window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr);
+         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
++        // bbport: the compositor's first configure before Vulkan attaches a buffer to the surface
++        // ("xdg_surface: attached a buffer before configure event" ended the connection with
++        // NVIDIA 615 drivers on KDE Plasma, 0.9.37 beta 5).
++        if (!SDL_SyncWindow(window)) {
++            std::printf("Display: the Wayland compositor has not configured the window yet: %s\n", SDL_GetError());
++        }
+     } else {
+         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
+     }
+@@ -98,6 +197,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
      SDL_GetWindowSizeInPixels(window, &w, &h);
      width = w;
      height = h;
@@ -90805,7 +90949,7 @@ index f475c39..4ec7adb 100644
      LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
  }
  
-@@ -113,9 +208,31 @@ WindowSDL::~WindowSDL() {
+@@ -113,9 +214,31 @@ WindowSDL::~WindowSDL() {
  #endif
  }
  
@@ -90837,7 +90981,7 @@ index f475c39..4ec7adb 100644
      text_prompt = prompt;
      text_state = 0;
      text_requested = true;
-@@ -128,10 +245,11 @@ int WindowSDL::PollTextInput(std::string& out) {
+@@ -128,10 +251,11 @@ int WindowSDL::PollTextInput(std::string& out) {
  }
  
  void WindowSDL::UpdateTextTitle() {
@@ -90851,7 +90995,7 @@ index f475c39..4ec7adb 100644
  }
  
  bool WindowSDL::PollEvents() {
-@@ -155,8 +273,27 @@ bool WindowSDL::PollEvents() {
+@@ -155,8 +279,27 @@ bool WindowSDL::PollEvents() {
          }
          if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
              std::scoped_lock lock{text_mutex};
@@ -90879,7 +91023,7 @@ index f475c39..4ec7adb 100644
              } else if (event.key.key == SDLK_BACKSPACE && !text.empty()) {
                  size_t cut = text.size() - 1; // drop one UTF-8 code point
                  while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;
-@@ -169,10 +306,40 @@ bool WindowSDL::PollEvents() {
+@@ -169,10 +312,40 @@ bool WindowSDL::PollEvents() {
              UpdateTextTitle();
              continue;
          }
@@ -90920,7 +91064,7 @@ index f475c39..4ec7adb 100644
          case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
          case SDL_EVENT_WINDOW_RESIZED: {
              int w = 0, h = 0;
-@@ -196,26 +363,25 @@ bool WindowSDL::PollEvents() {
+@@ -196,26 +369,25 @@ bool WindowSDL::PollEvents() {
          }
      }
      BbInput::Pump(window,text_active);
@@ -103782,10 +103926,10 @@ index 0000000..95b95bc
 +WORKDIR /build
 diff --git a/packaging/linux/README-linux.txt b/packaging/linux/README-linux.txt
 new file mode 100644
-index 0000000..cd6cc28
+index 0000000..7fbebd1
 --- /dev/null
 +++ b/packaging/linux/README-linux.txt
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,32 @@
 +Lantern Engine for Linux (x86-64)
 +
 +Needs: a Vulkan 1.3 GPU driver (Mesa RADV for AMD, NVIDIA's own driver, Intel ANV), glibc 2.38 or
@@ -103800,6 +103944,16 @@ index 0000000..cd6cc28
 +    ./lantern.sh /path/to/CUSA03173
 +The folder is remembered, so later starts need only ./lantern.sh. A CUSA03173 folder next to
 +this one, or inside it, is found without the argument.
++
++Shaders: the first start after an update recompiles the shader cache, and the shipped shader
++catalog is added to it once, so most pipelines are built before the game starts (a GPU from
++another vendor than the catalog's still builds its own as it plays).
++
++Wayland: the game runs natively. If the window closes at the start with "Wayland display
++connection closed by server" in the log, the compositor ended the connection: a driver and
++compositor mismatch (NVIDIA 615 drivers on KDE Plasma did; 580 ran clean). Another driver
++version, or SDL_VIDEODRIVER=x11 before ./lantern.sh (XWayland), avoids it. KDE Plasma 6.8.1
++flickers on some hybrid NVIDIA laptops; 6.8.0 does not.
 +
 +Settings: the launcher, lantern.ini in this folder, or the in-game menu (Insert, or L3+R3 on a
 +controller). Saves go to user/, mods to mods/, and each session's log to logs/ (attach the newest
@@ -107523,7 +107677,7 @@ index 0000000..1fbaf67
 @@ -0,0 +1 @@
 +{"eboot":"Bloodborne 01.09","functions":[{"offset":42788784,"size":1800,"sha256":"f0e5de43e32e6148fdaf019ab27405d55068e27a1b4d554dda0062a05c340438","insns":[[10],[4,4],[6,1,3,5,1],[6,1,3,5,1],[4],[6,1,3,5,1],[6,1,3,5,1],[6,1,3,5,1],[6,1,3,5,1],[5,1,2,4,1],[5,1,2,4,1],[5,1,2,4,1],[5,1,2,4,1],[7,1,1,3,4],[7,1,1,3,4],[9,1,3,5,4],[9,1,3,5,4],[9,1,3,5,4],[6,1,3,5,1],[5,1,2,4,1],[8],[2,3,3,150],[8,2,4],[4],[2,3,16,158],[8,2,4],[6,1,3,5,1],[2],[8,2,4],[9,1,3,5,4],[4],[6,1,3,5,1],[2,3,6,218],[8,2,4],[9,1,3,5,4],[6,1,3,5,1],[4],[9,1,3,5,4],[4],[6,1,3,5,1],[2,3,6,266],[8,2,4],[9,1,3,5,4],[6,1,3,5,1],[6,1,3,5,1],[6,1,3,5,1],[4],[6,1,3,5,1],[9],[6,1,3,5,1],[14],[6,1,3,5,1],[6],[7,2,3],[4],[5,1,2,4,1],[3],[4,1,1,3,1],[8,2,4],[4],[8,2,4],[22],[4,1,1,3,1],[4],[8,2,4],[22],[4,1,1,3,1],[24],[4,1,1,3,1],[32],[2],[5,1,2,4,1],[3],[4,1,1,3,1],[2],[5,1,2,4,1],[3],[6,1,3,5,1],[5,1,2,4,1],[5],[6,1,3,5,1],[5],[6,1,3,5,1],[11],[6,1,3,5,1],[11],[6,1,3,5,1],[49],[2,3,5,642],[4],[4,1,1,3,1],[91],[2,3,5,743],[4],[6,1,3,5,1],[8,2,4],[6,1,3,5,1],[4],[6,1,3,5,1],[4],[6,1,3,5,1],[4],[6,1,3,5,1],[80],[2,3,5,880],[5],[12],[6,1,3,5,1],[6,1,3,5,1],[4],[9,1,3,5,4],[4],[6,1,3,5,1],[16],[9,1,3,5,4],[4],[6,1,3,5,1],[11],[6,1,3,5,1],[6,1,3,5,1],[8,2,4],[8,2,4],[4],[2,3,7,1044],[8,2,4],[9,2,4],[8,2,4],[12],[12],[5,1,3,5,0],[4],[6,1,3,5,1],[6,1,3,5,1],[6,1,3,5,1],[4],[6,1,3,5,1],[6,1,3,5,1],[8],[6,1,3,5,1],[8],[6,1,3,5,1],[8],[6,1,3,5,1],[8,2,4],[46],[8,2,4],[25],[8,2,4],[17],[8,2,4],[9],[8,2,4],[51],[6,1,3,5,1],[24],[6,1,3,5,1],[27],[6,1,3,5,1],[76],[5,1,3,5,0],[9,1,3,5,4],[9],[9,1,3,5,4],[5,1,2,4,1],[4],[9,1,3,5,4],[4,1,1,3,1],[4],[9,1,3,5,4],[5,1,2,4,1],[8],[2,3,7,1601],[8,2,4],[8,2,4],[12],[8,2,4],[9],[9],[4,1,1,3,1],[3],[4,1,1,3,1],[3],[4,1,1,3,1],[18],[4,1,1,3,1],[3],[4,1,1,3,1],[3],[4,1,1,3,1],[49],[4,1,1,3,1],[24],[4,1,1,3,1],[4,1,1,3,1],[7],[5,1,2,4,1],[5,1,2,4,1],[5,1,2,4,1],[8,2,4],[6,3,5,496],[4,5],[11]]},{"offset":42790592,"size":1714,"sha256":"b8ac98e5fdcfd4ff3b9e1af54ccb3c8946dedd9bcf3741bbbf432fd46b6d8017","insns":[[10],[4,4],[6,1,3,5,1],[6,1,3,5,1],[6,1,3,5,1],[5,1,2,4,1],[5,1,2,4,1],[5,1,2,4,1],[5,1,2,4,1],[7,1,1,3,4],[7,1,1,3,4],[9,1,3,5,4],[7,1,1,3,4],[5,1,2,4,1],[8],[2,3,3,111],[8,2,4],[4],[2,3,16,119],[8,2,4],[6,1,3,5,1],[2],[8,2,4],[9,1,3,5,4],[4],[6,1,3,5,1],[4],[2,3,6,183],[8,2,4],[9,1,3,5,4],[6,1,3,5,1],[4],[9,1,3,5,4],[4],[6,1,3,5,1],[2,3,6,231],[8,2,4],[9,1,3,5,4],[6,1,3,5,1],[6,1,3,5,1],[6,1,3,5,1],[4],[6,1,3,5,1],[9],[6,1,3,5,1],[9],[7,2,3],[4],[5,1,2,4,1],[3],[4,1,1,3,1],[14],[6,1,3,5,1],[14],[5,1,2,4,1],[8,2,4],[6,1,3,5,1],[4],[8,2,4],[22],[4,1,1,3,1],[6,1,3,5,1],[4],[8,2,4],[22],[4,1,1,3,1],[24],[4,1,1,3,1],[18],[4,1,1,3,1],[5],[8,2,4],[14],[3],[5,1,2,4,1],[3],[4,1,1,3,1],[2],[5,1,2,4,1],[6],[6,1,3,5,1],[5,1,2,4,1],[6],[6,1,3,5,1],[5,1,2,4,1],[5,1,2,4,1],[17],[5,1,2,4,1],[17],[5,1,2,4,1],[41],[8,2,4],[24],[2,3,5,696],[4],[6,1,3,5,1],[8,2,4],[6,1,3,5,1],[12],[6,1,3,5,1],[5,1,2,4,1],[10],[5,1,2,4,1],[9],[5,1,2,4,1],[60],[8,2,4],[18],[2,3,5,860],[4],[12],[6,1,3,5,1],[6,1,3,5,1],[4],[9,1,3,5,4],[4],[6,1,3,5,1],[16],[9,1,3,5,4],[4],[6,1,3,5,1],[11],[6,1,3,5,1],[6,1,3,5,1],[8,2,4],[8,2,4],[2,3,7,1020],[8,2,4],[9,2,4],[8,2,4],[12],[12],[6,1,3,5,1],[4],[6,1,3,5,1],[6,1,3,5,1],[6,1,3,5,1],[4],[6,1,3,5,1],[6,1,3,5,1],[8],[6,1,3,5,1],[8],[6,1,3,5,1],[8],[5,1,3,5,0],[30],[8,2,4],[27],[8,2,4],[18],[8,2,4],[117],[6,1,3,5,1],[77],[6,1,3,5,1],[9,1,3,5,4],[9],[9,1,3,5,4],[5,1,2,4,1],[4],[6,1,3,5,1],[4,1,1,3,1],[4],[6,1,3,5,1],[4,1,1,3,1],[8],[2,3,7,1537],[8,2,4],[8,2,4],[12],[8,2,4],[9],[9],[4,1,1,3,1],[3],[4,1,1,3,1],[3],[3,1,1,3,0],[17],[4,1,1,3,1],[3],[4,1,1,3,1],[3],[4,1,1,3,1],[48],[4,1,1,3,1],[26],[5,1,2,4,1],[4,1,1,3,1],[8],[6,3,5,512],[4,5],[11]]}]}
 diff --git a/run.sh b/run.sh
-index 7c0ccfd..87b0268 100644
+index 7c0ccfd..93e09b1 100644
 --- a/run.sh
 +++ b/run.sh
 @@ -14,9 +14,10 @@ fi
@@ -107539,6 +107693,20 @@ index 7c0ccfd..87b0268 100644
  mkdir -p "$out"
  export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
  # FSR 4.1.1 assets (tools/fsr4cap/build_assets.sh): next to run.sh or in the data directory.
+@@ -111,6 +112,13 @@ elif [[ -n ${scaled_output:-} ]]; then
+ fi
+ "$PYTHON" scripts/patches.py --out "$out" --fps "$fps" --extra "${BB_PATCHES:-}" --settings "$BB_CONFIG" --game-dir "$game" --render-res "${BB_RENDER_RES:-}" --output-res "${BB_OUTPUT_RES:-}" \
+     --patches-dir "${BB_PATCHES_DIR:-$data/patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}"
++# The GPU cache as bb-start.exe keeps it on Windows: recompiled by bb-shader-lab when the shader
++# compiler changed, then the shipped shader catalog seeded, so pipelines are built at the start
++# instead of in play. Packages only (packaging/linux/bb-start sets BB_GPU_USER_DIR).
++if [[ -n ${BB_PREBUILT:-} && -n ${BB_GPU_USER_DIR:-} ]]; then
++    "$PYTHON" scripts/gpu_cache.py --cache "$BB_GPU_USER_DIR/cache" --engine . --out "$out" \
++        --package "$data/package.json" --game "$game" || echo 'GPU cache: not prepared (scripts/gpu_cache.py failed)' >&2
++fi
+ # Background upload of the game's GPU memory into VRAM ahead of use (BufferCache::Preupload):
+ # 1 = only memory already in VRAM that the game rewrote (no new VRAM), 2 = all of it (~3 GB more
+ # VRAM), 0 = off. BB_GUEST_GPU_MEMORY=1 puts guest direct memory in GPU-visible dma-buf chunks
 diff --git a/scripts/engine_assets.py b/scripts/engine_assets.py
 index 38370f1..a00a7a0 100644
 --- a/scripts/engine_assets.py
@@ -107621,6 +107789,175 @@ index 531b4b9..24664c6 100644
                            'everything from the dumped 1.09 update (e.g. CUSA03173-patch) into the '
                            'game folder, replacing files (eboot.bin and sce_sys too).',
          'wrong_eboot': f'{found} param.sfo is from 1.09 but eboot.bin is not: copy eboot.bin from '
+diff --git a/scripts/gpu_cache.py b/scripts/gpu_cache.py
+new file mode 100644
+index 0000000..deab655
+--- /dev/null
++++ b/scripts/gpu_cache.py
+@@ -0,0 +1,163 @@
++"""The GPU cache before a start, as bb-start.exe keeps it on Windows (start/main.cpp).
++
++When the shader compiler changed (out/gpu-cache.id), each cache folder is recompiled by bb-shader-lab
++from the shader states kept beside its shaders, so its pipelines are built at the start instead of
++in play; a folder it cannot recompile is removed. Then each shader catalog shipped in
++engine/shader-catalog is seeded once into the cache (its pipelines built before play too).
++BB_SHADER_STATES=0 / BB_SHADER_CATALOG=0: not done.
++"""
++import argparse
++import json
++import os
++import shutil
++import subprocess
++from pathlib import Path
++
++
++def log(text):
++    print(text, flush=True)
++
++
++def lab_run(lab, *args):
++    """bb-shader-lab's exit code and output (its log lines on stderr pass through)."""
++    # The lab links the GPU library, which the package keeps in engine/out/gpu (bb-probe finds it
++    # through its RUNPATH; the lab is not patched).
++    env = dict(os.environ)
++    env['LD_LIBRARY_PATH'] = os.pathsep.join(p for p in (str(lab.parent / 'gpu'), env.get('LD_LIBRARY_PATH', '')) if p)
++    try:
++        done = subprocess.run([str(lab), *map(str, args)], stdout=subprocess.PIPE, text=True,
++                              errors='replace', env=env)
++    except OSError as error:
++        return -1, str(error)
++    return done.returncode, done.stdout
++
++
++def line_after(output, prefix):
++    at = output.rfind(prefix)
++    if at < 0:
++        return None
++    return output[at + len(prefix):].split('\n', 1)[0].strip()
++
++
++def recompile(cache, lab):
++    """Every cache folder recompiled for this engine; False when one could not be (removed)."""
++    if os.environ.get('BB_SHADER_STATES', '1') == '0' or not lab.is_file():
++        return False
++    ok = True
++    for folder in sorted(p for p in cache.iterdir() if p.is_dir() and (p / 'profile.bin').is_file()):
++        code, output = lab_run(lab, '--recompile-cache', folder)
++        summary = line_after(output, 'Shader cache:')
++        if code == 0 and summary is not None:
++            log(f'GPU cache {folder.name}: {summary}')
++        else:
++            shutil.rmtree(folder, ignore_errors=True)
++            log(f'GPU cache {folder.name}: not recompiled (exit {code}); its shaders compile again in play')
++            ok = False
++    return ok
++
++
++def reset_stale(cache, identity, legacy, lab):
++    stamp = cache / 'engine.txt'
++    try:
++        stamped = stamp.read_text().strip()
++    except OSError:
++        stamped = None
++    if stamped is not None:
++        if not identity or stamped == identity:
++            return
++        if legacy and stamped == legacy:  # an earlier engine built from these same sources
++            stamp.write_text(identity + '\n')
++            return
++    if cache.is_dir() and recompile(cache, lab):
++        stamp.write_text(identity + '\n')
++        log(f'GPU cache: the shader compiler changed ({identity}); recompiled before the start')
++        return
++    removed = False
++    if cache.is_dir():
++        for entry in cache.iterdir():
++            if entry == stamp or entry.suffix.lower() == '.vkcache':
++                continue
++            if entry.is_dir() and not entry.is_symlink():
++                shutil.rmtree(entry, ignore_errors=True)
++            else:
++                entry.unlink(missing_ok=True)
++            removed = True
++    cache.mkdir(parents=True, exist_ok=True)
++    stamp.write_text(identity + '\n')
++    if removed:
++        log(f'GPU cache: cleared ({identity}: the shader compiler changed); shaders compile again on this start')
++
++
++def gpu_vendors():
++    """The PCI vendors of this PC's display adapters (Linux: /sys/class/drm)."""
++    vendors = set()
++    for card in Path('/sys/class/drm').glob('card*/device/vendor'):
++        try:
++            vendors.add(int(card.read_text().strip(), 16))
++        except (OSError, ValueError):
++            pass
++    return vendors
++
++
++def catalog_vendor(catalog):
++    try:
++        words = (catalog / 'gpu.txt').read_text().split()
++        return int(words[1], 16) if words[0] == 'vendor' else 0
++    except (OSError, IndexError, ValueError):
++        return 0
++
++
++def seed(cache, catalogs, game, eboot, lab):
++    if os.environ.get('BB_SHADER_CATALOG', '1') == '0' or not lab.is_file() or not catalogs.is_dir():
++        return
++    for catalog in sorted(p for p in catalogs.iterdir() if p.is_dir()):
++        target = cache / catalog.name
++        # The first start has no cache yet, so no profile of this GPU (the engine writes it): the
++        # catalog's own is used when a display adapter is of the catalog's vendor; another GPU of
++        # that vendor has its cache started again by the engine and seeded at the next start.
++        if not target.exists() and (catalog / 'profile.bin').is_file() and catalog_vendor(catalog) in gpu_vendors():
++            target.mkdir(parents=True, exist_ok=True)
++            shutil.copyfile(catalog / 'profile.bin', target / 'profile.bin')
++            log(f"GPU cache {catalog.name}: first start; the shader catalog's GPU profile used until the engine checks it")
++        if not (target / 'profile.bin').is_file():
++            continue
++        files = [p for p in catalog.iterdir()]
++        marker = target / f'catalog-{len(files)}-{sum(p.stat().st_size for p in files if p.is_file())}.applied'
++        if marker.exists():
++            continue
++        code, output = lab_run(lab, '--seed-cache', catalog, target, game, eboot)
++        first = line_after(output, 'Shader catalog:')
++        if first is not None:
++            log(f'GPU cache {catalog.name}: {first}')
++        last = line_after(output, 'Shader cache:')
++        if code == 0 and last is not None:
++            log(f'GPU cache {catalog.name}: {last}')
++        marker.write_text(f'{code}\n')  # once per catalog, whatever came of it
++
++
++if __name__ == '__main__':
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--cache', type=Path, required=True, help='BB_GPU_USER_DIR/cache')
++    p.add_argument('--engine', type=Path, required=True, help='the engine folder (shader-catalog)')
++    p.add_argument('--out', type=Path, required=True, help='engine/out: bb-shader-lab, gpu-cache.id')
++    p.add_argument('--package', type=Path, help='package.json (the engine id when no gpu-cache.id)')
++    p.add_argument('--game', type=Path, help='the game folder: the shader catalogs are seeded too (out/eboot.elf)')
++    a = p.parse_args()
++    lab = a.out / 'bb-shader-lab'
++    identity, legacy = '', ''
++    try:
++        identity = json.loads(a.package.read_text()).get('engine', '') if a.package else ''
++    except (OSError, ValueError):
++        pass
++    try:
++        gpu_id = (a.out / 'gpu-cache.id').read_text().strip()
++        if gpu_id:
++            identity = 'gpu ' + gpu_id
++        old = (a.out / 'gpu-cache.legacy.id').read_text().strip()
++        if old:
++            legacy = 'gpu ' + old
++    except OSError:
++        pass
++    reset_stale(a.cache, identity, legacy, lab)
++    if a.game:
++        seed(a.cache, a.engine / 'shader-catalog', a.game, a.out / 'eboot.elf', lab)
 diff --git a/scripts/image_109_hashes.txt b/scripts/image_109_hashes.txt
 new file mode 100644
 index 0000000..6a9d5d3
@@ -112376,7 +112713,7 @@ index 4ca6705..f24d35e 100644
      printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu\n", created, locks, unlocks);
      printf("Runtime: condition variables created=%zu, waits=%zu, wakeups=%zu\n", conds, waits, wakeups);
 diff --git a/src/runtime_pad.c b/src/runtime_pad.c
-index fac0ac7..bd100d6 100644
+index fac0ac7..d4581d6 100644
 --- a/src/runtime_pad.c
 +++ b/src/runtime_pad.c
 @@ -60,6 +60,7 @@ static int initialized, opened, sdl_ready;
@@ -112468,6 +112805,21 @@ index fac0ac7..bd100d6 100644
   * key.<input>=<SDL key names> and pad.<input>=<SDL gamepad button names>, comma-separated,
   * replace an input's binding (empty: unbound). Inputs: the buttons (cross ... right, touchpad =
   * a left-side click, touchpad_right), and on the keyboard the sticks: move_* (left), look_*
+@@ -152,12 +211,12 @@ enum {
+     IN_CROSS, IN_CIRCLE, IN_SQUARE, IN_TRIANGLE, IN_L1, IN_R1, IN_L2, IN_R2, IN_L3, IN_R3,
+     IN_OPTIONS, IN_TOUCHPAD, IN_TOUCHPAD_RIGHT, IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT,
+     IN_MOVE_UP, IN_MOVE_DOWN, IN_MOVE_LEFT, IN_MOVE_RIGHT, IN_LOOK_UP, IN_LOOK_DOWN, IN_LOOK_LEFT,
+-    IN_LOOK_RIGHT, IN_COUNT
++    IN_LOOK_RIGHT, IN_MENU_CONFIRM, IN_MENU_BACK, IN_COUNT
+ };
+ static const char *const input_names[IN_COUNT]={
+     "cross","circle","square","triangle","l1","r1","l2","r2","l3","r3","options","touchpad",
+     "touchpad_right","up","down","left","right","move_up","move_down","move_left","move_right",
+-    "look_up","look_down","look_left","look_right",
++    "look_up","look_down","look_left","look_right","menu_confirm","menu_back",
+ };
+ static const uint32_t input_buttons[IN_COUNT]={
+     BTN_CROSS,BTN_CIRCLE,BTN_SQUARE,BTN_TRIANGLE,BTN_L1,BTN_R1,BTN_L2,BTN_R2,BTN_L3,BTN_R3,
 @@ -168,6 +227,10 @@ enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* trigge
  typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; } Binding;
  static Binding bindings[IN_COUNT];
@@ -112479,7 +112831,7 @@ index fac0ac7..bd100d6 100644
  
  static void bind_defaults(void) {
      static const struct { int input; SDL_Scancode key; } keys[]={
-@@ -216,6 +279,14 @@ static void load_bindings(void) {
+@@ -216,11 +279,23 @@ static void load_bindings(void) {
      while (fgets(line,sizeof line,f)) {
          const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4);
          char *eq=strchr(line,'=');
@@ -112494,8 +112846,67 @@ index fac0ac7..bd100d6 100644
          if ((!keyboard && !pad) || !eq) continue;
          *eq=0;
          int input=-1;
-@@ -296,6 +367,17 @@ static void sample_host(PadData *d) {
+         for (int i=0;i<IN_COUNT;++i) if (!strcmp(line+4,input_names[i])) input=i;
+-        if (input<0 || (pad && input>=IN_MOVE_UP)) { printf("Runtime: controls: unknown input %s\n",line); continue; }
++        /* move_* and look_* are keyboard only, menu_confirm and menu_back gamepad only (the
++         * keyboard's are bind.confirm and bind.back, gpu/shim/input/bindings.cpp). */
++        if (input<0 || (pad && input>=IN_MOVE_UP && input<IN_MENU_CONFIRM) || (keyboard && input>=IN_MENU_CONFIRM)) {
++            printf("Runtime: controls: unknown input %s\n",line); continue;
++        }
+         Binding *b=&bindings[input];
+         if (keyboard) b->key_count=0; else b->pad_count=0;
+         for (char *name=strtok(eq+1,",\r\n"); name; name=strtok(NULL,",\r\n")) {
+@@ -244,11 +319,22 @@ static int key_down(const bool *k, int input) {
+     for (int i=0;i<bindings[input].key_count;++i) if (k[bindings[input].keys[i]]) return 1;
+     return 0;
+ }
+-/* The bound gamepad buttons' state; triggers as their analog value. */
+-static int pad_value(SDL_Gamepad *g, int input) {
++/* bbport (0.9.37 beta 6): pad.menu_confirm / pad.menu_back: gamepad buttons that confirm and go
++ * back while a game menu has the screen, whatever they do in the world. A player who put Circle on
++ * L2 to sprint while steering the camera went back with L2 in every menu. In a menu those buttons
++ * give only that; unset (the default), menus get the buttons' world inputs as before. */
++static int menu_pad_button(int b) {
++    for (int m=IN_MENU_CONFIRM;m<=IN_MENU_BACK;++m)
++        for (int i=0;i<bindings[m].pad_count;++i) if (bindings[m].pad[i]==b) return 1;
++    return 0;
++}
++/* The bound gamepad buttons' state; triggers as their analog value. in_menu: the menu buttons
++ * (above) are left out. */
++static int pad_value(SDL_Gamepad *g, int input, int in_menu) {
+     int value=0;
+     for (int i=0;i<bindings[input].pad_count;++i) {
+         const int b=bindings[input].pad[i];
++        if (in_menu && menu_pad_button(b)) continue;
+         const int v=b==PAD_LEFT_TRIGGER ? trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFT_TRIGGER))
+                   : b==PAD_RIGHT_TRIGGER ? trigger(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))
+                   : SDL_GetGamepadButton(g,(SDL_GamepadButton)b) ? 255 : 0;
+@@ -287,15 +373,40 @@ static void sample_host(PadData *d) {
+     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+     if (g) {
+         int touch_right=0;
++        uint32_t menu_confirm=0, menu_back=0;
++        int in_menu=0, menu_down=0;
++        /* A menu button that closed its menu stays out of the world until it is let go of: Back
++         * held as the menu closed was a shot from the gun the button fires in the world. */
++        static int menu_held;
++        if (bindings[IN_MENU_CONFIRM].pad_count || bindings[IN_MENU_BACK].pad_count) {
++            in_menu=bbgpu_menu_buttons(&menu_confirm,&menu_back);
++            menu_down=(pad_value(g,IN_MENU_CONFIRM,0)>30 ? 1 : 0)|(pad_value(g,IN_MENU_BACK,0)>30 ? 2 : 0);
++            menu_held=in_menu ? menu_down : menu_held&menu_down;
++        }
+         for (int i=IN_CROSS;i<=IN_RIGHT;++i) {
+-            const int v=pad_value(g,i);
++            const int v=pad_value(g,i,in_menu || menu_held);
+             if (i==IN_L2) d->l2=(uint8_t)v;
+             if (i==IN_R2) d->r2=(uint8_t)v;
+             if (i==IN_TOUCHPAD_RIGHT) touch_right=v>30;
+             else if (v>30) d->buttons|=input_buttons[i];
          }
++        if (in_menu) {
++            if (menu_down&1) d->buttons|=menu_confirm;
++            if (menu_down&2) d->buttons|=menu_back;
++        }
          d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
          d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
 +        if (pad_deadzone) {
@@ -112512,7 +112923,7 @@ index fac0ac7..bd100d6 100644
          if (SDL_GetNumGamepadTouchpads(g)>0) {
              const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
              for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
-@@ -456,13 +538,21 @@ static void touch_ids(PadData *d) {
+@@ -456,13 +567,21 @@ static void touch_ids(PadData *d) {
      else if (!since) since=d->timestamp;
      d->touch_held_time=d->touch_count ? (uint32_t)(d->timestamp-since) : 0;
  }
@@ -112535,7 +112946,7 @@ index fac0ac7..bd100d6 100644
      if (injected.touch_side>=0) touch_click(d,injected.touch_side);
      else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
      if (injected.buttons & BTN_L2) d->l2=255;
-@@ -538,5 +628,27 @@ static const RuntimeExport exports[]={
+@@ -538,5 +657,27 @@ static const RuntimeExport exports[]={
      {"scePadSetAngularVelocityDeadbandState",pad_ok_handle_flag}, {"scePadSetTiltCorrectionState",pad_ok_handle_flag},
      {"scePadSetMotionSensorState",pad_ok_handle_flag},
  };
@@ -112629,7 +113040,7 @@ index fa70a7f..7823d8b 100644
      host_unlock(&registry_lock);
  }
 diff --git a/src/runtime_savedata.c b/src/runtime_savedata.c
-index 99b3049..e49901f 100644
+index 99b3049..11fc38c 100644
 --- a/src/runtime_savedata.c
 +++ b/src/runtime_savedata.c
 @@ -74,7 +74,7 @@ static size_t mounts_done, memory_writes;
@@ -112641,7 +113052,23 @@ index 99b3049..e49901f 100644
      const char *env=getenv("BB_SOUND_HACK");
      if (env && env[0]=='0') return;
      int bloodborne=0;
-@@ -284,7 +284,11 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
+@@ -164,7 +164,14 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
+         if (!slots[i].used && slot<0) slot=i;
+     }
+     if (slot<0) { host_unlock(&lock); return ERR_MOUNT_FULL; }
+-    if (!exists && (make_dirs(host) || make_dirs(meta))) { host_unlock(&lock); return ERR_INTERNAL; }
++    if (!exists && (make_dirs(host) || make_dirs(meta))) {
++        /* bbport: the game only says it cannot create the save; the log says where and why
++         * (a read-only or synced folder, an antivirus' controlled folder access...). */
++        const int error=errno;
++        host_unlock(&lock);
++        printf("Runtime: save data '%s' cannot be created in %s: %s\n",dir->data,base,strerror(error));
++        return ERR_INTERNAL;
++    }
+     if (!exists) { Param empty={0}; write_param(meta,&empty); }
+     slots[slot].used=1;
+     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
+@@ -284,7 +291,11 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
          size_t n=strlen(e->d_name);
          if (e->d_name[0]=='.' || n>=32 || (n>8 && !strcmp(e->d_name+n-8,".sce_sys"))) continue;
          if (cond->dir && cond->dir->data[0] && !like(e->d_name,cond->dir->data)) continue;
@@ -112654,6 +113081,18 @@ index 99b3049..e49901f 100644
          snprintf(entries[count].name,32,"%s",e->d_name);
          char meta[680]; snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,e->d_name);
          read_param(meta,&entries[count].param);
+@@ -311,7 +322,10 @@ static ABI int32_t memory_setup(int32_t user, uint64_t size, const Param *param)
+     char base[600], dir[640];
+     root(user,NULL,base,sizeof(base));
+     snprintf(dir,sizeof(dir),"%s.memory",base);
+-    if (make_dirs(dir)) return ERR_INTERNAL;
++    if (make_dirs(dir)) {
++        printf("Runtime: save data memory cannot be created in %s: %s\n",dir,strerror(errno));
++        return ERR_INTERNAL;
++    }
+     host_lock(&lock);
+     snprintf(memory_path,sizeof(memory_path),"%s/memory.dat",dir);
+     FILE *f=fopen(memory_path,"r+b");
 diff --git a/src/runtime_sema.c b/src/runtime_sema.c
 index d155b7b..02a2a6c 100644
 --- a/src/runtime_sema.c
@@ -117882,10 +118321,10 @@ index 0000000..08d31fe
 +    main()
 diff --git a/tests/shader_lab.cpp b/tests/shader_lab.cpp
 new file mode 100644
-index 0000000..6dc0222
+index 0000000..77115b5
 --- /dev/null
 +++ b/tests/shader_lab.cpp
-@@ -0,0 +1,2545 @@
+@@ -0,0 +1,2737 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// bbport: the shader lab. Compiles shader captures (BB_SHADER_CAPTURE=1, shader_recompiler/native/
 +// capture.h) offline, without the game or a GPU, and reports what each compile holds that is not
@@ -117931,6 +118370,8 @@ index 0000000..6dc0222
 +#ifdef _WIN32
 +#define WIN32_LEAN_AND_MEAN
 +#include <windows.h>
++#else
++#include <sys/wait.h>
 +#endif
 +
 +#include "shader_recompiler/backend/bindings.h"
@@ -118369,6 +118810,34 @@ index 0000000..6dc0222
 +    return 0;
 +}
 +
++#ifndef _WIN32
++/// `text` as one word for /bin/sh.
++std::string ShellQuote(const std::string& text) {
++    std::string quoted = "'";
++    for (const char c : text) {
++        quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
++    }
++    return quoted + "'";
++}
++
++/// Runs this program with `args` (already quoted for /bin/sh) and returns its whole stdout and
++/// exit code (-1: it did not exit by itself, e.g. the compiler crashed it).
++std::string RunSelf(const fs::path& self, const std::string& args, int& exit_code) {
++    std::string out;
++    exit_code = -1;
++    const std::string line = ShellQuote(fs::absolute(self).string()) + " " + args;
++    if (FILE* pipe = popen(line.c_str(), "r")) {
++        char buffer[4096];
++        for (size_t got; (got = std::fread(buffer, 1, sizeof buffer, pipe)) > 0;) {
++            out.append(buffer, got);
++        }
++        const int status = pclose(pipe);
++        exit_code = status != -1 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
++    }
++    return out;
++}
++#endif
++
 +#ifdef _WIN32
 +/// Runs this program with `args` and returns its whole stdout and exit code.
 +std::string RunSelf(const fs::path& self, const std::wstring& args, DWORD& exit_code) {
@@ -118778,8 +119247,11 @@ index 0000000..6dc0222
 +                              (only.empty() ? std::wstring{} : L" \"" + only.wstring() + L"\""),
 +                    code);
 +#else
-+        const std::string output;
-+        u32 code = 1;
++        int code = 0;
++        const std::string output =
++            RunSelf(self, "--recompile-batch " + ShellQuote(dir.string()) + " " + std::to_string(next) +
++                              (only.empty() ? std::string{} : " " + ShellQuote(only.string())),
++                    code);
 +#endif
 +        if (output.find("@PROFILE") != std::string::npos) {
 +            std::printf("Shader cache: written by an engine with another profile; started again\n");
@@ -118842,6 +119314,139 @@ index 0000000..6dc0222
 +                "without a state), %zu the compiler refused, %u pipeline keys without their shaders "
 +                "removed\n",
 +                kept, left, crashed, orphan_keys);
++    return 0;
++}
++
++// --- What the engine's warm-up would build (bb-shader-lab --check-cache <cache folder>) ----------
++// The records of each pipeline key read as PipelineCache::WarmUp reads them, in its order, without
++// a GPU: the reason each key would be left out is counted, so a cache from a player's PC shows why
++// its pipelines compiled in play instead of at the start.
++
++int CheckCache(const fs::path& dir) {
++    std::vector<fs::path> keys;
++    std::error_code error;
++    for (const auto& entry : fs::directory_iterator(dir, error)) {
++        if (entry.path().extension() == ".key") keys.push_back(entry.path());
++    }
++    std::sort(keys.begin(), keys.end());
++    // What the warm-up's program cache holds: per program, its loaded permutations' specializations.
++    std::map<u64, std::unique_ptr<Info>> infos;
++    std::map<std::pair<u64, size_t>, StageSpecialization> loaded;
++    std::map<std::string, u32> reasons;
++    u32 good = 0;
++    for (const auto& path : keys) {
++        const auto key = ReadAll(path);
++        u32 version = 0, is_compute = 0;
++        if (key.size() >= 8) {
++            std::memcpy(&version, key.data(), 4);
++            std::memcpy(&is_compute, key.data() + 4, 4);
++        }
++        if (!(version == 5 || version == 6) || is_compute > 1) { // PipelineKeyVersion 6, legacy 5
++            ++reasons["key version " + std::to_string(version)];
++            continue;
++        }
++        std::string why;
++        const auto hashes = KeyStageHashes(key);
++        for (size_t stage = 0; stage < hashes.size() && why.empty(); ++stage) {
++            const u64 hash = hashes[stage];
++            if (!hash) continue;
++            char name[40];
++            std::snprintf(name, sizeof(name), "0x%016llx.meta", (unsigned long long)hash);
++            const auto meta = ReadAll(dir / name);
++            if (meta.empty()) {
++                why = "no shader record (.meta)";
++                break;
++            }
++            Serialization::Archive ar{std::vector<u8>(meta.begin(), meta.end())};
++            auto info = std::make_unique<Info>();
++            StageSpecialization spec{};
++            spec.info = info.get();
++            std::optional<Gcn::FetchShaderData> fetch;
++            size_t perm = 0;
++            try {
++                if (!Vulkan::LoadShaderMeta(ar, *info, fetch, spec, perm, hash)) {
++                    // Which of LoadShaderMeta's checks: read again step by step.
++                    Serialization::Archive again{std::vector<u8>(meta.begin(), meta.end())};
++                    Serialization::Reader reader{again};
++                    u32 meta_version = 0, binary_version = 0;
++                    u64 perm_hash = 0;
++                    size_t perm_idx = 0;
++                    reader.Read(meta_version);
++                    reader.Read(binary_version);
++                    reader.Read(perm_hash);
++                    reader.Read(perm_idx);
++                    Info info2;
++                    StageSpecialization spec2{};
++                    spec2.info = &info2;
++                    if (meta_version != 8) { // ShaderMetaVersion
++                        why = "shader record version " + std::to_string(meta_version);
++                    } else if (binary_version != 7 && // ShaderBinaryVersion, MotionShaderBinaryVersion
++                               binary_version != 8) {
++                        why = "shader binary version " + std::to_string(binary_version);
++                    } else if (!spec2.Deserialize(again)) {
++                        why = "specialization unreadable";
++                    } else if (!info2.Deserialize(again)) {
++                        bool zeros = true;
++                        for (size_t i = 0; i < again.Remaining(); ++i) zeros = zeros && again.CurrPtr()[i] == 0;
++                        why = std::string("shader info unreadable (srt/table plan), ") +
++                              (zeros ? "zero bytes after it" : "other bytes after it");
++                    } else if (perm_idx >= 4096 || perm_hash != hash ||
++                               HashCombine(info2.pgm_hash, perm_idx) != hash) {
++                        why = "hash mismatch";
++                    } else {
++                        why = "binary version " + std::to_string(binary_version) + " for motion " +
++                              std::to_string(info2.hw_stage == HwStage::Vertex &&
++                                             spec2.runtime_info.hw.vs.motion_vectors);
++                    }
++                    break;
++                }
++            } catch (const std::exception& e) {
++                why = std::string("shader record unreadable: ") + e.what();
++                break;
++            }
++            char spv_name[48];
++            std::snprintf(spv_name, sizeof(spv_name), "0x%016llx_%zu.spv", (unsigned long long)info->pgm_hash, perm);
++            const auto spv = ReadAll(dir / spv_name);
++            u32 magic = 0;
++            if (spv.size() >= 20) std::memcpy(&magic, spv.data(), 4);
++            if (spv.size() < 20 || magic != 0x07230203) {
++                why = "no SPIR-V (.spv)";
++                break;
++            }
++            if (u32(info->sw_stage) != (is_compute ? u32(SwStage::Compute) : u32(stage))) {
++                why = "shader of another stage";
++                break;
++            }
++            const auto at = std::make_pair(info->pgm_hash, perm);
++            if (const auto it = loaded.find(at); it != loaded.end()) {
++                spec.info = it->second.info;
++                if (!(it->second == spec)) {
++                    std::string what = "permutation loaded before with another specialization:";
++                    if (!(spec.runtime_info == it->second.runtime_info)) what += " runtime";
++                    if (spec.vs_attribs != it->second.vs_attribs) what += " vs_attribs";
++                    if (spec.fetch_shader_data != it->second.fetch_shader_data) what += " fetch";
++                    if (spec.start != it->second.start) what += " start";
++                    if (spec.bitset != it->second.bitset) what += " bitset";
++                    why = what;
++                    break;
++                }
++            } else {
++                auto& owner = infos[info->pgm_hash];
++                if (!owner) owner = std::move(info);
++                spec.info = owner.get();
++                loaded.emplace(at, std::move(spec));
++            }
++        }
++        if (why.empty()) {
++            ++good;
++        } else {
++            ++reasons[why];
++        }
++    }
++    std::printf("Cache check: %u of %zu pipeline keys would be built at the start\n", good, keys.size());
++    for (const auto& [why, n] : reasons) {
++        std::printf("  %u: %s\n", n, why.c_str());
++    }
 +    return 0;
 +}
 +
@@ -119195,10 +119800,33 @@ index 0000000..6dc0222
 +    const auto catalog_profile = ReadBytes(catalog / "profile.bin");
 +    const auto cache_profile = ReadBytes(cache / "profile.bin");
 +    static constexpr size_t GpuBytes = offsetof(Profile, uniform_constant_buffers);
-+    if (catalog_profile.size() < GpuBytes || cache_profile.size() < GpuBytes ||
-+        std::memcmp(catalog_profile.data(), cache_profile.data(), GpuBytes) != 0) {
++    if (catalog_profile.size() < GpuBytes || cache_profile.size() < GpuBytes) {
 +        std::printf("Shader catalog: made on another kind of GPU than this one; not used\n");
 +        return 5;
++    }
++    // bbport (0.9.37 beta 6): another GPU of the catalog's vendor (an RTX 3080's profile differs
++    // from the RTX 5060 the catalog was made on by one extension) gets it too: every permutation is
++    // compiled with this cache's profile and kept only if its specialization comes out the same,
++    // as for other compile switches. The vendors come from the catalog's gpu.txt and the driver
++    // cache beside this cache (its first start writes it); pipeline state of another vendor (formats
++    // its driver lacks) is not risked.
++    if (std::memcmp(catalog_profile.data(), cache_profile.data(), GpuBytes) != 0) {
++        unsigned catalog_vendor = 0;
++        if (const auto text = ReadBytes(catalog / "gpu.txt"); !text.empty()) {
++            std::sscanf(std::string(text.begin(), text.end()).c_str(), "vendor %x", &catalog_vendor);
++        }
++        u32 cache_vendor = 0;
++        auto driver_cache = cache;
++        driver_cache += ".vkcache";
++        if (const auto blob = ReadBytes(driver_cache); blob.size() >= 16 && std::memcmp(blob.data(), "BPBC", 4) == 0) {
++            std::memcpy(&cache_vendor, blob.data() + 8, 4);
++        }
++        if (catalog_vendor == 0 || catalog_vendor != cache_vendor) {
++            std::printf("Shader catalog: made on another kind of GPU than this one; not used\n");
++            return 5;
++        }
++        std::printf("Shader catalog: made on another GPU of this vendor (%04X); each shader compiled for this one\n",
++                    catalog_vendor);
 +    }
 +    const bool other_switches = catalog_profile != cache_profile;
 +    // The catalog's own files (files.txt, since 0.9.37 beta 3): an older catalog's left beside
@@ -120344,6 +120972,9 @@ index 0000000..6dc0222
 +        });
 +    }
 +#endif
++    if (argc >= 3 && std::strcmp(argv[1], "--check-cache") == 0) {
++        return CheckCache(argv[2]);
++    }
 +    if (argc >= 4 && std::strcmp(argv[1], "--export-catalog") == 0) {
 +        return ExportCatalog(argv[2], argv[3]);
 +    }
@@ -122119,13 +122750,15 @@ index bf0d998..83602a7 100644
 +
  if __name__ == '__main__': unittest.main()
 diff --git a/tests/test_pad.c b/tests/test_pad.c
-index 147d1b7..0308059 100644
+index 147d1b7..8ef9225 100644
 --- a/tests/test_pad.c
 +++ b/tests/test_pad.c
-@@ -4,6 +4,12 @@
+@@ -3,11 +3,18 @@
+ #include <unistd.h>
  #include "../src/runtime_pad.c"
  
- static int capture;
+-static int capture;
++static int capture, menu;
 +// The runtime clock (src/runtime_host.c), not linked into this test.
 +uint64_t host_monotonic_ns(void) {
 +    struct timespec t;
@@ -122135,7 +122768,12 @@ index 147d1b7..0308059 100644
  int bbgpu_overlay_captures_input(void) { return capture; }
  int bbgpu_pc_input(BbPcPad* p,const bool* keys,int n,int gamepad) {
      (void)p;(void)keys;(void)n;(void)gamepad;return 0;
-@@ -27,7 +33,7 @@ int main(void) {
+ }
++int bbgpu_menu_buttons(uint32_t* confirm,uint32_t* back) { *confirm=BTN_CROSS; *back=BTN_CIRCLE; return menu; }
+ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
+     (void)table; (void)count; (void)name;
+     return 0;
+@@ -27,12 +34,12 @@ int main(void) {
      assert(fd>=0);
      close(fd);
      setenv("BB_PAD_FILE",path,1);
@@ -122144,6 +122782,45 @@ index 147d1b7..0308059 100644
      char config[]="/tmp/bbport-pad-config-XXXXXX";
      int config_fd=mkstemp(config);
      assert(config_fd>=0);
+     const char controls[]="upscaler=fsr3\npad.cross=b\npad.circle=a\npad.r2=rightshoulder\n"
+-                          "pad.r1=righttrigger\nkey.cross=X, Space\npad.bogus=a\n";
++                          "pad.r1=righttrigger\nkey.cross=X, Space\npad.bogus=a\npad.menu_back=b\n";
+     assert(write(config_fd,controls,sizeof(controls)-1)==(ssize_t)(sizeof(controls)-1));
+     close(config_fd);
+     setenv("BB_CONFIG",config,1);
+@@ -87,6 +94,11 @@ int main(void) {
+     SDL_UpdateGamepads();
+     assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==480);
+     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_TOUCHPAD,false));
++    /* Everything let go of once: buttons held through the overlay's capture stay hidden until
++     * then (hold_after_capture). */
++    SDL_UpdateJoysticks();
++    SDL_UpdateGamepads();
++    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,true));
+     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,true));
+     assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,32767));
+@@ -94,6 +106,13 @@ int main(void) {
+     SDL_UpdateGamepads();
+     assert(pad_read_state(1,&data)==0);
+     assert(data.buttons==(BTN_CROSS|BTN_R2|BTN_R1) && data.r2==255);
++    /* pad.menu_back=b: in a menu, B goes back (Circle) and no longer gives its world input (Cross). */
++    menu=1;
++    assert(pad_read_state(1,&data)==0);
++    assert((data.buttons & (BTN_CROSS|BTN_CIRCLE))==BTN_CIRCLE);
++    menu=0;
++    /* Still held as the menu closed: no Cross in the world until B is let go of. */
++    assert(pad_read_state(1,&data)==0 && !(data.buttons & (BTN_CROSS|BTN_CIRCLE)));
+     assert(bindings[IN_CROSS].key_count==2 && bindings[IN_CROSS].keys[0]==SDL_SCANCODE_X &&
+            bindings[IN_CROSS].keys[1]==SDL_SCANCODE_SPACE);
+     SDL_CloseJoystick(joystick);
+@@ -103,5 +122,5 @@ int main(void) {
+     SDL_Quit();
+     unlink(path);
+     unlink(config);
+-    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, controls");
++    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, controls, menu buttons");
+ }
 diff --git a/tests/test_patches.py b/tests/test_patches.py
 index b65009f..ab63ba2 100644
 --- a/tests/test_patches.py
@@ -122488,6 +123165,26 @@ index b65009f..ab63ba2 100644
 +
  if __name__ == '__main__':
      unittest.main()
+diff --git a/tests/test_pipeline_archive.cpp b/tests/test_pipeline_archive.cpp
+index 19cff8c..e277052 100644
+--- a/tests/test_pipeline_archive.cpp
++++ b/tests/test_pipeline_archive.cpp
+@@ -39,4 +39,15 @@ int main() {
+     // The SRT walker must check its full size before registering executable code.
+     rejects([](Writer& w) { w.Write(u8{1}); },
+             [](Reader& r) { r.ar.Require(2); });
++
++    // bbport (0.9.37 beta 6): writes past room an earlier Grow left add only what is missing. The
++    // fetch shader data grew the archive first and every later write added its full size on top:
++    // vertex shader records ended in zero bytes the reader took for one more part, and their
++    // pipelines were left out of the start's warm-up.
++    Archive grown;
++    Writer grown_writer{grown};
++    grown.Grow(6);
++    grown_writer.Write(u32{1});
++    grown_writer.Write(u64{2});
++    assert(grown.TakeOff().size() == 12);
+ }
 diff --git a/tests/test_pipeline_compile.cpp b/tests/test_pipeline_compile.cpp
 new file mode 100644
 index 0000000..b14cae2
